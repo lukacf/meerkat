@@ -9062,9 +9062,14 @@ where
         // synchronous segment: this request and every later one see them,
         // and the run's single final boundary commits them like tool
         // results. They land after this boundary's tool results and
-        // refreshed notices, before the next assistant message.
-        let applied_durable =
-            durable.and_then(|accepted| self.apply_durable_boundary_appends(ctx.run_id, accepted));
+        // refreshed notices, before the next assistant message. One boundary
+        // can carry the deliveries of several inputs: each is written in
+        // publication order with its own rows, witness, round-commit binding
+        // and events.
+        let applied_durable = durable
+            .into_iter()
+            .filter_map(|accepted| self.apply_durable_boundary_appends(ctx.run_id, accepted))
+            .collect::<Vec<_>>();
         let base_context_count = self.active_turn_request_contexts.len();
         self.active_turn_request_contexts.extend(boundary_contexts);
         let request_messages = self.llm_messages_for_boundary(!prepared.in_extraction);

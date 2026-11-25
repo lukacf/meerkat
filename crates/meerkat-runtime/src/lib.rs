@@ -711,6 +711,7 @@ pub use meerkat_machine_types::{
     ModelRoutingHandoffRealization, ModelRoutingRealtimePolicy, ResolvedSessionLlmReconfigure,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    TargetSessionLlmInspection,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{
@@ -739,9 +740,11 @@ pub use ops_lifecycle::{
 };
 pub use queued_input_recall::QueuedInputRecall;
 pub use resumed_run_admission::{
+    PENDING_RESUMED_RUN_READ_BOUND, PendingResumedRun, PendingResumedRunRead,
     RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT, RESUMED_RUN_ADMISSION_ATTEMPTS,
-    RESUMED_RUN_ADMISSION_RETRY_DELAY, ResumedRunAdmission, ResumedRunAdmissionDecision,
-    ResumedRunAdmissionRequest,
+    RESUMED_RUN_ADMISSION_REASON_MAX_BYTES, RESUMED_RUN_ADMISSION_RETRY_DELAY, ResumedRunAdmission,
+    ResumedRunAdmissionDecision, ResumedRunAdmissionHeld, ResumedRunAdmissionRequest,
+    ResumedRunAdmissionState, ResumedRunAdmissionUndecided, ResumedRunAdmissionUndecidedCause,
 };
 pub use retained_run::{RetainedRunSettledInput, RetainedRunSettlement};
 pub use run_stop::{RunStopContributor, RunStopReceipt};

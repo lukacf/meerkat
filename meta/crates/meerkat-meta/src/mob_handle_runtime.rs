@@ -78,6 +78,11 @@ mod reserved_identity_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[path = "mob_handle_runtime_launch_guard_tests.rs"]
+mod launch_guard_tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[path = "mob_handle_runtime_created_mob_owner_tests.rs"]
 mod created_mob_owner_tests;
 
@@ -2373,12 +2378,139 @@ impl ImplicitDelegateRetirementOverrides {
 pub(crate) type SharedIdentityRuntimeSlot =
     Arc<std::sync::RwLock<Option<Arc<crate::identity_first::IdentityRuntime>>>>;
 
+/// One mob's identity plane, as the tool surfaces and tasks built before or
+/// beside the mob's identity runtime hold it: the mob's id and the late-bound
+/// slot of the identity runtime attached to that mob. A holder asks it about
+/// "this mob"; it answers for no other.
+///
+/// The launch mob's plane, as the agent mob tools hold it, is also given
+/// the table of the mobs the host serves beside the launch mob: a tool
+/// surface is built by the launch's one factory for a member of any mob of
+/// the host, and finds the plane of its own member's mob there
+/// ([`Self::of_a_host_mob_holding`]).
+#[derive(Clone)]
+pub(crate) struct MobIdentityPlane {
+    mob_id: meerkat_mob::MobId,
+    runtime: SharedIdentityRuntimeSlot,
+    /// The table of the mobs the host serves beside this plane's mob, when
+    /// this is the launch mob's plane as the agent mob tools hold it. Held
+    /// weakly: the runtime owns the table.
+    host_mobs: Option<std::sync::Weak<dyn HostMobEntryWiring>>,
+}
+
+impl MobIdentityPlane {
+    /// The plane of `mob_id` over `runtime`, the slot its identity runtime
+    /// is attached to.
+    pub(crate) fn new(
+        mob_id: impl Into<meerkat_mob::MobId>,
+        runtime: SharedIdentityRuntimeSlot,
+    ) -> Self {
+        Self {
+            mob_id: mob_id.into(),
+            runtime,
+            host_mobs: None,
+        }
+    }
+
+    /// The plane of `mob_id` with no identity runtime attached yet.
+    pub(crate) fn detached(mob_id: impl Into<meerkat_mob::MobId>) -> Self {
+        Self::new(mob_id, Arc::new(std::sync::RwLock::new(None)))
+    }
+
+    /// This plane, given the table of the mobs the host serves beside its
+    /// mob.
+    #[must_use]
+    fn with_host_mobs(
+        mut self,
+        host_mobs: Option<std::sync::Weak<dyn HostMobEntryWiring>>,
+    ) -> Self {
+        self.host_mobs = host_mobs;
+        self
+    }
+
+    /// The plane of the mob the host serves beside this plane's mob whose
+    /// roster names the member of the session `session`, read without
+    /// waiting. `None` for a plane that was given no table of such mobs,
+    /// for a session no member of such a mob holds, and while that mob's
+    /// roster is being written: the caller asks again at its next read.
+    ///
+    /// Which mob a session's member belongs to is that mob's own roster's
+    /// to say, never a tool call's arguments.
+    fn of_a_host_mob_holding(
+        &self,
+        session: &meerkat_core::types::SessionId,
+    ) -> Option<MobIdentityPlane> {
+        self.host_mobs
+            .as_ref()?
+            .upgrade()?
+            .identity_plane_of_session(session)
+    }
+
+    /// The id of this plane's mob.
+    pub(crate) fn mob_id(&self) -> &meerkat_mob::MobId {
+        &self.mob_id
+    }
+
+    /// Whether `mob_id` names this plane's mob.
+    pub(crate) fn is_of_mob(&self, mob_id: &str) -> bool {
+        self.mob_id.as_str() == mob_id
+    }
+
+    /// The late-bound slot, for a holder that reads it at each use.
+    pub(crate) fn slot(&self) -> &SharedIdentityRuntimeSlot {
+        &self.runtime
+    }
+
+    /// The identity runtime attached to this mob now.
+    pub(crate) fn attached(&self) -> Option<Arc<crate::identity_first::IdentityRuntime>> {
+        self.runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The identity runtime that serves the members of `mob_id`: the one
+    /// attached to this plane, when `mob_id` is this plane's mob.
+    pub(crate) fn attached_for(
+        &self,
+        mob_id: &str,
+    ) -> Option<Arc<crate::identity_first::IdentityRuntime>> {
+        if self.is_of_mob(mob_id) {
+            self.attached()
+        } else {
+            None
+        }
+    }
+
+    /// Attach `runtime` as this mob's identity runtime, or detach with
+    /// `None`.
+    pub(crate) fn set_attached(
+        &self,
+        runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
+    ) {
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime;
+    }
+
+    /// Detach this mob's identity runtime, answering the one that was
+    /// attached.
+    pub(crate) fn detach(&self) -> Option<Arc<crate::identity_first::IdentityRuntime>> {
+        self.runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
 struct AutoWireParentMobToolsFactory {
     inner: Arc<dyn meerkat_core::service::MobToolsFactory>,
     implicit_delegate_retirement_overrides: ImplicitDelegateRetirementOverrides,
     console_spawn_sink: SharedConsoleSpawnSinkSlot,
-    identity_runtime: SharedIdentityRuntimeSlot,
-    protected_mob_id: String,
+    /// The identity plane of the mob these tool surfaces serve (see
+    /// [`AutoWireParentMobToolDispatcher::identity_plane`]).
+    identity_plane: MobIdentityPlane,
     /// The launch's member auth binding (see
     /// [`AutoWireParentMobToolDispatcher::member_auth_binding`]).
     member_auth_binding: Option<meerkat_core::AuthBindingRef>,
@@ -2407,6 +2539,11 @@ struct MobToolCaller {
     /// reads it here (see [`Self::member_in`]). Whom the member is private
     /// to is never kept: see [`Self::private_now`].
     member: Arc<std::sync::OnceLock<meerkat_mob::AgentIdentity>>,
+    /// The identity plane of the mob this session's member belongs to,
+    /// when that is a mob the host serves beside the launch mob, once that
+    /// mob's roster named the member. Kept like [`Self::member`]: a session
+    /// belongs to one member of one mob for its whole life.
+    host_mob_plane: Arc<std::sync::OnceLock<MobIdentityPlane>>,
 }
 
 /// The policy denial code of a council a member private to a person asks
@@ -2425,6 +2562,23 @@ impl MobToolCaller {
             private_owners,
             state,
             member: Arc::default(),
+            host_mob_plane: Arc::default(),
+        }
+    }
+
+    /// The identity plane of the mob the calling session's member belongs
+    /// to: `launch`, the launch mob's plane the tool surface was built
+    /// with, unless a mob the host serves beside the launch mob holds the
+    /// member, whose own plane it then is. Read without waiting, and kept
+    /// once such a mob's roster named the member. The mob is the one whose
+    /// roster names the session, never one a call's arguments name.
+    fn identity_plane(&self, launch: &MobIdentityPlane) -> MobIdentityPlane {
+        if let Some(plane) = self.host_mob_plane.get() {
+            return plane.clone();
+        }
+        match launch.of_a_host_mob_holding(&self.session_id) {
+            Some(plane) => self.host_mob_plane.get_or_init(|| plane).clone(),
+            None => launch.clone(),
         }
     }
 
@@ -2603,8 +2757,7 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
                 .implicit_delegate_retirement_overrides
                 .clone(),
             console_spawn_sink: Arc::clone(&self.console_spawn_sink),
-            identity_runtime: Arc::clone(&self.identity_runtime),
-            protected_mob_id: self.protected_mob_id.clone(),
+            identity_plane: self.identity_plane.clone(),
             spawner_comms_name,
             member_auth_binding: self.member_auth_binding.clone(),
             member_auth_binding_recorded: self.member_auth_binding_recorded.clone(),
@@ -2614,16 +2767,63 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
     }
 }
 
+/// Which mob's console a spawn by a tool surface's member is registered
+/// with ([`AutoWireParentMobToolDispatcher::console_of_the_spawner`]).
+enum SpawnerConsole {
+    /// The launch mob's: the member stands in the launch mob or in a mob
+    /// below it, or the surface serves no member.
+    OfTheLaunchMob,
+    /// The console of this mob, which the launch composes beside its launch
+    /// mob: the member stands in it or in a mob below it.
+    OfTheMob(meerkat_mob::MobId),
+    /// The mob of the host the member stands below could not be read.
+    NotKnown,
+}
+
+/// How many mobs above a spawning member's mob are read for the mob of the
+/// host it stands below: a mob a member made, a mob a member of that mob
+/// made, and so on. A chain longer than this is read as not known.
+const MOBS_ABOVE_A_SPAWNER: usize = 16;
+
+/// Where no record says which mob of the host a spawning member stands
+/// below: the launch mob's console only on a host whose mob set lists no
+/// mob but its default one (managed, held, quarantined or not loaded). On
+/// a host whose set lists another mob, or whose set cannot be listed, the
+/// answer is not known.
+async fn console_where_no_record_says(
+    state: &meerkat_mob_mcp::MobMcpState,
+    launch_mob: &meerkat_mob::MobId,
+) -> SpawnerConsole {
+    let Ok(listed) = state.mob_inventory().await else {
+        return SpawnerConsole::NotKnown;
+    };
+    let lists_another = listed
+        .managed
+        .iter()
+        .map(|(mob_id, _)| mob_id)
+        .chain(listed.held.iter().map(|(mob_id, _)| mob_id))
+        .chain(listed.quarantined.iter().map(|mob| &mob.mob_id))
+        .chain(listed.dormant.iter())
+        .any(|mob_id| mob_id != launch_mob);
+    if lists_another {
+        SpawnerConsole::NotKnown
+    } else {
+        SpawnerConsole::OfTheLaunchMob
+    }
+}
+
 struct AutoWireParentMobToolDispatcher {
     inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
     implicit_delegate_retirement_overrides: ImplicitDelegateRetirementOverrides,
     /// Late-bound console sink; empty until a console-bearing runtime
     /// installs one, in which case successful spawns project into it.
     console_spawn_sink: SharedConsoleSpawnSinkSlot,
-    /// Identity authority attaches after the raw mob tool factory is built.
-    /// Every dispatcher reads this shared slot at call time.
-    identity_runtime: SharedIdentityRuntimeSlot,
-    protected_mob_id: String,
+    /// The identity plane of the mob this tool surface serves. Identity
+    /// authority attaches after the raw mob tool factory is built, so every
+    /// dispatcher reads the plane's shared slot at call time. While an
+    /// identity runtime is attached, the names it owns are not the raw
+    /// member tools' to change, and this mob is not theirs to destroy.
+    identity_plane: MobIdentityPlane,
     /// Comms name of the agent owning this tool surface — identifies the
     /// spawning parent for console lineage.
     spawner_comms_name: Option<String>,
@@ -2661,8 +2861,7 @@ pub(crate) fn agent_mob_tool_wrapper_for_test(
         inner,
         implicit_delegate_retirement_overrides: overrides,
         console_spawn_sink: new_console_spawn_sink_slot(),
-        identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-        protected_mob_id: String::new(),
+        identity_plane: MobIdentityPlane::detached(String::new()),
         spawner_comms_name: None,
         member_auth_binding: None,
         member_auth_binding_recorded: None,
@@ -2706,8 +2905,7 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_with_owners_for_test(
         inner,
         implicit_delegate_retirement_overrides: overrides,
         console_spawn_sink: new_console_spawn_sink_slot(),
-        identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-        protected_mob_id: String::new(),
+        identity_plane: MobIdentityPlane::detached(String::new()),
         spawner_comms_name: None,
         member_auth_binding: None,
         member_auth_binding_recorded: None,
@@ -2719,6 +2917,50 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_with_owners_for_test(
                 .agent_mob_mcp_state()
                 .as_ref()
                 .map_or_else(std::sync::Weak::new, Arc::downgrade),
+        )),
+    })
+}
+
+/// [`agent_mob_tool_wrapper_as_member_for_test`] for the member whose
+/// comms name is `comms_name`, with the console sink slot the tool surfaces
+/// of `runtime`'s launch hold: a spawn `inner` answers is registered with
+/// the console as a spawn by that member's agent is. With
+/// `its_mob_can_be_read` false the surface's mob tool state is gone, as
+/// when its host is stopping: nothing of its member's mob can be read.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_with_console_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+    runtime: &MobRuntime,
+    session: meerkat_core::types::SessionId,
+    comms_name: &str,
+    its_mob_can_be_read: bool,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    let state = if its_mob_can_be_read {
+        runtime
+            .agent_mob_mcp_state()
+            .as_ref()
+            .map_or_else(std::sync::Weak::new, Arc::downgrade)
+    } else {
+        std::sync::Weak::new()
+    };
+    Arc::new(AutoWireParentMobToolDispatcher {
+        inner,
+        implicit_delegate_retirement_overrides: overrides,
+        console_spawn_sink: runtime
+            .process
+            .console_spawn_sink_slot
+            .clone()
+            .unwrap_or_else(new_console_spawn_sink_slot),
+        identity_plane: MobIdentityPlane::detached(String::new()),
+        spawner_comms_name: Some(comms_name.to_string()),
+        member_auth_binding: None,
+        member_auth_binding_recorded: None,
+        realm_profiles: None,
+        caller: Some(MobToolCaller::new(
+            session,
+            runtime.private_owners().clone(),
+            state,
         )),
     })
 }
@@ -2911,12 +3153,14 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     crate::console_spawn::console_row_label_refusal(key),
                 ));
             }
-            let identity_runtime = self
-                .identity_runtime
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(identity_runtime) = identity_runtime {
+            // The names an identity runtime owns are not the raw member
+            // tools' to change, and its mob is not theirs to destroy: the
+            // launch mob's, and the caller's own mob's when the caller is a
+            // member of a mob the host serves beside the launch mob.
+            for plane in self.guarded_identity_planes() {
+                let Some(identity_runtime) = plane.attached() else {
+                    continue;
+                };
                 for (field, alias) in raw_member_tool_arguments(call.name, &args) {
                     let alias = crate::member_comms_id::runtime_alias_str(&alias).into_owned();
                     match identity_runtime.identity_for_member_mutation(&alias).await {
@@ -2944,14 +3188,16 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     }
                 }
                 if call.name == "mob_destroy"
-                    && args.get("mob_id").and_then(Value::as_str)
-                        == Some(self.protected_mob_id.as_str())
+                    && args
+                        .get("mob_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|mob_id| plane.is_of_mob(mob_id))
                 {
                     return Err(meerkat_core::ToolError::invalid_arguments(
                         call.name,
                         format!(
                             "mob '{}' is owned by the attached IdentityRuntime and cannot be destroyed through raw agent tools",
-                            self.protected_mob_id
+                            plane.mob_id()
                         ),
                     ));
                 }
@@ -3047,8 +3293,7 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             inner: outcome.into_dispatcher(),
             implicit_delegate_retirement_overrides: owned.implicit_delegate_retirement_overrides,
             console_spawn_sink: owned.console_spawn_sink,
-            identity_runtime: owned.identity_runtime,
-            protected_mob_id: owned.protected_mob_id,
+            identity_plane: owned.identity_plane,
             spawner_comms_name: owned.spawner_comms_name,
             member_auth_binding: owned.member_auth_binding,
             member_auth_binding_recorded: owned.member_auth_binding_recorded,
@@ -3133,20 +3378,41 @@ fn raw_member_tool_arguments(tool_name: &str, args: &Value) -> Vec<(&'static str
 }
 
 impl AutoWireParentMobToolDispatcher {
-    /// The identity tools of the runtime's mob: its identity family over the
-    /// identity runtime's own handle to the mob, while the family takes
-    /// changes (the launch has an identity policy, and it is enabled).
+    /// The identity plane of the mob this surface's member belongs to: the
+    /// launch mob's plane the surface was built with, or, for a member of a
+    /// mob the host serves beside the launch mob, that mob's own
+    /// ([`MobToolCaller::identity_plane`]). A surface built for no member
+    /// answers the launch mob's.
+    fn callers_identity_plane(&self) -> MobIdentityPlane {
+        match self.caller.as_ref() {
+            Some(caller) => caller.identity_plane(&self.identity_plane),
+            None => self.identity_plane.clone(),
+        }
+    }
+
+    /// The identity planes whose names the raw member tools leave alone
+    /// and whose mobs they do not destroy: the launch mob's, and the
+    /// caller's own mob's when that is another mob.
+    fn guarded_identity_planes(&self) -> Vec<MobIdentityPlane> {
+        let of_the_caller = self.callers_identity_plane();
+        if of_the_caller.is_of_mob(self.identity_plane.mob_id().as_str()) {
+            vec![of_the_caller]
+        } else {
+            vec![self.identity_plane.clone(), of_the_caller]
+        }
+    }
+
+    /// The identity tools of the mob this surface's member belongs to: its
+    /// identity family over the identity runtime's own handle to the mob,
+    /// while the family takes changes (the launch has an identity policy,
+    /// and it is enabled).
     /// `None` on a launch without an enabled policy, whose family serves
     /// reads only and refuses every change, before the identity authority
     /// is installed and once the mob stopped. Nothing here keeps what it
     /// reads: the identity runtime's own answer is the only fact that the
     /// tools exist.
     fn identity_tools(&self) -> Option<crate::identity_creation::IdentityAgentTools> {
-        let identity_runtime = self
-            .identity_runtime
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
+        let identity_runtime = self.callers_identity_plane().attached()?;
         if !identity_runtime.identity_changes_enabled() {
             return None;
         }
@@ -3430,10 +3696,38 @@ impl AutoWireParentMobToolDispatcher {
             &outcome.result.text_content(),
             self.spawner_comms_name.as_deref(),
         );
+        if seeds.is_empty() {
+            return;
+        }
+        // A spawn is registered with the console of the mob of the host its
+        // spawning member stands in or below, and with no other mob's: an
+        // agent of one mob changes nothing of what another mob's console
+        // holds for a name.
+        let sink = match Box::pin(self.console_of_the_spawner()).await {
+            SpawnerConsole::OfTheLaunchMob => sink,
+            SpawnerConsole::OfTheMob(mob_id) => sink.of_mob(Some(&mob_id)),
+            SpawnerConsole::NotKnown => {
+                tracing::warn!(
+                    tool = tool_name,
+                    "a spawn is not registered with a console: the mob of the host its \
+                     spawning member stands below could not be read"
+                );
+                return;
+            }
+        };
         // The dispatching session is the spawning incarnation: captured
         // console lineage binds to it rather than to the parent's name.
         let spawning_session = context.origin_session_id().map(ToString::to_string);
+        // The spawner as the console names it: its mob and name when it
+        // sits in a mob other than the runtime's own.
+        let spawner = self
+            .spawner_comms_name
+            .as_deref()
+            .and_then(|comms_name| sink.spawner_console_name(comms_name));
         for seed in &mut seeds {
+            if seed.spawned_by.is_some() {
+                seed.spawned_by = spawner.clone();
+            }
             if seed.spawned_by.is_some() {
                 seed.spawned_by_session = spawning_session.clone();
             }
@@ -3466,6 +3760,103 @@ impl AutoWireParentMobToolDispatcher {
                     .await;
             }
         }
+    }
+
+    /// Which mob's console a spawn by this surface's member is registered
+    /// with: the mob of the host the member stands in or below.
+    ///
+    /// A mob set that was told no default mob is no host composition and
+    /// has no mob beside its launch mob: the launch mob's console, with no
+    /// read. Otherwise the records decide. The member's mob is the one
+    /// whose roster holds this surface's session. The launch mob is the
+    /// mob whose id is the set's default mob. A mob the launch named beside
+    /// its launch mob is that mob, and so is any other mob whose creation
+    /// record says the host created it, named in this process or not. A
+    /// mob a member created is what the mob of that member is, read from
+    /// its creation record, one mob after another upward. A mob a session
+    /// that is no member's created, and one created before creations were
+    /// recorded, is the launch mob's, as on a host of one mob. A surface
+    /// built for no member, and a session no roster of the set holds, is
+    /// the launch's own.
+    ///
+    /// Where a read fails or a record does not say (the session or the
+    /// loaded mobs cannot be read, a creation record cannot be read, names
+    /// several rosters or is of a kind this build does not know, the mobs
+    /// above are more than [`MOBS_ABOVE_A_SPAWNER`]), the mob set's list
+    /// decides ([`console_where_no_record_says`]): on a host whose set
+    /// lists no mob but its default one, the launch mob's console, so such
+    /// a host keeps every registration; on a host whose set lists another
+    /// mob the answer is not known and the spawn is registered with no
+    /// console. Where the mob set itself is gone with its host, it cannot
+    /// be asked, and what this process names decides: the launch mob's
+    /// console on a launch that names no mob beside its launch mob at that
+    /// moment (it built none since this process started, or every id it
+    /// named was withdrawn since), and no console on a launch that names
+    /// one.
+    ///
+    /// Nothing is loaded for this: a mob that is not loaded is read from
+    /// what the set keeps of its creation, and where the set has not read
+    /// its store yet, from that store's creation record in one open
+    /// ([`meerkat_mob_mcp::MobMcpState::unloaded_mob_creation`]).
+    async fn console_of_the_spawner(&self) -> SpawnerConsole {
+        let Some(caller) = self.caller.as_ref() else {
+            return SpawnerConsole::OfTheLaunchMob;
+        };
+        let beside_the_launch_mob = caller.private_owners.hosted_mobs();
+        let Some(state) = caller.state.upgrade() else {
+            return if beside_the_launch_mob.names_none() {
+                SpawnerConsole::OfTheLaunchMob
+            } else {
+                SpawnerConsole::NotKnown
+            };
+        };
+        let Some(launch_mob) = state.default_mob_id().cloned() else {
+            return SpawnerConsole::OfTheLaunchMob;
+        };
+        let mut mob_id = match state.member_for_bridge_session(&caller.session_id).await {
+            Ok(Some((mob_id, _))) => mob_id,
+            Ok(None) => return SpawnerConsole::OfTheLaunchMob,
+            Err(_) => return console_where_no_record_says(&state, &launch_mob).await,
+        };
+        let Ok(loaded) = state.mob_handles_snapshot().await else {
+            return console_where_no_record_says(&state, &launch_mob).await;
+        };
+        for _ in 0..MOBS_ABOVE_A_SPAWNER {
+            if mob_id == launch_mob {
+                return SpawnerConsole::OfTheLaunchMob;
+            }
+            if beside_the_launch_mob.holds(mob_id.as_str()) {
+                return SpawnerConsole::OfTheMob(mob_id);
+            }
+            let created = match loaded.iter().find(|(id, _)| *id == mob_id) {
+                Some((_, handle)) => handle.provenance().await.ok(),
+                // Not loaded: what the set keeps of its creation, or one
+                // read of its store's creation record. The mob stays not
+                // loaded.
+                None => state.unloaded_mob_creation(&mob_id).await.ok().flatten(),
+            };
+            match created {
+                Some(
+                    meerkat_mob::MobProvenance::Member { parent_mob_id, .. }
+                    | meerkat_mob::MobProvenance::OperatorMember { parent_mob_id, .. },
+                ) => mob_id = parent_mob_id,
+                // The host created it and it is not the launch mob: a mob
+                // beside the launch mob, whether this process named it yet
+                // or not.
+                Some(meerkat_mob::MobProvenance::Host) => {
+                    return SpawnerConsole::OfTheMob(mob_id);
+                }
+                Some(
+                    meerkat_mob::MobProvenance::Session { .. }
+                    | meerkat_mob::MobProvenance::OperatorSession { .. }
+                    | meerkat_mob::MobProvenance::Unrecorded,
+                ) => return SpawnerConsole::OfTheLaunchMob,
+                // A record of several rosters, a kind this build does not
+                // know, and no record that can be read.
+                Some(_) | None => return console_where_no_record_says(&state, &launch_mob).await,
+            }
+        }
+        console_where_no_record_says(&state, &launch_mob).await
     }
 
     async fn register_idle_retire_override_from_outcome(
@@ -4027,6 +4418,9 @@ fn install_agent_mob_tools(
             None,
             private_owners,
             personal_accounts,
+            // The table of the launch's other mobs is known at the launch's
+            // preparation, which installs the tools again with it.
+            None,
         )?;
     let install = AgentMobToolsInstall {
         slot,
@@ -4150,6 +4544,7 @@ fn install_agent_mob_tools_with(
     replaced: Option<meerkat::ContinuationBindingGeneration>,
     private_owners: &crate::private_owners::PrivateOwners,
     personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
+    host_mobs: Option<std::sync::Weak<dyn HostMobEntryWiring>>,
 ) -> Result<
     (
         Arc<meerkat_mob_mcp::MobMcpState>,
@@ -4242,8 +4637,8 @@ fn install_agent_mob_tools_with(
         inner,
         implicit_delegate_retirement_overrides: implicit_delegate_retirement_overrides.clone(),
         console_spawn_sink: Arc::clone(&console_spawn_sink),
-        identity_runtime: Arc::clone(&identity_runtime),
-        protected_mob_id: definition.id.to_string(),
+        identity_plane: MobIdentityPlane::new(definition.id.clone(), Arc::clone(&identity_runtime))
+            .with_host_mobs(host_mobs),
         member_auth_binding: child_policy.member_auth_binding,
         member_auth_binding_recorded: child_policy.member_auth_binding_recorded,
         realm_profiles: state.realm_profile_store().cloned(),
@@ -7662,11 +8057,31 @@ pub struct MobBootstrapSpec {
     /// declares a storage census ([`Self::resolved_storage`]), reports them
     /// in a degraded `mob_composition` slot.
     pub candidate_definition: crate::mob_composition_manifest::CandidateDefinition,
-    /// What [`Self::read_launch_definition`] judged of [`Self::storage`]
-    /// before preparation. Preparation applies that judgement and binds the
-    /// resume to its snapshot instead of judging again; `None` when nothing
-    /// judged it.
+    /// What [`Self::read_launch_definition`] found before preparation. For
+    /// an opened [`Self::storage`], preparation applies that judgement and
+    /// binds the resume to its snapshot instead of judging again. For a
+    /// declared store preparation reads and judges again itself, and holds
+    /// its own read to what was found here. `None` when nothing was read.
     launch_definition_read: Option<LaunchDefinitionRead>,
+    /// The launch store as a declared place ([`Self::declared`]): the launch
+    /// declares its mob to the mob set, and the set opens the store in
+    /// preparation and creates or loads the mob. `None` for an opened
+    /// [`Self::storage`], which preparation builds the mob over itself.
+    declared_store: Option<crate::mob_composition_manifest::DeclaredMobStore>,
+    /// The launch's own open of its declared store, for its read of the
+    /// store before its mob set exists ([`Self::read_launch_definition`]):
+    /// the open the launch was handed ([`Self::with_declared_store_opened`])
+    /// or, when it was handed none, the one that read makes of the declared
+    /// file. Preparation closes it before it builds the mob set.
+    declared_store_opened: Option<MobStorage>,
+    /// The launch's composition of the mobs it hosts, once preparation
+    /// built it ([`Self::finalize_agent_mob_tools`]): the mob set this
+    /// launch declares its mob to is given this value itself.
+    launch_composition: Option<Arc<LaunchMobComposition>>,
+    /// Where the launch's composition asks for the member wiring of a mob the
+    /// host serves beside its default mob
+    /// ([`Self::with_host_mob_entry_wiring`]).
+    host_mob_entry_wiring: Option<Arc<dyn HostMobEntryWiring>>,
     pub session_service: Arc<dyn MobSessionService>,
     /// The host config the member builder resolves models with: the image
     /// checks judge a member's model the way Core's model registry does,
@@ -7701,7 +8116,8 @@ pub struct MobBootstrapSpec {
     pub(crate) spawn_member_customizer: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
     /// The launch's member auth binding (`runtime_options.member_auth_binding`
     /// on the stdio gateway), set with [`Self::with_member_auth_binding`]. The
-    /// root mob gets it through `spawn_member_customizer`; this copy is what
+    /// launch's composition builds the spawn customizer of every mob it
+    /// hosts from it; this copy is also what
     /// the agent mob-tool state forwards to the child mobs agents create, and
     /// what the runtime keeps to refuse identity adoption under it.
     pub(crate) member_auth_binding: Option<meerkat_core::AuthBindingRef>,
@@ -7830,10 +8246,10 @@ pub struct MobBootstrapSpec {
     /// Empties this spec's builder tool slots once nothing holds the
     /// composition (see [`CompositionRelease`]).
     pub(crate) composition_release: CompositionRelease,
-    /// Cross-process admission sidecar path — set when the workgraph store is
-    /// SQLite-backed (shareable by a gateway + library-mode runtime on one
-    /// state dir), `None` for memory-backed runtimes (single-process by
-    /// construction).
+    /// Cross-process admission sidecar path - set when the workgraph store is
+    /// SQLite-backed (a file a process outside this runtime's state
+    /// directory claim can open too), `None` for memory-backed runtimes
+    /// (single-process by construction).
     pub(crate) workgraph_admission_sidecar: Option<PathBuf>,
     /// Whether bootstrap migrates member-bound attention bindings that
     /// predate meerkat's mob-realm rescoping (see
@@ -7895,6 +8311,14 @@ pub struct MobBootstrapSpec {
     /// mob's id (`crate::mob_schedules_release`); see
     /// [`Self::with_mob_schedules_declared`].
     pub(crate) mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
+    /// The late-bound release of what the launch's announcements keep
+    /// under a mob's id (`crate::mob_announcements_release`); see
+    /// [`Self::with_mob_announcements_declared`].
+    pub(crate) mob_announcements_release: crate::mob_announcements_release::MobAnnouncementsSlot,
+    /// The late-bound release of the agent memory the launch keeps for the
+    /// mobs it hosts beside its launch mob (`crate::mob_memory_release`);
+    /// see [`Self::with_hosted_mob_memory_declared`].
+    pub(crate) mob_memory_release: crate::mob_memory_release::MobMemorySlot,
     /// Late-bound personal accounts the base session-service wrapper
     /// classifies each member build's personal MCP servers with
     /// (`crate::personal_accounts`); see [`Self::with_personal_mcp_accounts`].
@@ -7938,6 +8362,66 @@ impl MobBootstrapSpec {
             session_service,
             refusing_unresolved_document_markers(None),
         )
+    }
+
+    /// [`Self::new`] over a mob store that is declared and not opened
+    /// ([`crate::mob_composition_manifest::declared_mob_store`], or
+    /// [`crate::mob_composition_manifest::DeclaredMobStore::in_memory`]).
+    ///
+    /// The launch declares its mob to its mob set as the host's default mob,
+    /// and the set owns the mob like every mob it hosts: in preparation it
+    /// opens the store, creates the mob there when the store holds none and
+    /// loads it when it holds one, lists it, and quarantines a store that
+    /// cannot be read. Nothing of the set runs before preparation. The
+    /// launch gives the set what it gives the builder of an opened storage's
+    /// mob, as the host's composition, and it still resumes its mob itself
+    /// when the mob reads `Stopped`. No handle built outside the set is
+    /// inserted under the mob's id, and the set refuses one.
+    ///
+    /// The mob set is the one the agent mob tools install
+    /// ([`Self::with_agent_mob_tools`]). A spec over a declared store
+    /// without them holds a mob set of its own, which no agent tool
+    /// publishes, and declares its mob to that one: every launch over a
+    /// declared store has one mob set ([`MobRuntime::agent_mob_mcp_state`]).
+    /// [`Self::storage`] is not the mob's store here and nothing reads it.
+    pub fn declared(
+        definition: MobDefinition,
+        store: crate::mob_composition_manifest::DeclaredMobStore,
+        session_service: Arc<dyn MobSessionService>,
+    ) -> Self {
+        let mut spec = Self::new(definition, MobStorage::in_memory(), session_service)
+            .with_mob_storage_provenance(store.provenance().clone());
+        spec.declared_store = Some(store);
+        spec
+    }
+
+    /// Hand a spec over a declared store in a file the storage the launch
+    /// opened at that file itself, as a launch over an opened storage opens
+    /// it, for what the launch reads of the store before its mob set exists
+    /// ([`Self::read_launch_definition`]). A launch that hands none has that
+    /// read open the file itself. Either way it is the launch's own open and
+    /// never the mob set's: preparation closes it first, then builds the mob
+    /// set, which opens the file again and reads it as the authority.
+    #[must_use]
+    pub(crate) fn with_declared_store_opened(mut self, opened: MobStorage) -> Self {
+        self.declared_store_opened = Some(opened);
+        self
+    }
+
+    /// Say where the member wiring of a mob the host serves beside its
+    /// default mob is asked for ([`HostMobEntryWiring`]): the mob's entry
+    /// owns what prepares and customizes its members' builds, and the
+    /// launch's composition asks for it by mob id when the mob set builds
+    /// that mob. Without one, such a mob is built with no member wiring;
+    /// it is never given the default mob's. A runtime installs its table of
+    /// the other mobs' entries here.
+    #[must_use]
+    pub(crate) fn with_host_mob_entry_wiring(
+        mut self,
+        entries: Arc<dyn HostMobEntryWiring>,
+    ) -> Self {
+        self.host_mob_entry_wiring = Some(entries);
+        self
     }
 
     /// Declare the user-global config root used by the caller's session
@@ -7990,11 +8474,25 @@ impl MobBootstrapSpec {
         let personal_accounts_slot =
             crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
+        // The record is told which mob is the launch's own here, where it
+        // is made: every spec passes this function with its launch mob's
+        // definition, before any mob is built. Which memory a member is in
+        // is asked of the record for the mob its build is bound to, by
+        // both memory slots: the launch mob's members and the members of
+        // the mobs they created are in the launch's, a mob this launch
+        // composes beside its launch mob has a memory of its own.
+        private_owners.bind_launch_mob(definition.id.as_str());
+        dispatch_taint_slot.decide_by(private_owners.clone());
+        side_chat_memory_slot.decide_by(private_owners.clone());
         // The WorkGraph tools a member build carries go behind this
         // runtime's admission (`MemberWorkGraphTools`): the runtime binds
         // the mob's scope before it builds a member and fills the admission
         // once it has its mob handle.
         let member_workgraph_tools = crate::workgraph_wiring::MemberWorkGraphTools::default();
+        // The admission those tools take is the launch mob's: the member
+        // tools are told the mobs this launch composes beside it, whose
+        // members it does not judge.
+        member_workgraph_tools.refuse_guarded_calls_of_members_of(private_owners.hosted_mobs());
         // The `ask_user` tool is mounted last, over the tools every other
         // hook left on the build.
         let ask_user_slot = crate::ask_user::AskUserSlot::default();
@@ -8024,6 +8522,10 @@ impl MobBootstrapSpec {
             composition_authority: crate::mob_composition_manifest::CompositionAuthority::default(),
             candidate_definition: crate::mob_composition_manifest::CandidateDefinition::default(),
             launch_definition_read: None,
+            declared_store: None,
+            declared_store_opened: None,
+            launch_composition: None,
+            host_mob_entry_wiring: None,
             mob_storage_provenance: crate::mob_composition_manifest::MobStorageProvenance::default(
             ),
             session_service,
@@ -8091,6 +8593,9 @@ impl MobBootstrapSpec {
             ask_user_slot,
             schedule_target_registry: None,
             mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
+            mob_announcements_release:
+                crate::mob_announcements_release::MobAnnouncementsSlot::default(),
+            mob_memory_release: crate::mob_memory_release::MobMemorySlot::default(),
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -8128,6 +8633,38 @@ impl MobBootstrapSpec {
     #[must_use]
     pub fn with_mob_schedules_declared(self) -> Self {
         self.mob_schedules.declare();
+        self
+    }
+
+    /// Say that this launch composes announcements, before its runtime is
+    /// built. A mob the launch's mob set creates must find nothing an
+    /// earlier mob of its id left with the announcements, so from here on
+    /// such a create is refused until the announcements' owner is attached
+    /// to the runtime and has handed over its release of a mob. A launch
+    /// that says nothing has no announcements to release.
+    #[must_use]
+    pub fn with_mob_announcements_declared(self) -> Self {
+        self.mob_announcements_release.declare();
+        self
+    }
+
+    /// Say that this launch keeps agent memory for the mobs it hosts beside
+    /// its launch mob, before its runtime is built. A mob the launch's mob
+    /// set creates must start with nothing of the memory an earlier mob of
+    /// its id left, so from here on such a create is refused until the
+    /// launch has handed its memory over to the runtime, which binds its
+    /// release of a mob's memory. A launch that says nothing keeps no such
+    /// memory and has none to release.
+    ///
+    /// The release is bound by this crate's own launches alone, where they
+    /// open their bundled memory store (the stdio gateway after it declared
+    /// here; the builder binds without declaring). Nothing outside the
+    /// crate can bind it: a host that declares here on a spec whose runtime
+    /// opens no bundled store is refused every create of a mob beside its
+    /// launch mob, for as long as that runtime lives.
+    #[must_use]
+    pub fn with_hosted_mob_memory_declared(self) -> Self {
+        self.mob_memory_release.declare();
         self
     }
 
@@ -8298,7 +8835,7 @@ impl MobBootstrapSpec {
             // No `store_path` in this builder path, so no durable council
             // store: councils stay process-bound, exactly as before.
             None,
-            self.storage.forked_participant_store().cloned(),
+            self.participant_store_handed_to_the_set(),
             delivery,
             &self.private_owners,
             &self.personal_accounts_slot,
@@ -8346,10 +8883,15 @@ impl MobBootstrapSpec {
     /// bootstraps, before the agent mob-tool state is shared, so it may be
     /// set before or after [`with_agent_mob_tools`](Self::with_agent_mob_tools).
     /// With [`ChildMobStorage::Durable`](crate::ChildMobStorage::Durable),
-    /// bootstrap claims the layout's child root exclusively, restores every
-    /// persisted child before the runtime reports ready, and fails with
+    /// bootstrap claims the layout's child root exclusively, takes the
+    /// census of the persisted children before the runtime reports ready,
+    /// and fails with
     /// [`MobRuntimeError::ChildMobStorage`] rather than falling back to
-    /// memory. [`ChildMobStorage::ProcessBound`](crate::ChildMobStorage::ProcessBound)
+    /// memory. A launch that declares its mob to its mob set
+    /// ([`Self::declared`]) loads at start only the children whose members
+    /// hold work, and each other child when something addresses it; any
+    /// other launch restores every persisted child before the runtime
+    /// reports ready. [`ChildMobStorage::ProcessBound`](crate::ChildMobStorage::ProcessBound)
     /// never opens the child root.
     ///
     /// Without a selection, child mobs are durable under the layout recorded
@@ -8434,10 +8976,12 @@ impl MobBootstrapSpec {
     /// Serialize admissions cross-process through the sidecar lock database
     /// under `state_dir` (see
     /// [`workgraph_admission_sidecar_path`](crate::workgraph_admission::workgraph_admission_sidecar_path)).
-    /// Call for SQLite-backed workgraph stores — the store file is shareable
-    /// by a gateway and a library-mode runtime on one state dir, and each
-    /// process's in-process gate cannot see the other. Memory-backed
-    /// runtimes must not set this.
+    /// Call for SQLite-backed workgraph stores: a spec composed by hand takes
+    /// no claim on the state directory (the persistent constructors claim
+    /// it, other than under host-store authority, and a second runtime there
+    /// is refused, see `crate::state_dir_claim`), so another process can
+    /// have the store file open, and each process's in-process gate cannot
+    /// see the other. Memory-backed runtimes must not set this.
     #[must_use]
     pub fn with_workgraph_admission_sidecar(mut self, state_dir: &Path) -> Self {
         self.workgraph_admission_sidecar =
@@ -8590,6 +9134,396 @@ impl MobBootstrapSpec {
         }
     }
 
+    /// The participant custody the agent mob-tool state is handed: the one
+    /// an opened [`Self::storage`] carries. `None` for a declared store:
+    /// the mob set it is declared to holds the host's one participant table
+    /// itself (the declared file's, or its own for a store in memory), and
+    /// is handed none.
+    fn participant_store_handed_to_the_set(
+        &self,
+    ) -> Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>> {
+        if self.declared_store.is_some() {
+            return None;
+        }
+        self.storage.forked_participant_store().cloned()
+    }
+
+    /// The mob set this launch declared its mob to: the agent mob-tool state
+    /// in its final form, for a launch over a declared store. `None` before
+    /// preparation builds that state, and for an opened storage.
+    fn declared_mob_set(&self) -> Option<&Arc<meerkat_mob_mcp::MobMcpState>> {
+        self.agent_mob_mcp_state
+            .as_ref()
+            .filter(|state| state.default_mob_id().is_some())
+    }
+
+    /// The host's composition as the mob set this launch declares its mob
+    /// to holds it, for the rows that ask it what the set asks. `None`
+    /// before preparation built it.
+    #[cfg(test)]
+    fn host_composition_for_tests(&self) -> Option<Arc<dyn meerkat_mob_mcp::HostMobComposition>> {
+        self.launch_composition
+            .clone()
+            .map(|composition| composition as Arc<dyn meerkat_mob_mcp::HostMobComposition>)
+    }
+
+    /// The launch's composition, required where the mob set of a declared
+    /// launch is built.
+    fn host_mob_composition(
+        &self,
+    ) -> Result<Arc<dyn meerkat_mob_mcp::HostMobComposition>, MobRuntimeError> {
+        match &self.launch_composition {
+            Some(composition) => Ok(Arc::clone(composition) as _),
+            None => Err(MobRuntimeError::InvalidConfig(
+                "the mob set of a launch over a declared mob store is built with the launch's \
+                 composition, which preparation builds first, and none is built"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Everything the launch gives the builder of a mob it hosts, as one
+    /// value ([`LaunchMobComposition`]), from what the spec holds now. The
+    /// mob-wide default client it carries is also set as the default client
+    /// of the agent mob tools here, so every mob the mob set builds or
+    /// restores afterwards, the durable child mobs included, takes it.
+    fn launch_mob_composition(&self) -> LaunchMobComposition {
+        // A member placed on another host never carries a personal MCP
+        // server of this composition (`crate::personal_accounts::placement`).
+        let personal_placement_guard = self.personal_accounts_slot.accounts().map(|_| {
+            crate::personal_accounts::placement::PlacementGuard::customizer(
+                self.personal_accounts_slot.clone(),
+            )
+        });
+        let default_llm_client = self
+            .options
+            .default_llm_client
+            .clone()
+            .map(ReplaySanitizingLlmClient::wrap)
+            // Mob-wide default: serves every member on every provider the
+            // definition resolves to (see `ProviderAgnosticLlmClient`).
+            .map(ProviderAgnosticLlmClient::wrap);
+        if let Some(slot) = self.agent_mob_default_llm_client_slot.as_ref() {
+            *slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = default_llm_client.clone();
+        }
+        LaunchMobComposition {
+            judged_default_mob: JudgedDefaultMobDefinition::default(),
+            session_service: self.session_service.clone(),
+            runtime_adapter: self.runtime_adapter.clone(),
+            allow_ephemeral_sessions: self.options.allow_ephemeral_sessions,
+            notify_orchestrator_on_resume: self.options.notify_orchestrator_on_resume,
+            composition_authority: self.composition_authority,
+            fork_instruction_policy: self.fork_instruction_policy,
+            default_mob_wiring: HostMobMemberWiring {
+                member_build_preparer: self.member_build_preparer.clone(),
+                spawn_member_customizer: self.spawn_member_customizer.clone(),
+                host_pending_members: self.host_pending_members.clone(),
+            },
+            entry_wiring: self.host_mob_entry_wiring.clone(),
+            member_auth_binding_customizer: self.member_auth_binding.clone().map(|binding| {
+                Arc::new(
+                    crate::native_realm::MemberAuthBindingCustomizer::new(binding)
+                        .with_recorded_form(self.member_auth_binding_recorded.clone()),
+                ) as Arc<dyn meerkat_mob::SpawnMemberCustomizer>
+            }),
+            // A composition with personal MCP servers refuses a member
+            // placed on another host that would carry one.
+            personal_placement_guard,
+            private_owners: self.private_owners.clone(),
+            member_runtime_registration_hook: self.member_runtime_registration_hook.clone(),
+            member_restore: self.member_restore,
+            member_model_config: self.member_model_config.clone(),
+            session_identity_config_root: self.session_identity_config_root.clone(),
+            tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
+            default_external_tools_provider: self.default_external_tools_provider.clone(),
+            tool_bundles: self.tool_bundles.clone(),
+            #[cfg(feature = "extension-state")]
+            before_activation: self.before_activation.clone(),
+            workgraph_service: self.workgraph_service.clone(),
+            default_llm_client,
+        }
+    }
+
+    /// Everything that stands before the agent mob-tool state is first used,
+    /// in order: the runtime adapter the session service embeds or was
+    /// given, a candidate launch's hold of every stored session's run
+    /// starts, the checks of the runtime delivery, and the agent mob tools
+    /// in their final form with the host's hooks set
+    /// ([`Self::finalize_agent_mob_tools`]). Answers the runtime adapter.
+    ///
+    /// Preparation runs it first, and nothing else does: the mob set a
+    /// launch over a declared store declares its mob to is built here, from
+    /// what the spec holds when preparation begins, and its first verb is
+    /// preparation's read of the store.
+    async fn settle_before_first_use(
+        &mut self,
+    ) -> Result<Option<Arc<meerkat_runtime::MeerkatMachine>>, MobRuntimeError> {
+        let effective_runtime_adapter = self
+            .session_service
+            .acquire_runtime_adapter(self.runtime_adapter.clone())
+            .map_err(MobRuntimeError::Runtime)?;
+        self.runtime_adapter = effective_runtime_adapter.clone();
+        // A candidate launch holds the run starts of every session its
+        // runtime store holds before anything registers one: the mob's
+        // resume, its child mobs' restore and every later wake of a stored
+        // member register held, so no run the store left open resumes and no
+        // queued input runs. Child mobs share this runtime, so their members
+        // are held too. A candidate never releases the hold, and the hold is
+        // never durable: the authoritative launch over the same store stages
+        // none.
+        if !self.composition_authority.speaks_for_composition()
+            && let (Some(machine), Some(store)) = (
+                effective_runtime_adapter.as_deref(),
+                self.durable_runtime_store.as_deref(),
+            )
+        {
+            hold_stored_sessions_for_candidate(machine, store).await?;
+        }
+        // Before anything reads the agent mob-tool state: child mobs get the
+        // host's final application tool policy and child bundles.
+        if let Some(install) = &self.agent_mob_tools_install {
+            let delivery = self
+                .runtime_delivery
+                .as_ref()
+                .ok_or(MobRuntimeError::Delivery(
+                    MobRuntimeDeliveryError::MissingComposition,
+                ))?;
+            if !delivery.shares_composition(&install.delivery) {
+                return Err(MobRuntimeError::Delivery(
+                    MobRuntimeDeliveryError::CompositionChanged,
+                ));
+            }
+        }
+        if let Some(delivery) = &self.runtime_delivery {
+            delivery
+                .validate_runtime(effective_runtime_adapter.as_deref())
+                .map_err(MobRuntimeError::Delivery)?;
+            delivery.preflight().map_err(MobRuntimeError::Delivery)?;
+        }
+        // Before the agent mob-tool state is rebuilt and before the mob is
+        // built: both then hold the layered services.
+        self.finalize_agent_mob_tools()?;
+        Ok(effective_runtime_adapter)
+    }
+
+    /// Set on the final agent mob-tool state what the host gives every mob
+    /// that state builds: the document MCP servers of child mobs, the
+    /// pre-activation and after-destroy hooks, and the create admission.
+    /// Before the state's first verb: a mob the state restores is built
+    /// with them.
+    fn install_agent_mob_hooks(&mut self) -> Result<(), MobRuntimeError> {
+        #[cfg(feature = "extension-state")]
+        if let Some(servers) = self.child_mcp_servers.take() {
+            let state = self.agent_mob_mcp_state.as_ref().ok_or_else(|| {
+                MobRuntimeError::InvalidConfig(
+                    "document MCP child delivery requires an agent mob-tool state".into(),
+                )
+            })?;
+            state.set_child_mcp_servers(servers);
+        }
+        #[cfg(feature = "extension-state")]
+        if let (Some(state), Some(callback)) = (&self.agent_mob_mcp_state, &self.before_activation)
+        {
+            state
+                .set_before_activation(Arc::clone(callback))
+                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
+        }
+        // The mob set has one after-destroy hook, so the launch binds one
+        // for everything it holds of a destroyed mob: the runtime's table
+        // of entries is told first, where the launch has such a table (it
+        // ends the mob's entry on a task of its own), then the extension
+        // state's registry drops the handles it bound, where that feature
+        // composed one. The table is held weakly, as its release before a
+        // create is ([`TableOfEntriesRelease`]).
+        if let Some(state) = &self.agent_mob_mcp_state {
+            #[cfg(feature = "extension-state")]
+            let of_the_extension_state = self.after_destroy.clone();
+            #[cfg(not(feature = "extension-state"))]
+            let of_the_extension_state: Option<meerkat_mob_mcp::MobAfterDestroy> = None;
+            let table = self.host_mob_entry_wiring.as_ref().map(Arc::downgrade);
+            if table.is_some() || of_the_extension_state.is_some() {
+                let hook: meerkat_mob_mcp::MobAfterDestroy =
+                    Arc::new(move |destroyed: &meerkat_mob::MobId| {
+                        if let Some(table) = table.as_ref().and_then(std::sync::Weak::upgrade) {
+                            table.after_destroy(destroyed);
+                        }
+                        if let Some(release) = &of_the_extension_state {
+                            release(destroyed);
+                        }
+                    });
+                state
+                    .set_after_destroy(hook)
+                    .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
+            }
+        }
+        // The agent mob tools' create admission: the host's own decides
+        // first, when there is one; then each release bound to the record
+        // is asked, for a host's create and a member's alike; then the
+        // record keeps the creator's private owner, which the members
+        // seated in the mob take
+        // ([`crate::private_owners::PrivateOwners::before_create_hook`]).
+        if let Some(state) = &self.agent_mob_mcp_state {
+            #[cfg(feature = "extension-state")]
+            let host_hook = self.before_create.clone();
+            #[cfg(not(feature = "extension-state"))]
+            let host_hook = None;
+            state
+                .set_before_create(
+                    self.private_owners
+                        .before_create_hook(Arc::downgrade(state), host_hook),
+                )
+                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
+            self.private_owners.bind_child_mobs(state);
+            // Before a mob is created under an id, the admission asks for
+            // the release of the schedules the launch keeps under that id
+            // ([`crate::mob_schedules_release`]).
+            self.private_owners
+                .bind_create_release(Arc::new(self.mob_schedules.clone()));
+            // Then for the release of what the runtime's table of entries
+            // keeps under the id, where the launch has such a table: the
+            // store's records, the announcements, and last what cannot
+            // fail to go (the labels, the routes and deliveries).
+            if let Some(entries) = &self.host_mob_entry_wiring {
+                self.private_owners
+                    .bind_create_release(Arc::new(TableOfEntriesRelease(Arc::downgrade(entries))));
+            }
+        }
+        Ok(())
+    }
+
+    /// Bring the agent mob tools to their final form, once, before anything
+    /// uses their state: the member socket place's layer
+    /// ([`Self::install_member_socket_place`]), the launch's composition of
+    /// the mobs it hosts ([`Self::launch_mob_composition`]), the state with
+    /// the final child policy ([`Self::apply_agent_mob_child_policy`]), and
+    /// the host's hooks on it ([`Self::install_agent_mob_hooks`]).
+    ///
+    /// For a launch over a declared store that state is the mob set the
+    /// launch declares its mob to. It is built here, in preparation
+    /// ([`Self::settle_before_first_use`]), from what the spec holds then,
+    /// after the launch's composition and with it, and nothing of it runs
+    /// before preparation's own read of the store.
+    fn finalize_agent_mob_tools(&mut self) -> Result<(), MobRuntimeError> {
+        if let Some(store) = &self.declared_store {
+            // The place and what is declared about it stay one value.
+            self.mob_storage_provenance = store.provenance().clone();
+        }
+        self.install_member_socket_place();
+        // After the socket place's layer, which the composition's session
+        // service carries, and before the mob set: the set is given the
+        // composition whole.
+        self.launch_composition = Some(Arc::new(self.launch_mob_composition()));
+        if self.declared_store.is_some() && self.agent_mob_tools_install.is_none() {
+            self.hold_mob_set_of_its_own()?;
+        } else {
+            self.apply_agent_mob_child_policy()?;
+        }
+        self.install_agent_mob_hooks()
+    }
+
+    /// The mob set of a launch over a declared store that installed no
+    /// agent mob tools: a set of the launch's own, which no agent tool
+    /// publishes. The launch declares its mob to it as it does to the set
+    /// of the agent mob tools, so every launch over a declared store has
+    /// one mob set, and the wrapper holds it where it holds theirs.
+    ///
+    /// No member of such a launch holds a mob tool, so no member creates a
+    /// mob in this set and none owes a result through it: it keeps no
+    /// durable child root, and the runtime delivery is not bound to it.
+    fn hold_mob_set_of_its_own(&mut self) -> Result<(), MobRuntimeError> {
+        let Some(store) = self.declared_store.as_ref() else {
+            return Ok(());
+        };
+        let state = new_agent_mob_state(
+            Arc::clone(&self.session_service),
+            self.runtime_adapter.clone(),
+            self.workgraph_service.clone(),
+            None,
+            self.participant_store_handed_to_the_set(),
+            AgentMobRestore::of(self.member_restore),
+            &self.private_owners,
+            &self.personal_accounts_slot,
+        )
+        .map_err(MobRuntimeError::Delivery)?;
+        let state = declare_default_mob(
+            state,
+            self.host_mob_composition()?,
+            self.definition.id.clone(),
+            store,
+            &self.private_owners,
+        )
+        .map_err(MobRuntimeError::Mob)?;
+        let state = state.into_shared();
+        self.state_that_the_set_wakes_its_members_sessions(&state);
+        self.agent_mob_mcp_state = Some(state);
+        Ok(())
+    }
+
+    /// The launch's statement to the mob set it declared its mob to: the
+    /// set answers the wake of a member's session whose mob is not loaded
+    /// ([`meerkat_mob_mcp::MobMcpState::answer_wakes_of_unserved_member_sessions`]).
+    /// Such a set loads a stored mob only when something addresses it and
+    /// unloads a mob that stays idle, so a member's session can be addressed
+    /// by its id while no actor runs for its mob.
+    ///
+    /// A launch that does not speak for the composition (a candidate) acts
+    /// nowhere: it states nothing, its set answers no wake, and a wake of
+    /// such a session loads no mob in it.
+    fn state_that_the_set_wakes_its_members_sessions(
+        &self,
+        state: &Arc<meerkat_mob_mcp::MobMcpState>,
+    ) {
+        if self.declared_store.is_some() && self.composition_authority.speaks_for_composition() {
+            state.answer_wakes_of_unserved_member_sessions();
+        }
+    }
+
+    /// What the declared store holds, read through the mob set the launch
+    /// declares its mob to: preparation's own read of the store, and the
+    /// launch's first use of the set
+    /// ([`Self::settle_before_first_use`] built it). The set takes its
+    /// census of the durable child mobs before it answers, and loads the
+    /// ones whose members hold work, so the child root is owned for the
+    /// rest of the process first, and a child root that cannot be read
+    /// refuses the launch as a failed child restore, before the launch's
+    /// own store is read. A stored mob that is not loaded then is loaded
+    /// when something addresses it.
+    ///
+    /// `None` for a store that holds no mob: the launch creates it.
+    async fn declared_store_definition(
+        &self,
+    ) -> Result<Option<meerkat_mob::MobDefinitionSnapshot>, MobRuntimeError> {
+        let Some(state) = self.declared_mob_set().cloned() else {
+            return Err(MobRuntimeError::InvalidConfig(
+                "a launch over a declared mob store reads the store through the mob set it \
+                 declared its mob to, and no such set stands"
+                    .into(),
+            ));
+        };
+        if let Some(claim) = self.child_mob_root_claim.as_ref() {
+            // From here a child actor may run, so the root stays owned for
+            // the rest of the process.
+            crate::child_mob_storage::retain_until_process_exit(claim);
+            if let Err(error) = state.mob_list().await {
+                tracing::error!(
+                    %error,
+                    child_root = %claim.root().display(),
+                    "durable child mob restore failed; the child root stays owned until \
+                     process exit"
+                );
+                return Err(MobRuntimeError::ChildMobStorage(
+                    crate::child_mob_storage::ChildMobStorageError::Restore(error),
+                ));
+            }
+        }
+        state
+            .default_mob_stored_definition()
+            .await
+            .map_err(MobRuntimeError::Mob)
+    }
+
     /// Reinstall the agent mob tools with the final child policy. The
     /// constructors install them before a host can set the registry, the
     /// child policy or a child-available bundle, so bootstrap applies those
@@ -8605,7 +9539,7 @@ impl MobBootstrapSpec {
         let Some(install) = self.agent_mob_tools_install.clone() else {
             return Ok(());
         };
-        let forked_participant_store = self.storage.forked_participant_store().cloned();
+        let forked_participant_store = self.participant_store_handed_to_the_set();
         // Public spec.storage can be replaced after the tools were installed.
         // Handle identity only decides whether to rebuild the composition;
         // capability access and authorization remain in the native store.
@@ -8629,7 +9563,11 @@ impl MobBootstrapSpec {
         };
         let same_child_root = install.child_mob_root == child_mob_root;
         let restore = AgentMobRestore::of(self.member_restore);
-        if child_policy.is_empty()
+        // A launch over a declared store declares its mob to the state built
+        // here, so that state is always built: the one the tools were
+        // installed with declared nothing.
+        if self.declared_store.is_none()
+            && child_policy.is_empty()
             && same_store
             && same_child_root
             && install.restore == restore
@@ -8639,9 +9577,12 @@ impl MobBootstrapSpec {
             return Ok(());
         }
         // Validate, claim and open everything the durable selection needs
-        // before the replacement state is built or bound.
-        let durable =
-            self.prepare_durable_child_mobs(&install, forked_participant_store.is_some())?;
+        // before the replacement state is built or bound. A declared store
+        // holds the host's participant custody itself (the mob set opens
+        // the table of the declared file, or keeps its own for a store in
+        // memory), as an opened storage that carries one does.
+        let root_custody = self.declared_store.is_some() || forked_participant_store.is_some();
+        let durable = self.prepare_durable_child_mobs(&install, root_custody)?;
         let existing_slots = match (&self.console_spawn_sink_slot, &self.identity_runtime_slot) {
             (Some(sink), Some(identity)) => Some((Arc::clone(sink), Arc::clone(identity))),
             _ => None,
@@ -8668,6 +9609,23 @@ impl MobBootstrapSpec {
             &self.personal_accounts_slot,
         )
         .map_err(MobRuntimeError::Delivery)?;
+        // The launch's declaration of its mob to the set: the set owns the
+        // mob's id and store from here, asks the launch's composition for
+        // the builder of every mob it builds for the host, and loads the
+        // launch's mob only when the launch asks it to serve that mob.
+        // Before the persistent child root: the declared file's participant
+        // table is the host's one such table, and a root configured after
+        // the declaration opens none of its own.
+        if let Some(store) = &self.declared_store {
+            state = declare_default_mob(
+                state,
+                self.host_mob_composition()?,
+                self.definition.id.clone(),
+                store,
+                &self.private_owners,
+            )
+            .map_err(MobRuntimeError::Mob)?;
+        }
         if let Some(durable) = &durable {
             // After the explicit stores and before the realm-profile overlay:
             // the native root upgrades only the stores still at their default.
@@ -8691,8 +9649,13 @@ impl MobBootstrapSpec {
                 Some(replaced),
                 &self.private_owners,
                 &self.personal_accounts_slot,
+                // A tool surface of a member of a mob the host serves
+                // beside the launch mob finds that mob's identity plane in
+                // the runtime's table of those mobs.
+                self.host_mob_entry_wiring.as_ref().map(Arc::downgrade),
             )
             .map_err(MobRuntimeError::Delivery)?;
+        self.state_that_the_set_wakes_its_members_sessions(&state);
         self.agent_mob_mcp_state = Some(state);
         self.implicit_delegate_retirement_overrides = Some(overrides);
         self.console_spawn_sink_slot = Some(console_spawn_sink);
@@ -8870,9 +9833,11 @@ impl MobBootstrapSpec {
         self
     }
 
-    /// Build every member with exactly `binding`: the root mob's spawn
-    /// customizers force it onto each member spawn and rebuild
-    /// ([`crate::native_realm::MemberAuthBindingCustomizer`]), the agent
+    /// Build every member with exactly `binding`: the launch's composition
+    /// forces it onto each member spawn and rebuild of every mob the launch
+    /// hosts, the launch mob and the mobs its mob set builds for the host
+    /// alike ([`crate::native_realm::MemberAuthBindingCustomizer`], composed
+    /// in [`LaunchMobComposition`]), the agent
     /// mob-tool state does the same for the members of the child mobs agents
     /// create and refuses a child mob that would build members off it, and
     /// the runtime refuses identity adoption under it
@@ -8896,7 +9861,7 @@ impl MobBootstrapSpec {
         // whose recorded tooling enables the fallback web search included
         // ([`crate::native_realm::MemberBuildGuard`]).
         let guard = Arc::new(crate::native_realm::MemberBuildGuard::new(
-            binding.clone(),
+            binding,
             self.member_auth_binding_recorded.clone(),
             self.member_model_config.clone(),
         ));
@@ -8910,11 +9875,7 @@ impl MobBootstrapSpec {
             install.session_service =
                 with_pre_build_hook(Arc::clone(&install.session_service), hook);
         }
-        let recorded = self.member_auth_binding_recorded.clone();
-        self.with_spawn_member_customizer(Arc::new(
-            crate::native_realm::MemberAuthBindingCustomizer::new(binding)
-                .with_recorded_form(recorded),
-        ))
+        self
     }
 
     /// The state directory the durable child mobs of this spec live under,
@@ -9009,31 +9970,70 @@ impl MobBootstrapSpec {
     /// ([`judge_resume`]): an undeclared storage, a diverged composition and
     /// a refused candidate are refused now, so the definition returned has
     /// passed the composition checks before it reaches host code (the
-    /// identity-first roster). Preparation applies the kept judgement and
+    /// identity-first roster).
+    ///
+    /// For an opened storage, preparation applies the kept judgement and
     /// binds the resume to its snapshot, so what was resolved from the
     /// returned definition describes the mob that then runs: a definition
     /// epoch committed in between refuses the resume instead.
+    ///
+    /// For a declared store the read is of the storage the launch opened at
+    /// the store's file itself: the open it was handed
+    /// ([`Self::with_declared_store_opened`]), or, when it was handed none,
+    /// one this read makes of the declared file as a launch over an opened
+    /// storage opens it (the file is created when there is none). A store
+    /// in memory holds no mob when the process starts and is read as a
+    /// fresh boot. Nothing of the launch's mob set runs for it: no set is
+    /// built and no durable child mob is restored. Preparation runs this
+    /// read itself, before it builds the mob set, when nothing ran it
+    /// before: a launch whose resume is refused here has run nothing. It
+    /// decides nothing more for preparation, which reads the store again
+    /// through the mob set and judges the resume again itself; what is
+    /// kept is only what this read found, and preparation refuses a store
+    /// that holds something else by then
+    /// (`MobError::MobDefinitionAuthorityChanged`).
     pub(crate) async fn read_launch_definition(
         &mut self,
     ) -> Result<MobDefinition, MobRuntimeError> {
-        let event_log_empty = self
-            .storage
-            .is_event_log_empty()
-            .await
-            .map_err(|err| MobRuntimeError::Mob(MobError::from(err)))?;
-        if event_log_empty {
-            self.launch_definition_read = Some(LaunchDefinitionRead::Fresh);
-            let mut definition = self.definition.clone();
-            auto_mark_declared_resume_overrides(&mut definition);
-            return Ok(definition);
-        }
         // The form preparation judges in (`auto_mark_declared_resume_overrides`
-        // runs there before the resume).
+        // runs there before the create or the resume).
         let mut normalized = self.definition.clone();
         auto_mark_declared_resume_overrides(&mut normalized);
+        // A declared file the launch was handed no open of is opened here,
+        // the launch's own open, which preparation closes before it builds
+        // the mob set.
+        if self.declared_store_opened.is_none()
+            && let Some(file) = self.declared_store.as_ref().and_then(|store| store.file())
+        {
+            let (opened, _provenance) =
+                crate::mob_composition_manifest::persistent_mob_storage(file.to_path_buf())
+                    .map_err(MobRuntimeError::Mob)?;
+            self.declared_store_opened = Some(opened);
+        }
+        // The storage this read is of, and what is declared about it: the
+        // spec's opened storage, or the launch's own open of its declared
+        // store. A declared store in memory is not read: it holds no mob.
+        let (storage, provenance) = match &self.declared_store {
+            None => (Some(&self.storage), &self.mob_storage_provenance),
+            Some(store) => (self.declared_store_opened.as_ref(), store.provenance()),
+        };
+        let stored = match storage {
+            None => None,
+            Some(storage) => {
+                let event_log_empty = storage
+                    .is_event_log_empty()
+                    .await
+                    .map_err(|err| MobRuntimeError::Mob(MobError::from(err)))?;
+                (!event_log_empty).then_some(StoredDefinition::In(storage))
+            }
+        };
+        let Some(stored) = stored else {
+            self.launch_definition_read = Some(LaunchDefinitionRead::Fresh);
+            return Ok(normalized);
+        };
         let judged = judge_resume(
-            &self.storage,
-            &self.mob_storage_provenance,
+            &stored,
+            provenance,
             self.composition_authority,
             self.candidate_definition,
             &normalized,
@@ -10907,19 +11907,53 @@ fn legacy_auto_mark_declared_resume_overrides(definition: &mut MobDefinition) {
     }
 }
 
+/// The definition a non-empty launch store holds, as a judgement of a resume
+/// reads it ([`judge_resume`]).
+enum StoredDefinition<'a> {
+    /// In an opened storage: read when the judgement needs it.
+    In(&'a MobStorage),
+    /// Read already, through the mob set the launch declared its mob to
+    /// (`meerkat_mob_mcp::MobMcpState::default_mob_stored_definition`).
+    Read(&'a meerkat_mob::MobDefinitionSnapshot),
+}
+
+impl StoredDefinition<'_> {
+    /// The definition the store was created with or last advanced to, when
+    /// it holds one.
+    async fn created(&self) -> Result<Option<meerkat_mob::MobDefinitionSnapshot>, MobRuntimeError> {
+        match self {
+            Self::In(storage) => storage
+                .created_definition_snapshot()
+                .await
+                .map_err(|err| MobRuntimeError::Mob(MobError::from(err))),
+            Self::Read(snapshot) => Ok(Some((*snapshot).clone())),
+        }
+    }
+
+    /// The canonical definition a non-empty mob storage holds.
+    async fn canonical(&self) -> Result<meerkat_mob::MobDefinitionSnapshot, MobRuntimeError> {
+        self.created().await?.ok_or_else(|| {
+            MobRuntimeError::Mob(MobError::Internal(
+                "non-empty mob storage has no canonical definition".to_string(),
+            ))
+        })
+    }
+}
+
 /// Judges a resume of a non-empty mob storage against the supplied
 /// composition before any of the mob is built: the checks the resume makes
 /// before the mob can actuate. It only reads; preparation applies what it
 /// decides to record and report.
 ///
-/// `definition` is the supplied definition in the form preparation judges
+/// `stored` is the definition the storage holds. `definition` is the
+/// supplied definition in the form preparation judges
 /// (normalized by [`auto_mark_declared_resume_overrides`]); `raw_definition`
 /// is the supplied one as given, from which the released-representation
 /// allowance derives its legacy form. `bind_in_process` also reads, and binds
 /// the resume to, the definition of a storage declared in-process, which is
 /// otherwise resumed unverified as Core reads it.
 async fn judge_resume(
-    storage: &MobStorage,
+    stored: &StoredDefinition<'_>,
     provenance: &crate::mob_composition_manifest::MobStorageProvenance,
     authority: crate::mob_composition_manifest::CompositionAuthority,
     candidate_definition: crate::mob_composition_manifest::CandidateDefinition,
@@ -10964,7 +11998,7 @@ async fn judge_resume(
         .as_ref()
         .filter(|_| speaks_for_composition)
     {
-        let snapshot = canonical_definition_snapshot(storage).await?;
+        let snapshot = stored.canonical().await?;
         match location
             .verify_before_resume(snapshot.definition(), definition)
             .await
@@ -11017,7 +12051,7 @@ async fn judge_resume(
         // from presenting what it runs: the resume boots the stored
         // definition, so a supplied definition that differs refuses unless
         // the launch acknowledges the stored one.
-        let snapshot = canonical_definition_snapshot(storage).await?;
+        let snapshot = stored.canonical().await?;
         let mut diverged = crate::mob_composition_manifest::diverged_definition_fields(
             snapshot.definition(),
             definition,
@@ -11054,27 +12088,9 @@ async fn judge_resume(
         // A storage declared in-process resumes unverified. A launch that
         // resolves anything from its definition before preparation still
         // binds the resume to the definition it read.
-        judged.snapshot = storage
-            .created_definition_snapshot()
-            .await
-            .map_err(|err| MobRuntimeError::Mob(MobError::from(err)))?;
+        judged.snapshot = stored.created().await?;
     }
     Ok(judged)
-}
-
-/// The canonical definition a non-empty mob storage holds.
-async fn canonical_definition_snapshot(
-    storage: &MobStorage,
-) -> Result<meerkat_mob::MobDefinitionSnapshot, MobRuntimeError> {
-    storage
-        .created_definition_snapshot()
-        .await
-        .map_err(|err| MobRuntimeError::Mob(MobError::from(err)))?
-        .ok_or_else(|| {
-            MobRuntimeError::Mob(MobError::Internal(
-                "non-empty mob storage has no canonical definition".to_string(),
-            ))
-        })
 }
 
 /// Bound on [`MobRuntime::session_commit_pending`]'s runtime read. A read
@@ -11106,31 +12122,32 @@ async fn bounded_commit_pending<E>(
 }
 
 /// Live mob runtime backed by a `MobHandle`.
+///
+/// It has two parts: what is bound to its one mob, and the process's
+/// shared services, which it only carries so that the code around the mob
+/// reaches them through one value.
 #[derive(Clone)]
 pub struct MobRuntime {
-    handle: MobHandle,
-    runtime_delivery: Option<Arc<RunningMobRuntimeDelivery>>,
+    mob: MobRuntimeMobPart,
+    process: MobRuntimeProcessPart,
+}
 
-    session_service: Option<Arc<dyn MobSessionService>>,
-    /// See [`MobBootstrapSpec`]'s field of the same name.
-    member_model_config: Option<Arc<meerkat::Config>>,
-    agent_mob_mcp_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
-    implicit_delegate_retirement_overrides: Option<ImplicitDelegateRetirementOverrides>,
-    binary_blob_store: Option<Arc<dyn BinaryBlobStore>>,
+/// The part of a [`MobRuntime`] that is bound to its one mob.
+#[derive(Clone)]
+struct MobRuntimeMobPart {
+    handle: MobHandle,
     baseline_member_specs: Arc<tokio::sync::RwLock<Vec<SpawnMemberSpec>>>,
-    /// Slot shared with the agent mob-tool dispatchers. A console-bearing
-    /// runtime fills it so agent-tool spawns project into the console.
-    console_spawn_sink_slot: Option<SharedConsoleSpawnSinkSlot>,
-    identity_runtime_slot: Option<SharedIdentityRuntimeSlot>,
-    /// Empties the builder tool slots that point back at this runtime (see
-    /// [`CompositionRelease`]): explicitly at shutdown, otherwise when the
-    /// last clone of this runtime drops.
-    composition_release: Option<CompositionRelease>,
-    /// Realm-scoped WorkGraph service carried over from the bootstrap spec
-    /// so `UnifiedRuntime` can expose it to the RPC/console surfaces.
+    /// This mob's identity plane: the mob's one late-bound identity runtime
+    /// slot. A mob built with agent mob tools shares the slot those tools
+    /// were given before the mob existed; a mob built without them has a
+    /// slot of its own. The runtime's entry for the mob holds this plane.
+    identity_plane: MobIdentityPlane,
+    /// This mob's view of the shared WorkGraph store, scoped to the mob's
+    /// own realm, carried over from the bootstrap spec so `UnifiedRuntime`
+    /// can expose it to the RPC/console surfaces.
     workgraph_service: Option<meerkat::WorkGraphService>,
     /// Admission authority for the workgraph duplicate-binding guards
-    /// (goal/create, attention/resume, attention/reassign — RPC arms AND the
+    /// (goal/create, attention/resume, attention/reassign - RPC arms AND the
     /// agent tool plane's `workgraph_attention_reassign`). ONE per runtime:
     /// every surface built from this runtime must acquire this same
     /// admission, or concurrent creates race past the check and brick the
@@ -11142,6 +12159,40 @@ pub struct MobRuntime {
     /// bindings into their mob realm; `None` when no WorkGraph service is
     /// configured or the runtime was adopted from a bare handle.
     workgraph_realm_migration: Option<Arc<crate::workgraph_realm::WorkGraphRealmMigrationReport>>,
+    /// The verified side chat lineage of each member incarnation the console
+    /// has read, shared by every clone (see
+    /// [`crate::side_chat::SideChatLineageCache`]).
+    side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
+    /// The creation record of each mob this runtime's consoles have read,
+    /// shared by every clone (see
+    /// [`crate::console_mob_listing::ConsoleMobRecords`]).
+    console_mob_records: Arc<crate::console_mob_listing::ConsoleMobRecords>,
+    /// The members each flow run of this runtime's mob reached, shared by
+    /// every clone (see [`crate::run_members::RunMembersIndex`]).
+    run_members: Arc<crate::run_members::RunMembersIndex>,
+}
+
+/// The part of a [`MobRuntime`] that is the process's: shared services and
+/// facts of the launch, the same for every mob the process hosts.
+#[derive(Clone)]
+struct MobRuntimeProcessPart {
+    /// The host's delivery owner: one inbox and one native owner per
+    /// process, whatever the number of mobs. The last clone to drop stops
+    /// it.
+    runtime_delivery: Option<Arc<RunningMobRuntimeDelivery>>,
+    session_service: Option<Arc<dyn MobSessionService>>,
+    /// See [`MobBootstrapSpec`]'s field of the same name.
+    member_model_config: Option<Arc<meerkat::Config>>,
+    agent_mob_mcp_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
+    implicit_delegate_retirement_overrides: Option<ImplicitDelegateRetirementOverrides>,
+    binary_blob_store: Option<Arc<dyn BinaryBlobStore>>,
+    /// Slot shared with the agent mob-tool dispatchers. A console-bearing
+    /// runtime fills it so agent-tool spawns project into the console.
+    console_spawn_sink_slot: Option<SharedConsoleSpawnSinkSlot>,
+    /// Empties the builder tool slots that point back at this runtime (see
+    /// [`CompositionRelease`]): explicitly at shutdown, otherwise when the
+    /// last clone of this runtime drops.
+    composition_release: Option<CompositionRelease>,
     /// Composition-time storage durability resolution carried over from the
     /// bootstrap spec so the health surfaces can report it.
     resolved_storage: Option<ResolvedStorageSummary>,
@@ -11162,7 +12213,7 @@ pub struct MobRuntime {
     /// Dropped when the runtime is dropped, cleaning up the temp dir.
     _ephemeral_dir: Option<Arc<tempfile::TempDir>>,
     /// The state-directory claims carried from the bootstrap spec, released
-    /// by a clean stand-down (see [`Self::stand_down_child_mobs`]) or when
+    /// by a clean stand-down (see [`MobRuntime::stand_down_child_mobs`]) or when
     /// the last clone drops.
     state_dir_claims: Arc<std::sync::Mutex<Vec<Arc<crate::state_dir_claim::StateDirClaim>>>>,
     /// Whether this launch speaks for the durable composition. Retained past
@@ -11178,21 +12229,21 @@ pub struct MobRuntime {
     /// (see [`MobBootstrapSpec::with_recorded_member_auth_binding`]).
     member_auth_binding_recorded: Option<meerkat_core::AuthBindingRef>,
     /// Exclusive ownership of the durable child-mob root and the settlement
-    /// record [`Self::stand_down_child_mobs`] keeps across calls.
+    /// record [`MobRuntime::stand_down_child_mobs`] keeps across calls.
     child_mob_root: crate::child_mob_storage::ChildMobRootOwnership,
     /// See [`MobBootstrapSpec::with_member_mcp_custody`].
     #[cfg(not(target_arch = "wasm32"))]
     member_mcp_custody: Option<Arc<crate::member_mcp_custody::MemberMcpCustody>>,
-    /// The verified side chat lineage of each member incarnation the console
-    /// has read, shared by every clone (see
-    /// [`crate::side_chat::SideChatLineageCache`]).
-    side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
-    /// The members each flow run of this runtime's mob reached, shared by
-    /// every clone (see [`crate::run_members::RunMembersIndex`]).
-    run_members: Arc<crate::run_members::RunMembersIndex>,
     /// Who each member of this runtime's mob is private to, shared by every
     /// clone (see [`crate::private_owners::PrivateOwners`]).
     private_owners: crate::private_owners::PrivateOwners,
+    /// The launch's two memory slots, which every member build of the
+    /// launch's mobs passes, shared by every clone: what composes a memory
+    /// for a mob beside the launch mob enters that memory in them (see
+    /// [`crate::memory::dispatch_taint::DispatchTaintSlot`] and
+    /// [`crate::memory::side_chat_memory::SideChatMemorySlot`]).
+    dispatch_taint_slot: crate::memory::dispatch_taint::DispatchTaintSlot,
+    side_chat_memory_slot: crate::memory::side_chat_memory::SideChatMemorySlot,
     /// The surface the members' `ask_user` tool reads, shared by every clone
     /// (see [`crate::ask_user::AskUserSlot`]).
     ask_user_slot: crate::ask_user::AskUserSlot,
@@ -11204,147 +12255,150 @@ pub struct MobRuntime {
     personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot,
     /// See [`MobBootstrapSpec::with_mob_schedules_declared`].
     mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
+    /// See [`MobBootstrapSpec::with_mob_announcements_declared`].
+    mob_announcements_release: crate::mob_announcements_release::MobAnnouncementsSlot,
+    /// See [`MobBootstrapSpec::with_hosted_mob_memory_declared`].
+    mob_memory_release: crate::mob_memory_release::MobMemorySlot,
 }
 
-/// How long a boot waits for the Stop an earlier process placed, which
-/// Core's recovery finishes after resume, to land, once the resumed mob's
-/// history shows that Stop.
-const RECOVERED_PLACED_STOP_SETTLE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+/// How long a launch waits for a lifecycle intent its default mob still
+/// owes (a Stop an earlier process placed, which Core's recovery finishes
+/// after the resume) to land.
+const DEFAULT_MOB_OWED_INTENT_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
 
-/// Whether Core's recovery finishes a Stop after resuming `mob_id` with this
-/// event history, as Core's own recovery rule reads it: the open placed
-/// lifecycle intent (the last quiesce start that no quiesce end or reset
-/// closed) is `Stop`, the phase the history replays to is still running, and
-/// no destroy was admitted (Core then retries the destroy instead). A Stop
-/// that landed replays as stopped, and a resume closes the intent. Only the
-/// mob's own events count.
-fn recovery_finishes_a_placed_stop(
-    mob_id: &meerkat_mob::MobId,
-    events: &[meerkat_mob::event::MobEvent],
-) -> bool {
-    use meerkat_mob::MobEventKind as Kind;
-    use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
-    let mut intent = None;
-    let mut phase = meerkat_mob::MobState::Running;
-    let mut destroy_admitted = false;
-    for event in events.iter().filter(|event| &event.mob_id == mob_id) {
-        match &event.kind {
-            Kind::PlacedCompletionLifecycleQuiesceStarted { intent: recorded } => {
-                intent = Some(*recorded);
-            }
-            Kind::PlacedCompletionLifecycleQuiesceEnded { intent: recorded } => {
-                intent = None;
-                if *recorded == Intent::Stop {
-                    phase = meerkat_mob::MobState::Running;
-                }
-            }
-            Kind::MobReset => {
-                intent = None;
-                phase = meerkat_mob::MobState::Running;
-                destroy_admitted = false;
-            }
-            Kind::MobStopped => phase = meerkat_mob::MobState::Stopped,
-            Kind::MobCompleted => phase = meerkat_mob::MobState::Completed,
-            Kind::MobDestroying => {
-                phase = meerkat_mob::MobState::Running;
-                destroy_admitted = true;
-            }
-            Kind::MobDestroyStorageFinalizing => phase = meerkat_mob::MobState::Destroyed,
-            _ => {}
-        }
-    }
-    intent == Some(Intent::Stop) && phase == meerkat_mob::MobState::Running && !destroy_admitted
-}
+/// How long a launch that is refused after its mob set's first verb waits
+/// for the work that set owns when it stands the set down. The stand-down
+/// closes the set's admission and ends the wait for the launch's serve at
+/// once; the bound only caps the wait for tasks the set already started.
+const REFUSED_LAUNCH_SET_STAND_DOWN_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// When Core's recovery finishes a Stop an earlier process placed on the
-/// resumed mob, wait until it lands (`MobStopped`, or a quiesce end or reset
-/// that closes it), so the boot reads the phase it leaves.
+/// The phase of the launch's mob once it owes no lifecycle intent: the first
+/// half of the launch's declaration that it runs its default mob. The second
+/// half is the resume of a mob that reads `Stopped`
+/// ([`PendingMobActivation::activate`]).
 ///
-/// Only the wait for a Stop the history shows is bounded. The history read
-/// that decides whether there is one is answered by the mob actor, behind
-/// whatever the resume left it doing: a large mob over a slow store restores
-/// for as long as that takes, and a healthy restart is not refused for it. A
-/// placed Stop does not hold that read: Core's Stop does not wait inline for
-/// a member's turn to end or for placed completions to settle (it parks
-/// until its members' interrupts settle, or fails its attempt and its
-/// recovery retries it), so the read queued behind it is answered. A Stop
-/// the history shows that does not land within
-/// [`RECOVERED_PLACED_STOP_SETTLE_BOUND`] refuses the boot typed (a stalled
-/// lifecycle operation): the mob would admit no work.
-async fn settle_recovered_placed_stop(handle: &MobHandle) -> Result<(), MobRuntimeError> {
-    let events = handle.events();
-    settle_placed_stop_after_history(
-        handle.mob_id(),
-        events.replay_all(),
-        move |after_cursor| recovered_placed_stop_lands(handle, after_cursor),
-        RECOVERED_PLACED_STOP_SETTLE_BOUND,
+/// A Stop an earlier process placed and never finished is a durable
+/// barrier: the resume hands back a handle that still reads Running, and
+/// Core's recovery finishes that Stop afterwards. Which intent a mob still
+/// owes is Core's to say
+/// ([`MobHandle::wait_until_no_lifecycle_intent_is_owed`]); the launch owns
+/// how long it waits and what it refuses with, and nothing else. The phase
+/// answered is the one of the machine state that owes nothing, so a lift
+/// decided from it does not race a Stop that lands later: a launch that read
+/// Running too early would never lift the mob and every later send would be
+/// refused.
+///
+/// An intent still owed after [`DEFAULT_MOB_OWED_INTENT_BOUND`] refuses the
+/// launch typed (a stalled lifecycle operation that names the intent): the
+/// mob would admit no work. Core keeps the intent durable and drives it
+/// again at the next start. When the mob's actor ends first, the wait's own
+/// error refuses the launch.
+async fn default_mob_phase_once_no_intent_is_owed(
+    handle: &MobHandle,
+) -> Result<meerkat_mob::MobState, MobRuntimeError> {
+    phase_once_no_intent_is_owed_within(
+        handle.wait_until_no_lifecycle_intent_is_owed(),
+        || handle.lifecycle_observation().owed_intent,
+        DEFAULT_MOB_OWED_INTENT_BOUND,
     )
     .await
 }
 
-/// [`settle_recovered_placed_stop`] over its two reads: `history`, the mob's
-/// event history, awaited without a bound; and `lands`, asked only when that
-/// history ends with a Stop Core's recovery finishes, with the history's last
-/// cursor, and bounded by `bound`.
-async fn settle_placed_stop_after_history<H, L, F>(
-    mob_id: &meerkat_mob::MobId,
-    history: H,
-    lands: L,
+/// [`default_mob_phase_once_no_intent_is_owed`] over its two reads:
+/// `settled`, Core's wait until the mob owes no lifecycle intent, which
+/// answers the phase then; and `owed`, the intent the mob owes now, asked
+/// only each time `bound` has passed with the wait still pending. An intent
+/// read then refuses the launch, naming it. With none read the intent landed
+/// as the bound passed, and the wait is given the bound again.
+async fn phase_once_no_intent_is_owed_within<W, O>(
+    settled: W,
+    owed: O,
     bound: std::time::Duration,
-) -> Result<(), MobRuntimeError>
+) -> Result<meerkat_mob::MobState, MobRuntimeError>
 where
-    H: std::future::Future<Output = Result<Vec<meerkat_mob::event::MobEvent>, MobError>>,
-    L: FnOnce(u64) -> F,
-    F: std::future::Future<Output = Result<(), MobError>>,
+    W: std::future::Future<Output = Result<meerkat_mob::MobState, MobError>>,
+    O: Fn() -> Option<meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind>,
 {
-    let history = history.await.map_err(MobRuntimeError::Mob)?;
-    if !recovery_finishes_a_placed_stop(mob_id, &history) {
-        return Ok(());
-    }
-    let after_cursor = history.last().map_or(0, |event| event.cursor);
-    tracing::info!(
-        mob_id = %mob_id,
-        after_cursor,
-        "the resumed mob's history ends with a Stop an earlier process placed; waiting \
-         for it to land before the boot lifts the mob"
-    );
-    match tokio::time::timeout(bound, lands(after_cursor)).await {
-        Ok(landed) => landed.map_err(MobRuntimeError::Mob),
-        // Core keeps the Stop durable and drives it again at the next start.
-        Err(_) => Err(MobRuntimeError::Mob(
-            MobError::LifecycleOperationProgressStalled {
-                intent: "Stop".to_string(),
-                member_id: None,
-                stage: "boot awaiting a Stop an earlier process placed",
-            },
-        )),
+    use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
+    tokio::pin!(settled);
+    loop {
+        match tokio::time::timeout(bound, &mut settled).await {
+            Ok(phase) => return phase.map_err(MobRuntimeError::Mob),
+            Err(_) => {
+                let Some(intent) = owed() else {
+                    continue;
+                };
+                tracing::warn!(
+                    ?intent,
+                    bound_secs = bound.as_secs(),
+                    "the launch's mob still owes a lifecycle intent an earlier process placed; \
+                     the launch is refused and Core drives the intent again at the next start"
+                );
+                // Core keeps the intent durable and drives it again at the
+                // next start.
+                return Err(MobRuntimeError::Mob(
+                    MobError::LifecycleOperationProgressStalled {
+                        intent: format!("{intent:?}"),
+                        member_id: None,
+                        stage: match intent {
+                            Intent::Stop => "boot awaiting a Stop an earlier process placed",
+                            _ => "boot awaiting a lifecycle intent an earlier process placed",
+                        },
+                    },
+                ));
+            }
+        }
     }
 }
 
-/// Wait on the mob's structural event stream, after `after_cursor`, until
-/// the Stop an earlier process placed lands: `MobStopped`, or a quiesce end
-/// or reset that closes it.
-async fn recovered_placed_stop_lands(
+/// [`default_mob_phase_once_no_intent_is_owed`] for a mob the launch has
+/// just had loaded: the bound on an owed intent starts once the mob's
+/// restore is over. One read the mob's actor answers is awaited first, with
+/// no bound: the actor answers it behind whatever its load left it doing,
+/// so a large mob over a slow store restores for as long as that takes and
+/// a healthy restart is not refused for it. The read is the mob's event
+/// history, as it was when the launch read the owed Stop from it; the
+/// events are not looked at, and the phase and the owed intent are read
+/// from the mob's handle alone.
+async fn default_mob_phase_after_its_load(
     handle: &MobHandle,
-    after_cursor: u64,
-) -> Result<(), MobError> {
-    let mob_id = handle.mob_id();
-    // Dropping the subscription cancels it, on every path out.
-    let mut subscription = handle.events().subscribe_after(after_cursor).await?;
-    while let Some(event) = subscription.event_rx.recv().await {
-        if event.mob_id == *mob_id
-            && matches!(
-                event.kind,
-                meerkat_mob::MobEventKind::MobStopped
-                    | meerkat_mob::MobEventKind::MobReset
-                    | meerkat_mob::MobEventKind::PlacedCompletionLifecycleQuiesceEnded { .. }
-            )
-        {
-            return Ok(());
-        }
-    }
-    // The structural event stream ends only with the mob actor.
-    Err(MobError::ActorCommandChannelClosed)
+) -> Result<meerkat_mob::MobState, MobRuntimeError> {
+    let events = handle.events();
+    // Said before the wait, so a launch that hangs here names where: the
+    // read has no bound, and nothing else reports a mob whose actor does
+    // not return to its mailbox.
+    tracing::info!(
+        mob_id = %handle.mob_id(),
+        "waiting, with no bound, for the launch's mob to answer one read after its load; \
+         the bound on a lifecycle intent it still owes starts after that answer"
+    );
+    phase_once_restored_and_no_intent_is_owed_within(
+        async move { events.replay_all().await.map(|_history| ()) },
+        handle.wait_until_no_lifecycle_intent_is_owed(),
+        || handle.lifecycle_observation().owed_intent,
+        DEFAULT_MOB_OWED_INTENT_BOUND,
+    )
+    .await
+}
+
+/// [`default_mob_phase_after_its_load`] over its three reads: `restored`,
+/// a read the mob's actor answers once its restore is over, awaited with no
+/// bound and before anything else, whose error refuses the launch; then
+/// [`phase_once_no_intent_is_owed_within`] over `settled` and `owed`, under
+/// `bound`.
+async fn phase_once_restored_and_no_intent_is_owed_within<R, W, O>(
+    restored: R,
+    settled: W,
+    owed: O,
+    bound: std::time::Duration,
+) -> Result<meerkat_mob::MobState, MobRuntimeError>
+where
+    R: std::future::Future<Output = Result<(), MobError>>,
+    W: std::future::Future<Output = Result<meerkat_mob::MobState, MobError>>,
+    O: Fn() -> Option<meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind>,
+{
+    restored.await.map_err(MobRuntimeError::Mob)?;
+    phase_once_no_intent_is_owed_within(settled, owed, bound).await
 }
 
 /// The right to lift a prepared mob from `Stopped` to `Running`, once.
@@ -11374,13 +12428,17 @@ pub(crate) struct PendingMobActivation {
 }
 
 impl PendingMobActivation {
-    /// Perform the deferred `Stopped` -> `Running` transition.
+    /// Perform the deferred `Stopped` -> `Running` transition: the second
+    /// half of the launch's declaration that it runs its mob. The phase it
+    /// acts on is read again once the mob owes no lifecycle intent
+    /// ([`default_mob_phase_once_no_intent_is_owed`]), so a mob something
+    /// else lifted since the obligation was staged is left as it runs.
     ///
     /// The host must first declare its composition. Identity compositions
     /// register current continuity owners before activation; classic
     /// compositions explicitly finalize without an identity context.
     pub(crate) async fn activate(self) -> Result<(), MobRuntimeError> {
-        match self.handle.status().await? {
+        match default_mob_phase_once_no_intent_is_owed(&self.handle).await? {
             // The only transition MobHandle::resume performs.
             meerkat_mob::MobState::Stopped => {
                 // A stalled resume is not abandoned by Meerkat: the operation
@@ -11531,6 +12589,491 @@ async fn stop_after_failed_startup(
     Ok(meerkat_mob::MobStopReport::default())
 }
 
+/// What a host gives the builder of one of its mobs that is that mob's own
+/// and no other mob's: what prepares its members' builds, what customizes
+/// its members' spawns (the tools a member's customizer gives it hang on
+/// both), and the members whose first build waits for the host's
+/// preparation.
+#[derive(Clone, Default)]
+pub(crate) struct HostMobMemberWiring {
+    pub(crate) member_build_preparer: Option<Arc<dyn meerkat_mob::MemberBuildPreparer>>,
+    pub(crate) spawn_member_customizer: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+    pub(crate) host_pending_members: Vec<meerkat_mob::AgentIdentity>,
+}
+
+/// What the runtime's table of entries keeps under a mob's id, as a release
+/// a create asks before its mob exists
+/// ([`crate::private_owners::PrivateOwners::bind_create_release`]). The
+/// table is held weakly: its host holds the launch's mob set, whose create
+/// admission holds the launch's record, which holds this. A runtime that
+/// has gone serves no create.
+struct TableOfEntriesRelease(std::sync::Weak<dyn HostMobEntryWiring>);
+
+#[async_trait]
+impl crate::private_owners::MobCreateRelease for TableOfEntriesRelease {
+    fn what(&self) -> &'static str {
+        "what the runtime's table of entries keeps under the mob's id"
+    }
+
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String> {
+        let Some(entries) = self.0.upgrade() else {
+            return Err("the runtime that serves this launch has ended".to_string());
+        };
+        entries
+            .release_before_create(mob_id)
+            .await
+            .map_err(|error| match error {
+                MobError::WiringError(reason) => reason,
+                other => other.to_string(),
+            })
+    }
+
+    fn forget_at_admission(&self, mob_id: &meerkat_mob::MobId) {
+        if let Some(entries) = self.0.upgrade() {
+            entries.forget_at_admission(mob_id);
+        }
+    }
+}
+
+/// Where the launch's composition asks for the member wiring of a mob the
+/// host serves beside its default mob. The mob's entry owns that wiring
+/// (its identity runtime is built with that mob's handle, and its
+/// customizer tools are its own), so the composition builds none: it asks
+/// by mob id each time the mob set builds the mob, at its create and at
+/// each load of its store. An error refuses that build.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub(crate) trait HostMobEntryWiring: Send + Sync {
+    /// A mob is about to be created under `mob_id`, an id the mob set holds
+    /// no mob for: whatever the host still keeps under that id is what an
+    /// earlier mob of the same id left behind (a destroy whose release
+    /// never ran or failed, a write that came after it), and it is released
+    /// here, before anything of the mob exists, so that the new mob reads
+    /// none of it. The create admission asks it, as one of the releases
+    /// bound to the launch's record ([`TableOfEntriesRelease`]). An error
+    /// refuses the create.
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), MobError>;
+
+    /// A create under `mob_id` passed every release its admission asks,
+    /// [`Self::release_before_create`] among them, and is admitted: what
+    /// the host holds of the id in memory that goes only with an admitted
+    /// create is forgotten here. It cannot fail and waits for nothing; a
+    /// create a release refuses does not ask it. A table that holds
+    /// nothing of that kind forgets nothing.
+    fn forget_at_admission(&self, mob_id: &meerkat_mob::MobId) {
+        let _ = mob_id;
+    }
+
+    async fn member_wiring(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<HostMobMemberWiring, MobError>;
+
+    /// The mob set destroyed a mob and no longer manages it
+    /// ([`meerkat_mob_mcp::MobMcpState::set_after_destroy`]): what the
+    /// runtime still holds of a mob the set no longer manages (its entry,
+    /// and with it handles on that mob's database) is ended now, on a task
+    /// of its own, and not when the task that follows the set next comes
+    /// to it. The destroy's storage cleanup waits about a second for those
+    /// handles to go.
+    ///
+    /// The mob set calls this on the destroy's own task, and again before
+    /// each retry of an outstanding cleanup: it must not block, so it
+    /// starts that work and waits for none of it. By then another mob may
+    /// stand under `destroyed`: nothing is ended, or dropped, by the id.
+    fn after_destroy(&self, destroyed: &meerkat_mob::MobId);
+
+    /// The identity plane of the mob of this table whose roster names the
+    /// member of the session `session`, read without waiting: `None` for a
+    /// session no member of a mob of the table holds, and while a roster is
+    /// being written. The agent mob tools ask it for the member a tool
+    /// surface was built for: an agent's identity tools are those of its
+    /// own mob. A table that serves no identity planes answers none.
+    fn identity_plane_of_session(
+        &self,
+        session: &meerkat_core::types::SessionId,
+    ) -> Option<MobIdentityPlane> {
+        let _ = session;
+        None
+    }
+}
+
+/// What the launch gives the builder of a mob it hosts: the host's
+/// composition of that mob. [`MobRuntime::prepare`] configures the builder
+/// of the launch's mob with it, and it is the composition a mob set is
+/// given for the mobs it builds for the host
+/// ([`meerkat_mob_mcp::HostMobComposition`]): a mob the set builds and a mob
+/// the launch builds are configured by the same code.
+///
+/// It holds what every build of the launch needs and nothing of one mob:
+/// the storage, the definition and the mob's id are the build's. The one
+/// thing of a mob it carries is a value the mob set asks it for: the stored
+/// definition the launch judged for its default mob
+/// ([`JudgedDefaultMobDefinition`]).
+///
+/// [`MobBootstrapSpec::finalize_agent_mob_tools`] builds it, in preparation
+/// and before the mob set the launch declares its mob to, which is given
+/// this value itself: the set never exists without the launch's
+/// composition, so no build of a mob of the host waits for it.
+pub(crate) struct LaunchMobComposition {
+    /// What the launch judged of its default mob's store, written once by
+    /// [`MobRuntime::prepare`] before it asks the mob set to serve that mob.
+    judged_default_mob: JudgedDefaultMobDefinition,
+    session_service: Arc<dyn MobSessionService>,
+    /// The runtime adapter the session service embeds or was given, when
+    /// there is one.
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    allow_ephemeral_sessions: bool,
+    /// The host's option, before the launch's authority is applied to it.
+    notify_orchestrator_on_resume: bool,
+    composition_authority: crate::mob_composition_manifest::CompositionAuthority,
+    fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
+    /// What the launch gives the builder of its own mob and of no other
+    /// mob: the spec's member build preparer, its spawn customizers and
+    /// the members whose first build waits for the host.
+    default_mob_wiring: HostMobMemberWiring,
+    /// Where the member wiring of a mob that is not the launch's own is
+    /// asked for; `None` when nothing serves such a mob an entry.
+    entry_wiring: Option<Arc<dyn HostMobEntryWiring>>,
+    /// What forces the launch's member auth binding onto each member spawn
+    /// and rebuild, when the launch names one. It holds for every mob of
+    /// the launch, and runs after the mob's own spawn customizers.
+    member_auth_binding_customizer: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+    /// The refusal of a member placed on another host that would carry a
+    /// personal MCP server, when the composition has such servers. It
+    /// holds for every mob of the launch.
+    personal_placement_guard: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+    private_owners: crate::private_owners::PrivateOwners,
+    member_runtime_registration_hook: Option<Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>>,
+    member_restore: crate::identity_first::MemberRestore,
+    member_model_config: Option<Arc<meerkat::Config>>,
+    session_identity_config_root: Option<PathBuf>,
+    tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
+    default_external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
+    tool_bundles: BTreeMap<String, Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    #[cfg(feature = "extension-state")]
+    before_activation: Option<meerkat_mob::MobBeforeActivation>,
+    workgraph_service: Option<meerkat::WorkGraphService>,
+    /// The mob-wide default client, already wrapped for replay and for
+    /// every provider the definition resolves to.
+    default_llm_client: Option<Arc<dyn LlmClient>>,
+}
+
+impl LaunchMobComposition {
+    /// The member wiring of the mob a build is of: the launch's own for its
+    /// default mob, and for any other mob what that mob's entry answers
+    /// ([`HostMobEntryWiring`]). A mob that is not the default mob is never
+    /// given the default mob's wiring: with nothing to ask it is built
+    /// with none.
+    async fn member_wiring_of(
+        &self,
+        build: &meerkat_mob_mcp::HostMobBuild<'_>,
+    ) -> Result<HostMobMemberWiring, MobError> {
+        if build.default_mob {
+            return Ok(self.default_mob_wiring.clone());
+        }
+        match &self.entry_wiring {
+            Some(entries) => entries.member_wiring(build.mob_id()).await,
+            None => Ok(HostMobMemberWiring::default()),
+        }
+    }
+
+    /// `builder`, a clean builder of the mob `mob_id` (over its definition
+    /// or its storage and nothing else), with everything the launch gives a
+    /// mob it hosts and with `wiring`, that mob's own member wiring.
+    fn configure(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+        wiring: &HostMobMemberWiring,
+        mut builder: MobBuilder,
+    ) -> MobBuilder {
+        // MobActor's autonomous readiness/comms-drain path consults the
+        // builder-published runtime adapter directly. For session services
+        // that already embed a runtime adapter (definition-based ephemeral
+        // and persistent-with-runtime-backed-service), forward that adapter
+        // explicitly so autonomous members do not come up session-backed but
+        // runtime-unattached.
+        if let Some(adapter) = self.runtime_adapter.clone() {
+            builder = builder.with_runtime_adapter(adapter);
+        }
+
+        builder = builder
+            .with_session_service(self.session_service.clone())
+            .allow_ephemeral_sessions(self.allow_ephemeral_sessions)
+            // A candidate launch runs no orchestrator resume turn: the turn is
+            // the authoritative launch's, which notifies as before.
+            .notify_orchestrator_on_resume(
+                self.notify_orchestrator_on_resume
+                    && self.composition_authority.speaks_for_composition(),
+            )
+            // Not persisted by the mob: create and resume both apply it.
+            .with_fork_instruction_policy(self.fork_instruction_policy);
+
+        // Every mob this launch builds refuses runtime-plane member
+        // identities, after the spec's own customizers have run, and a
+        // composition with personal MCP servers refuses a member placed on
+        // another host that would carry one; last, it gives each member a
+        // private member asks for that member's owner. A launch that names
+        // a member auth binding forces it onto each member right after the
+        // mob's own customizers, in every mob it builds.
+        let own_then_binding = match &self.member_auth_binding_customizer {
+            Some(binding) => Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                wiring.spawn_member_customizer.clone(),
+                Arc::clone(binding),
+            )),
+            None => wiring.spawn_member_customizer.clone(),
+        };
+        builder = builder.with_spawn_member_customizer(
+            crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                crate::member_comms_id::runtime_plane_guarded_customizer(
+                    mob_id,
+                    match &self.personal_placement_guard {
+                        Some(guard) => {
+                            Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                                own_then_binding,
+                                Arc::clone(guard),
+                            ))
+                        }
+                        None => own_then_binding,
+                    },
+                ),
+                self.private_owners.spawn_customizer(),
+            ),
+        );
+        // A member private to a person is known to no other member's own
+        // operator tools but those of the members private to the same person.
+        builder = builder.with_member_tool_audience(self.private_owners.member_tool_audience());
+        if let Some(hook) = self.member_runtime_registration_hook.clone() {
+            builder = builder.with_member_runtime_registration_hook(hook);
+        }
+        // Member residency: how much the start materializes, how many
+        // members it restores at once, which members wait for Meta's
+        // preparation, and whether this launch may act on the shared store
+        // at all. Core decides every wake from these; Meta wakes nothing.
+        builder = builder
+            .with_member_restore_policy(self.member_restore.policy())
+            .with_resume_restore_concurrency(
+                crate::identity_first::orchestrator::identity_restore_concurrency(),
+            )
+            .with_composition_authority(if self.composition_authority.speaks_for_composition() {
+                meerkat_mob::MobCompositionAuthority::Authoritative
+            } else {
+                meerkat_mob::MobCompositionAuthority::NonAuthoritative
+            });
+        if !wiring.host_pending_members.is_empty() {
+            builder =
+                builder.with_host_pending_members(wiring.host_pending_members.iter().cloned());
+        }
+        // How a seated member's endpoint is recorded: a socket transport's
+        // member registers its endpoint when it first runs, and an inproc
+        // member's comms identity lives where the member factory keeps it.
+        // The mob's session service reports that root and Core seats under
+        // it; a root the host declared for its factory
+        // (`MobBootstrapSpec::with_session_identity_config_root`) overrides
+        // the report, and one that differs from the report is logged. A
+        // service that reports no durable root, with no root declared, has
+        // every seat refused typed.
+        let network_member_comms = self.member_model_config.as_ref().is_some_and(|config| {
+            !matches!(config.comms.mode, meerkat_core::CommsRuntimeMode::Inproc)
+        });
+        if network_member_comms {
+            builder = builder.with_network_member_comms();
+        } else if let Some(declared) = self.session_identity_config_root.as_deref() {
+            let root = meerkat::session_comms_identity_root_in(declared);
+            let reported = self.session_service.session_comms_identity_root();
+            if let Some(overridden) = reported_root_overridden(&root, &reported) {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    declared = %root.display(),
+                    reported = %overridden.display(),
+                    "the declared root of the members' session comms identities \
+                     (MobBootstrapSpec::with_session_identity_config_root) differs from the one \
+                     the mob's session service reports for its agent builds: the mob seats \
+                     members under the declared root, and a member whose first build keeps its \
+                     key pair under the reported one is refused at its first wake"
+                );
+            }
+            builder = builder.with_member_comms_identity_root(root);
+        }
+        if let Some(preparer) = wiring.member_build_preparer.clone() {
+            builder = builder.with_member_build_preparer(preparer);
+        }
+        if let Some(registry) = self.tool_consequence_policy_registry.clone() {
+            builder = builder.with_tool_consequence_policy_registry(registry);
+        }
+
+        if let Some(provider) = self.default_external_tools_provider.clone() {
+            builder = builder.with_default_external_tools_provider(Some(provider));
+        }
+        for (name, dispatcher) in &self.tool_bundles {
+            builder = builder.register_tool_bundle(name.clone(), Arc::clone(dispatcher));
+        }
+        #[cfg(feature = "extension-state")]
+        if let Some(callback) = &self.before_activation {
+            builder = builder.before_activation(Arc::clone(callback));
+        }
+
+        // Apply-time WorkGraph attention overlays: the provisioner's
+        // MobSessionRuntimeExecutor injects the scoped tool overlay before
+        // apply_runtime_turn for every mob-executor turn iff the builder
+        // carries the service.
+        builder = builder.with_workgraph_service(self.workgraph_service.clone());
+
+        // Durable workers (members spawned with a durable identity: the
+        // members of a `durable = true` profile, and every identity-first
+        // member): before Meerkat resumes such a worker's interrupted run,
+        // the gate checks over the same mob-realm service (the realm of the
+        // mob this builds, the launch mob's or a hosted mob's own) that the
+        // worker still holds its WorkGraph work. Without a service, or over a
+        // backend that has no WorkGraph, there is no claim
+        // to read, no gate is installed, and the run resumes unchecked. A
+        // candidate launch installs none: Meerkat asks the gate before it
+        // checks the run-start hold, and a superseded verdict would settle a
+        // run the candidate holds for the authoritative launch.
+        if let Some(gate) = crate::workgraph_resume_gate::mob_resume_gate(
+            self.workgraph_service.as_ref(),
+            mob_id,
+            self.composition_authority,
+        ) {
+            builder = builder.with_durable_resume_gate(Arc::new(gate));
+        }
+
+        if let Some(client) = self.default_llm_client.clone() {
+            builder = builder.with_default_llm_client(client);
+        }
+        builder
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl meerkat_mob_mcp::HostMobComposition for LaunchMobComposition {
+    /// The load of the launch's default mob is bound to the stored
+    /// definition the launch judged. Only the launch's own serve loads that
+    /// mob, after preparation wrote what it judged; a load that asks before
+    /// is refused, and waits for nothing. The load of any other mob of the
+    /// host is bound to no snapshot.
+    async fn resume_expectation(
+        &self,
+        build: &meerkat_mob_mcp::HostMobBuild<'_>,
+    ) -> Result<Option<meerkat_mob::MobDefinitionSnapshot>, MobError> {
+        if !build.default_mob {
+            return Ok(None);
+        }
+        self.judged_default_mob.get().cloned().ok_or_else(|| {
+            MobError::WiringError(format!(
+                "the launch has not judged what the store of its default mob '{}' holds: the \
+                 mob is loaded by the launch's own serve, after the launch judged its stored \
+                 definition",
+                build.mob_id()
+            ))
+        })
+    }
+
+    async fn compose(
+        &self,
+        build: &meerkat_mob_mcp::HostMobBuild<'_>,
+        builder: MobBuilder,
+    ) -> Result<MobBuilder, MobError> {
+        // A mob beside the launch mob is named to the launch's memory
+        // before it is built, at its create and at every load: its members
+        // have no agent memory and take no part in the launch's.
+        if !build.default_mob {
+            self.private_owners
+                .hosted_mobs()
+                .name(build.mob_id().as_str());
+            // From here the record owes the read of this mob's durable
+            // records, before the set builds the mob and so before any
+            // request for it: what the record does not hold of the mob's
+            // members is not known until the mob is read.
+            self.private_owners.owe_the_read_of(build.mob_id().as_str());
+        }
+        let wiring = self.member_wiring_of(build).await?;
+        Ok(self.configure(build.mob_id(), &wiring, builder))
+    }
+}
+
+/// The stored definition a launch judged before it asked its mob set to
+/// serve its default mob: the snapshot the load of that mob is bound to, or
+/// `None` when the store holds no mob and the serve creates it. The mob set
+/// takes it through its host composition
+/// (`meerkat_mob_mcp::HostMobComposition::resume_expectation`), which is
+/// built before the store is read, so the launch hands it over here.
+///
+/// It is a value and no state of the launch: preparation writes it exactly
+/// once, before the serve, and nothing clears it or reads it to learn how
+/// far the launch is. The cell is a [`std::sync::OnceLock`], which keeps
+/// its first value for good and refuses every later write, and its one
+/// writer is [`MobRuntime::prepare`], which consumes the spec.
+#[derive(Clone, Default)]
+struct JudgedDefaultMobDefinition(
+    Arc<std::sync::OnceLock<Option<meerkat_mob::MobDefinitionSnapshot>>>,
+);
+
+impl JudgedDefaultMobDefinition {
+    /// Write what the launch judged. A second write is refused and changes
+    /// nothing.
+    fn judged(
+        &self,
+        snapshot: Option<meerkat_mob::MobDefinitionSnapshot>,
+    ) -> Result<(), MobRuntimeError> {
+        self.0.set(snapshot).map_err(|_| {
+            MobRuntimeError::InvalidConfig(
+                "the stored definition of the launch's default mob was judged once already: \
+                 what a launch judged is written once"
+                    .into(),
+            )
+        })
+    }
+
+    /// What the launch judged; `None` until it has.
+    fn get(&self) -> Option<&Option<meerkat_mob::MobDefinitionSnapshot>> {
+        self.0.get()
+    }
+}
+
+/// Declare the launch's mob `mob_id` to the mob set `state` as the host's
+/// default mob, over the declared `store`, with the launch's `composition`
+/// for every mob the set builds for the host.
+///
+/// A set a launch declares its mob to loads a stored mob when something
+/// addresses it: at its first use it takes a census of the stored mobs and
+/// loads the ones whose members hold work, so a host's start does not grow
+/// with the number of mobs it has stored, and a mob that stays idle is
+/// unloaded until it is addressed again. The default mob is not touched by
+/// that: the launch serves it, and the set never unloads it.
+fn declare_default_mob(
+    state: meerkat_mob_mcp::MobMcpState,
+    composition: Arc<dyn meerkat_mob_mcp::HostMobComposition>,
+    mob_id: meerkat_mob::MobId,
+    store: &crate::mob_composition_manifest::DeclaredMobStore,
+    private_owners: &crate::private_owners::PrivateOwners,
+) -> Result<meerkat_mob_mcp::MobMcpState, MobError> {
+    // The set asks the composition for every build of a mob the host
+    // creates from here on: the launch says so to its record of who each
+    // member is private to, which reads it for a mob that is stored and
+    // not loaded.
+    private_owners.the_launch_composes_its_hosts_mobs();
+    state
+        .with_mob_restore_policy(meerkat_mob_mcp::MobRestorePolicy::OnDemand)
+        .with_host_mob_composition(composition)
+        .with_default_mob(default_mob_declaration(mob_id, store))
+}
+
+/// The declaration of the launch's mob `mob_id` to a mob set, for the
+/// declared `store`.
+fn default_mob_declaration(
+    mob_id: meerkat_mob::MobId,
+    store: &crate::mob_composition_manifest::DeclaredMobStore,
+) -> meerkat_mob_mcp::DefaultMobDeclaration {
+    match store.file() {
+        None => meerkat_mob_mcp::DefaultMobDeclaration::in_memory(mob_id),
+        Some(file) => {
+            meerkat_mob_mcp::DefaultMobDeclaration::persistent(mob_id, file.to_path_buf())
+        }
+    }
+}
+
 /// The durable root the mob's session service reports for its agent builds
 /// when it is not `declared`, the members' session comms identity root the
 /// host declared (`MobBootstrapSpec::with_session_identity_config_root`):
@@ -11548,6 +13091,152 @@ fn reported_root_overridden<'a>(
         }
         _ => None,
     }
+}
+
+/// Record the supplied `definition` as the composition of a mob store that
+/// holds no mob yet, where the store keeps a composition manifest
+/// (`location`): a create refuses rather than leave behind a store whose
+/// composition the next restart cannot judge.
+async fn record_composition_of_new_store(
+    location: Option<&crate::mob_composition_manifest::ManifestLocation>,
+    definition: &MobDefinition,
+    authority: crate::mob_composition_manifest::CompositionAuthority,
+) -> Result<(), MobRuntimeError> {
+    if let Some(location) = location {
+        location
+            .record_on_create(definition, authority)
+            .await
+            .map_err(MobRuntimeError::CompositionProvenance)?;
+    }
+    Ok(())
+}
+
+/// Apply what a judged resume ([`judge_resume`]) leaves to preparation: the
+/// supplied `definition` is recorded as the composition of a store that has
+/// no manifest, and a candidate that knowingly boots a stored definition
+/// differing from the supplied one is logged and answered as the degraded
+/// storage slot the runtime's health reports.
+async fn apply_judged_resume(
+    judged: &JudgedResume,
+    location: Option<&crate::mob_composition_manifest::ManifestLocation>,
+    definition: &MobDefinition,
+    authority: crate::mob_composition_manifest::CompositionAuthority,
+) -> Result<Option<crate::storage_health::StorageSlotSummary>, MobRuntimeError> {
+    if judged.record_supplied_composition
+        && let Some(location) = location
+    {
+        tracing::info!(
+            manifest = %location.manifest_label().display(),
+            "no composition manifest for this mob storage; adopting the supplied \
+             definition as its recorded composition"
+        );
+        location
+            .record_on_create(definition, authority)
+            .await
+            .map_err(MobRuntimeError::CompositionProvenance)?;
+    }
+    if judged.candidate_diverged.is_empty() {
+        return Ok(None);
+    }
+    tracing::warn!(
+        mob_id = %definition.id,
+        diverged_fields = %judged.candidate_diverged.join(", "),
+        "candidate launch boots the STORED mob definition, which differs from \
+         the supplied one (runtime_options.mob_composition.candidate_definition \
+         = \"stored\"); the supplied definition is not in effect"
+    );
+    Ok(Some(crate::storage_health::StorageSlotSummary::degraded(
+        "mob_composition",
+        format!(
+            "candidate launch runs the stored mob definition, not the \
+             supplied one; diverged: {}",
+            judged.candidate_diverged.join(", ")
+        ),
+    )))
+}
+
+/// Refuse a declared store that no longer holds what the launch read of it
+/// from its own open, before its mob set existed
+/// ([`MobBootstrapSpec::read_launch_definition`]), with the refusal of a
+/// definition that changed under the launch. `read_before` is what that
+/// read found; `stored` is what preparation's own read of the store,
+/// through the mob set, finds now. Every launch over a declared store makes
+/// that read (preparation runs it itself when nothing ran it before), so
+/// no such launch reaches `None`, which holds the store to nothing.
+/// The two agree when both found no definition, or the same definition
+/// epoch at the same event.
+fn refuse_a_store_that_moved_since_the_read_before_preparation(
+    read_before: Option<&LaunchDefinitionRead>,
+    stored: Option<&meerkat_mob::MobDefinitionSnapshot>,
+) -> Result<(), MobRuntimeError> {
+    let at =
+        |snapshot: &meerkat_mob::MobDefinitionSnapshot| (snapshot.epoch(), snapshot.event_cursor());
+    let expected = match read_before {
+        None => return Ok(()),
+        Some(LaunchDefinitionRead::Fresh) => None,
+        Some(LaunchDefinitionRead::Resume(judged)) => judged.snapshot.as_ref().map(at),
+    };
+    let actual = stored.map(at);
+    if expected == actual {
+        return Ok(());
+    }
+    let (expected_epoch, expected_event_cursor) =
+        expected.unwrap_or((NO_STORED_DEFINITION_EPOCH, 0));
+    Err(MobRuntimeError::Mob(
+        MobError::MobDefinitionAuthorityChanged {
+            expected_epoch,
+            expected_event_cursor,
+            actual_epoch: actual.map(|(epoch, _)| epoch),
+            actual_event_cursor: actual.map(|(_, event_cursor)| event_cursor),
+        },
+    ))
+}
+
+/// Insert the mob a launch built over an opened storage into the launch's
+/// mob set, as a handle built outside the set, and complete the set. Only
+/// such a mob is inserted: a launch over a declared store declared its mob
+/// to the set, which built it and refuses a handle under its id.
+async fn register_opened_storage_mob(
+    state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: meerkat_mob::MobId,
+    handle: &MobHandle,
+    child_mob_root_claim: Option<&Arc<crate::child_mob_storage::ChildMobRootClaim>>,
+    authority: crate::mob_composition_manifest::CompositionAuthority,
+) -> Result<(), MobRuntimeError> {
+    state.mob_insert_handle(mob_id, handle.observer()).await;
+    match child_mob_root_claim {
+        // Durable child mobs: complete the native restore on the final
+        // state now, before the managed set is complete and before
+        // delivery arms, so a persisted child is never reported gone
+        // for good while it is merely not restored yet. The restore
+        // itself completes the managed set.
+        Some(claim) => {
+            // From here a child actor may run, so the root stays owned
+            // for the rest of the process.
+            crate::child_mob_storage::retain_until_process_exit(claim);
+            if let Err(error) = state.mob_list().await {
+                // Children restored before the failure may still be
+                // running and are not reachable from here, so the claim
+                // stays retained for the rest of the process.
+                let stop = stop_after_failed_startup(handle, authority).await;
+                tracing::error!(
+                    %error,
+                    root_stop = ?stop,
+                    child_root = %claim.root().display(),
+                    "durable child mob restore failed; the child root stays owned \
+                     until process exit"
+                );
+                return Err(MobRuntimeError::ChildMobStorage(
+                    crate::child_mob_storage::ChildMobStorageError::Restore(error),
+                ));
+            }
+        }
+        // Process-bound child mobs: this state restores this spec's one
+        // root handle and has no later restored-handle ingress. Other
+        // hosts sharing the inbox keep custody of their own rows.
+        None => state.declare_mob_set_restored(),
+    }
+    Ok(())
 }
 
 impl MobRuntime {
@@ -11595,99 +13284,26 @@ impl MobRuntime {
         // is the one ingress where explicit resume intent is normalized before
         // the definition reaches meerkat-mob.
         let raw_definition = spec.definition.clone();
-        let effective_runtime_adapter = spec
-            .session_service
-            .acquire_runtime_adapter(spec.runtime_adapter.clone())
-            .map_err(MobRuntimeError::Runtime)?;
-        spec.runtime_adapter = effective_runtime_adapter.clone();
-        // A candidate launch holds the run starts of every session its
-        // runtime store holds before anything registers one: the mob's
-        // resume, its child mobs' restore and every later wake of a stored
-        // member register held, so no run the store left open resumes and no
-        // queued input runs. Child mobs share this runtime, so their members
-        // are held too. A candidate never releases the hold, and the hold is
-        // never durable: the authoritative launch over the same store stages
-        // none.
-        if !spec.composition_authority.speaks_for_composition()
-            && let (Some(machine), Some(store)) = (
-                effective_runtime_adapter.as_deref(),
-                spec.durable_runtime_store.as_deref(),
-            )
-        {
-            hold_stored_sessions_for_candidate(machine, store).await?;
+        let mob_id = spec.definition.id.clone();
+        // A launch over a declared store judges the resume of its mob from
+        // its own open of the store before its mob set exists, as a launch
+        // over an opened storage judges before it builds anything: a launch
+        // this judgement refuses (a diverged composition, a refused
+        // candidate) has restored no child mob and started no pass. A
+        // launch that read its store before preparation made the judgement
+        // there; every other one makes it here.
+        if spec.declared_store.is_some() && spec.launch_definition_read.is_none() {
+            spec.read_launch_definition()
+                .await
+                .map_err(|error| root_mob_restore_failure(&mob_id, error))?;
         }
+        // The launch's own open of its declared store served that read, and
+        // ends here: the mob set built next opens the store itself.
+        drop(spec.declared_store_opened.take());
+        let effective_runtime_adapter = spec.settle_before_first_use().await?;
         let native_work_governed = effective_runtime_adapter
             .as_ref()
             .is_some_and(|machine| machine.has_native_work_authorization_host());
-        // Before anything reads the agent mob-tool state: child mobs get the
-        // host's final application tool policy and child bundles.
-        if let Some(install) = &spec.agent_mob_tools_install {
-            let delivery = spec
-                .runtime_delivery
-                .as_ref()
-                .ok_or(MobRuntimeError::Delivery(
-                    MobRuntimeDeliveryError::MissingComposition,
-                ))?;
-            if !delivery.shares_composition(&install.delivery) {
-                return Err(MobRuntimeError::Delivery(
-                    MobRuntimeDeliveryError::CompositionChanged,
-                ));
-            }
-        }
-        if let Some(delivery) = &spec.runtime_delivery {
-            delivery
-                .validate_runtime(effective_runtime_adapter.as_deref())
-                .map_err(MobRuntimeError::Delivery)?;
-            delivery.preflight().map_err(MobRuntimeError::Delivery)?;
-        }
-        // Before the agent mob-tool state is rebuilt and before the mob is
-        // built: both then hold the layered services.
-        spec.install_member_socket_place();
-        spec.apply_agent_mob_child_policy()?;
-        #[cfg(feature = "extension-state")]
-        if let Some(servers) = spec.child_mcp_servers.take() {
-            let state = spec.agent_mob_mcp_state.as_ref().ok_or_else(|| {
-                MobRuntimeError::InvalidConfig(
-                    "document MCP child delivery requires an agent mob-tool state".into(),
-                )
-            })?;
-            state.set_child_mcp_servers(servers);
-        }
-        #[cfg(feature = "extension-state")]
-        if let (Some(state), Some(callback)) = (&spec.agent_mob_mcp_state, &spec.before_activation)
-        {
-            state
-                .set_before_activation(Arc::clone(callback))
-                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
-        }
-        #[cfg(feature = "extension-state")]
-        if let (Some(state), Some(hook)) = (&spec.agent_mob_mcp_state, &spec.after_destroy) {
-            state
-                .set_after_destroy(Arc::clone(hook))
-                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
-        }
-        // The agent mob tools' create admission: the host's own decides
-        // first, when there is one, then every mob a member creates records
-        // its creator's private owner, which the members seated in it take
-        // ([`crate::private_owners::PrivateOwners::before_create_hook`]).
-        if let Some(state) = &spec.agent_mob_mcp_state {
-            #[cfg(feature = "extension-state")]
-            let host_hook = spec.before_create.clone();
-            #[cfg(not(feature = "extension-state"))]
-            let host_hook = None;
-            state
-                .set_before_create(
-                    spec.private_owners
-                        .before_create_hook(Arc::downgrade(state), host_hook),
-                )
-                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
-            spec.private_owners.bind_child_mobs(state);
-            // Before a mob is created under an id, the admission asks for
-            // the release of the schedules the launch keeps under that id
-            // ([`crate::mob_schedules_release`]).
-            spec.private_owners
-                .bind_create_release(Arc::new(spec.mob_schedules.clone()));
-        }
         auto_mark_declared_resume_overrides(&mut spec.definition);
         let ephemeral_dir = spec._ephemeral_dir.clone();
         let state_dir_claims = std::mem::take(&mut spec.state_dir_claims);
@@ -11695,77 +13311,195 @@ impl MobRuntime {
         let session_service = spec.session_service.clone();
         let member_model_config = spec.member_model_config.clone();
         let binary_blob_store = spec.binary_blob_store.clone();
-        let mob_id = spec.definition.id.clone();
-        // A member placed on another host never carries a personal MCP
-        // server of this composition (`crate::personal_accounts::placement`).
-        let personal_placement_guard = spec.personal_accounts_slot.accounts().map(|_| {
-            crate::personal_accounts::placement::PlacementGuard::customizer(
-                spec.personal_accounts_slot.clone(),
-            )
-        });
         let agent_mob_mcp_state = spec.agent_mob_mcp_state.clone();
         let implicit_delegate_retirement_overrides =
             spec.implicit_delegate_retirement_overrides.clone();
         let console_spawn_sink_slot = spec.console_spawn_sink_slot.clone();
         let identity_runtime_slot = spec.identity_runtime_slot.clone();
-        let default_llm_client = spec
-            .options
-            .default_llm_client
-            .clone()
-            .map(ReplaySanitizingLlmClient::wrap)
-            // Mob-wide default: serves every member on every provider the
-            // definition resolves to (see `ProviderAgnosticLlmClient`).
-            .map(ProviderAgnosticLlmClient::wrap);
-        if let Some(slot) = spec.agent_mob_default_llm_client_slot.as_ref() {
-            *slot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = default_llm_client.clone();
-        }
 
-        // Create-vs-resume selection, in ONE place. An in-memory storage is
-        // always empty at boot, so this single read serves both modes:
-        // ephemeral launches always create, and only a persistent path that
-        // already holds events resumes. No launch site needs to decide, which
-        // is what stops the three launch paths from drifting apart again.
-        //
-        // `spec.definition` is already normalized here:
-        // `auto_mark_declared_resume_overrides` ran above, so the composition
-        // recorded on create and the one compared on resume are the same form.
-        // Recording a pre-normalization definition would mismatch its own
-        // first boot.
-        let event_log_empty = spec.storage.is_event_log_empty().await.map_err(|err| {
-            root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(MobError::from(err)))
-        })?;
         let manifest_location = spec.mob_storage_provenance.manifest_location();
         // Health-visible record of a candidate that knowingly boots a stored
         // definition differing from the supplied one.
         let mut candidate_composition_slot: Option<crate::storage_health::StorageSlotSummary> =
             None;
-        let mut builder = if event_log_empty {
-            if let Some(location) = manifest_location.as_ref() {
+
+        // Everything the launch gives the builder of a mob it hosts, as one
+        // value: the builder of a mob over an opened storage is configured
+        // with it here, and the mob set a launch declares its mob to was
+        // built with the same value as the host's composition
+        // (`MobBootstrapSpec::finalize_agent_mob_tools`).
+        let composition = spec.launch_composition.take().ok_or_else(|| {
+            MobRuntimeError::InvalidConfig(
+                "the launch's composition of the mobs it hosts was not built".into(),
+            )
+        })?;
+
+        // The base session layer decides which member builds get their
+        // WorkGraph tools behind this runtime's admission by the scope bound
+        // here: the launch mob's. It is bound before the launch mob is
+        // built, by the mob set or over the opened storage below, so no
+        // member of it is built without it.
+        spec.member_workgraph_tools
+            .bind(spec.workgraph_service.as_ref(), &mob_id);
+
+        // A launch over a declared store declared its mob to its mob set,
+        // and the set creates or loads the mob; a launch over an opened
+        // storage builds the mob over it here and inserts its handle into
+        // the set, when it has one.
+        let declared_set = if spec.declared_store.is_some() {
+            Some(spec.declared_mob_set().cloned().ok_or_else(|| {
+                MobRuntimeError::InvalidConfig(
+                    "a launch over a declared mob store has its mob served by the mob set \
+                     it declared its mob to, and no such set stands"
+                        .into(),
+                )
+            })?)
+        } else {
+            None
+        };
+        let (handle, created) = if let Some(state) = declared_set.as_ref() {
+            // From the mob set's first verb to the serve: what the store
+            // holds, judged, and handed to the composition.
+            let judged = async {
+                // Preparation's own read of the store, through the mob set:
+                // the launch's first use of the set, which restores the
+                // durable child mobs, and the authority for everything that
+                // follows.
+                let stored = spec
+                    .declared_store_definition()
+                    .await
+                    .map_err(|error| root_mob_restore_failure(&mob_id, error))?;
+                // What the launch read of its store from its own open
+                // (`MobBootstrapSpec::read_launch_definition`) decided
+                // nothing here. The launch resolved from it (the
+                // identity-first roster), so a store that holds something
+                // else by now is not what it resolved from, and is refused
+                // rather than served.
+                refuse_a_store_that_moved_since_the_read_before_preparation(
+                    spec.launch_definition_read.take().as_ref(),
+                    stored.as_ref(),
+                )?;
+                // The load is bound to the snapshot judged here, so a
+                // concurrent epoch refuses before the mob can actuate.
+                let (fresh, expectation) = match stored {
+                    None => {
+                        record_composition_of_new_store(
+                            manifest_location.as_ref(),
+                            &spec.definition,
+                            spec.composition_authority,
+                        )
+                        .await?;
+                        (true, None)
+                    }
+                    Some(snapshot) => {
+                        let judged = judge_resume(
+                            &StoredDefinition::Read(&snapshot),
+                            &spec.mob_storage_provenance,
+                            spec.composition_authority,
+                            spec.candidate_definition,
+                            &spec.definition,
+                            &raw_definition,
+                            false,
+                        )
+                        .await
+                        .map_err(|error| root_mob_restore_failure(&mob_id, error))?;
+                        candidate_composition_slot = apply_judged_resume(
+                            &judged,
+                            manifest_location.as_ref(),
+                            &spec.definition,
+                            spec.composition_authority,
+                        )
+                        .await?;
+                        (false, judged.snapshot)
+                    }
+                };
+                // What the launch judged, handed to its composition for
+                // the load of its mob: written here, once, and before the
+                // serve, which is the only thing that loads the launch's
+                // mob.
+                composition.judged_default_mob.judged(expectation)?;
+                Ok::<bool, MobRuntimeError>(fresh)
+            }
+            .await;
+            let fresh = match judged {
+                Ok(fresh) => fresh,
+                Err(refusal) => {
+                    // The launch is refused after its mob set's first verb
+                    // and before the serve: no serve comes, so the set is
+                    // stood down, and a lookup that waits for the launch's
+                    // serve of its mob is answered instead of waiting for
+                    // as long as the process lives.
+                    let stood_down = state
+                        .stand_down(std::time::Instant::now() + REFUSED_LAUNCH_SET_STAND_DOWN_BOUND)
+                        .await;
+                    if !stood_down.is_clean() {
+                        tracing::warn!(
+                            mob_id = %mob_id,
+                            ?stood_down,
+                            "the mob set of a refused launch did not settle its own work \
+                             within the bound; its admission is closed and no lookup waits \
+                             for the launch"
+                        );
+                    }
+                    return Err(refusal);
+                }
+            };
+            // The set serves the launch's mob: it creates the mob in a store
+            // that holds none and loads it from a store that holds one, with
+            // the launch's composition, and registers it. It never changes
+            // the mob's phase.
+            let served = state
+                .serve_default_mob(meerkat_mob_mcp::DefaultMobServe::new(spec.definition))
+                .await
+                .map_err(|failure| {
+                    let error = MobRuntimeError::Mob(failure.error);
+                    if fresh {
+                        error
+                    } else {
+                        root_mob_restore_failure(&mob_id, error)
+                    }
+                })?;
+            (served.handle, served.created)
+        } else {
+            // Create-vs-resume selection, in ONE place. An in-memory storage is
+            // always empty at boot, so this single read serves both modes:
+            // ephemeral launches always create, and only a persistent path that
+            // already holds events resumes. No launch site needs to decide, which
+            // is what stops the three launch paths from drifting apart again.
+            //
+            // `spec.definition` is already normalized here:
+            // `auto_mark_declared_resume_overrides` ran above, so the composition
+            // recorded on create and the one compared on resume are the same form.
+            // Recording a pre-normalization definition would mismatch its own
+            // first boot.
+            let event_log_empty = spec.storage.is_event_log_empty().await.map_err(|err| {
+                root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(MobError::from(err)))
+            })?;
+            let builder = if event_log_empty {
                 // Refuse rather than leave behind a storage whose composition
                 // the next restart cannot judge.
-                location
-                    .record_on_create(&spec.definition, spec.composition_authority)
-                    .await
-                    .map_err(MobRuntimeError::CompositionProvenance)?;
-            }
-            MobBuilder::new(spec.definition, spec.storage)
-        } else {
-            let read = spec.launch_definition_read.take();
-            // A launch that read no definition here before preparation (an
-            // empty log, or an in-process one holding none) resolved what it
-            // read from the supplied definition (the identity-first roster).
-            // A definition written since is not what it resolved from, so it
-            // is refused rather than resumed.
-            let read_no_definition = match &read {
-                Some(LaunchDefinitionRead::Fresh) => true,
-                Some(LaunchDefinitionRead::Resume(judged)) => judged.snapshot.is_none(),
-                None => false,
-            };
-            if read_no_definition
-                && let Some(written) =
-                    spec.storage
+                record_composition_of_new_store(
+                    manifest_location.as_ref(),
+                    &spec.definition,
+                    spec.composition_authority,
+                )
+                .await?;
+                MobBuilder::new(spec.definition, spec.storage)
+            } else {
+                let read = spec.launch_definition_read.take();
+                // A launch that read no definition here before preparation (an
+                // empty log, or an in-process one holding none) resolved what it
+                // read from the supplied definition (the identity-first roster).
+                // A definition written since is not what it resolved from, so it
+                // is refused rather than resumed.
+                let read_no_definition = match &read {
+                    Some(LaunchDefinitionRead::Fresh) => true,
+                    Some(LaunchDefinitionRead::Resume(judged)) => judged.snapshot.is_none(),
+                    None => false,
+                };
+                if read_no_definition
+                    && let Some(written) = spec
+                        .storage
                         .created_definition_snapshot()
                         .await
                         .map_err(|err| {
@@ -11774,227 +13508,64 @@ impl MobRuntime {
                                 MobRuntimeError::Mob(MobError::from(err)),
                             )
                         })?
-            {
-                return Err(MobRuntimeError::Mob(
-                    MobError::MobDefinitionAuthorityChanged {
-                        expected_epoch: NO_STORED_DEFINITION_EPOCH,
-                        expected_event_cursor: 0,
-                        actual_epoch: Some(written.epoch()),
-                        actual_event_cursor: Some(written.event_cursor()),
-                    },
-                ));
-            }
-            let judged = match read {
-                // Judged before preparation
-                // (`MobBootstrapSpec::read_launch_definition`): apply that
-                // judgement, so what was resolved from its definition
-                // describes the mob that runs.
-                Some(LaunchDefinitionRead::Resume(judged)) => *judged,
-                Some(LaunchDefinitionRead::Fresh) | None => judge_resume(
-                    &spec.storage,
-                    &spec.mob_storage_provenance,
-                    spec.composition_authority,
-                    spec.candidate_definition,
-                    &spec.definition,
-                    &raw_definition,
-                    false,
-                )
-                .await
-                .map_err(|error| root_mob_restore_failure(&mob_id, error))?,
-            };
-            if judged.record_supplied_composition
-                && let Some(location) = manifest_location.as_ref()
-            {
-                tracing::info!(
-                    manifest = %location.manifest_label().display(),
-                    "no composition manifest for this mob storage; adopting the supplied \
-                     definition as its recorded composition"
-                );
-                location
-                    .record_on_create(&spec.definition, spec.composition_authority)
-                    .await
-                    .map_err(MobRuntimeError::CompositionProvenance)?;
-            }
-            if !judged.candidate_diverged.is_empty() {
-                tracing::warn!(
-                    mob_id = %mob_id,
-                    diverged_fields = %judged.candidate_diverged.join(", "),
-                    "candidate launch boots the STORED mob definition, which differs from \
-                     the supplied one (runtime_options.mob_composition.candidate_definition \
-                     = \"stored\"); the supplied definition is not in effect"
-                );
-                candidate_composition_slot =
-                    Some(crate::storage_health::StorageSlotSummary::degraded(
-                        "mob_composition",
-                        format!(
-                            "candidate launch runs the stored mob definition, not the \
-                             supplied one; diverged: {}",
-                            judged.candidate_diverged.join(", ")
-                        ),
+                {
+                    return Err(MobRuntimeError::Mob(
+                        MobError::MobDefinitionAuthorityChanged {
+                            expected_epoch: NO_STORED_DEFINITION_EPOCH,
+                            expected_event_cursor: 0,
+                            actual_epoch: Some(written.epoch()),
+                            actual_event_cursor: Some(written.event_cursor()),
+                        },
                     ));
-            }
-            // Bind the builder to the judged snapshot, so a concurrent epoch
-            // refuses before the mob can actuate.
-            if let Some(snapshot) = judged.snapshot {
-                MobBuilder::for_resume_verified(spec.storage, snapshot)
+                }
+                let judged = match read {
+                    // Judged before preparation
+                    // (`MobBootstrapSpec::read_launch_definition`): apply that
+                    // judgement, so what was resolved from its definition
+                    // describes the mob that runs.
+                    Some(LaunchDefinitionRead::Resume(judged)) => *judged,
+                    Some(LaunchDefinitionRead::Fresh) | None => judge_resume(
+                        &StoredDefinition::In(&spec.storage),
+                        &spec.mob_storage_provenance,
+                        spec.composition_authority,
+                        spec.candidate_definition,
+                        &spec.definition,
+                        &raw_definition,
+                        false,
+                    )
+                    .await
+                    .map_err(|error| root_mob_restore_failure(&mob_id, error))?,
+                };
+                candidate_composition_slot = apply_judged_resume(
+                    &judged,
+                    manifest_location.as_ref(),
+                    &spec.definition,
+                    spec.composition_authority,
+                )
+                .await?;
+                // Bind the builder to the judged snapshot, so a concurrent epoch
+                // refuses before the mob can actuate.
+                if let Some(snapshot) = judged.snapshot {
+                    MobBuilder::for_resume_verified(spec.storage, snapshot)
+                } else {
+                    MobBuilder::for_resume(spec.storage)
+                }
+            };
+            let builder = composition.configure(&mob_id, &composition.default_mob_wiring, builder);
+            let handle = if event_log_empty {
+                crate::boxed_future::boxed(|| builder.create()).await?
             } else {
-                MobBuilder::for_resume(spec.storage)
-            }
+                crate::boxed_future::boxed(|| builder.resume())
+                    .await
+                    .map_err(|error| {
+                        root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(error))
+                    })?
+            };
+            (handle, event_log_empty)
         };
-
-        // MobActor's autonomous readiness/comms-drain path consults the
-        // builder-published runtime adapter directly. For session services
-        // that already embed a runtime adapter (definition-based ephemeral
-        // and persistent-with-runtime-backed-service), forward that adapter
-        // explicitly so autonomous members do not come up session-backed but
-        // runtime-unattached.
-        if let Some(adapter) = effective_runtime_adapter.clone() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
-
-        builder = builder
-            .with_session_service(session_service.clone())
-            .allow_ephemeral_sessions(spec.options.allow_ephemeral_sessions)
-            // A candidate launch runs no orchestrator resume turn: the turn is
-            // the authoritative launch's, which notifies as before.
-            .notify_orchestrator_on_resume(
-                spec.options.notify_orchestrator_on_resume
-                    && spec.composition_authority.speaks_for_composition(),
-            )
-            // Not persisted by the mob: create and resume both apply it.
-            .with_fork_instruction_policy(spec.fork_instruction_policy);
-
-        // Every mob this runtime builds refuses runtime-plane member
-        // identities, after the spec's own customizers have run, and a
-        // composition with personal MCP servers refuses a member placed on
-        // another host that would carry one; last, it gives each member a
-        // private member asks for that member's owner.
-        let spawn_member_customizer = match personal_placement_guard {
-            Some(guard) => Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                spec.spawn_member_customizer.clone(),
-                guard,
-            )),
-            None => spec.spawn_member_customizer.clone(),
-        };
-        builder = builder.with_spawn_member_customizer(
-            crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                crate::member_comms_id::runtime_plane_guarded_customizer(
-                    &mob_id,
-                    spawn_member_customizer,
-                ),
-                spec.private_owners.spawn_customizer(),
-            ),
-        );
-        // A member private to a person is known to no other member's own
-        // operator tools but those of the members private to the same person.
-        builder = builder.with_member_tool_audience(spec.private_owners.member_tool_audience());
-        if let Some(hook) = spec.member_runtime_registration_hook.clone() {
-            builder = builder.with_member_runtime_registration_hook(hook);
-        }
-        // Member residency: how much the start materializes, how many
-        // members it restores at once, which members wait for Meta's
-        // preparation, and whether this launch may act on the shared store
-        // at all. Core decides every wake from these; Meta wakes nothing.
-        builder = builder
-            .with_member_restore_policy(spec.member_restore.policy())
-            .with_resume_restore_concurrency(
-                crate::identity_first::orchestrator::identity_restore_concurrency(),
-            )
-            .with_composition_authority(if spec.composition_authority.speaks_for_composition() {
-                meerkat_mob::MobCompositionAuthority::Authoritative
-            } else {
-                meerkat_mob::MobCompositionAuthority::NonAuthoritative
-            });
-        if !spec.host_pending_members.is_empty() {
-            builder = builder.with_host_pending_members(spec.host_pending_members.iter().cloned());
-        }
-        // How a seated member's endpoint is recorded: a socket transport's
-        // member registers its endpoint when it first runs, and an inproc
-        // member's comms identity lives where the member factory keeps it.
-        // The mob's session service reports that root and Core seats under
-        // it; a root the host declared for its factory
-        // (`MobBootstrapSpec::with_session_identity_config_root`) overrides
-        // the report, and one that differs from the report is logged. A
-        // service that reports no durable root, with no root declared, has
-        // every seat refused typed.
-        let network_member_comms = spec.member_model_config.as_ref().is_some_and(|config| {
-            !matches!(config.comms.mode, meerkat_core::CommsRuntimeMode::Inproc)
-        });
-        if network_member_comms {
-            builder = builder.with_network_member_comms();
-        } else if let Some(declared) = spec.session_identity_config_root.as_deref() {
-            let root = meerkat::session_comms_identity_root_in(declared);
-            let reported = session_service.session_comms_identity_root();
-            if let Some(overridden) = reported_root_overridden(&root, &reported) {
-                tracing::warn!(
-                    mob_id = %mob_id,
-                    declared = %root.display(),
-                    reported = %overridden.display(),
-                    "the declared root of the members' session comms identities \
-                     (MobBootstrapSpec::with_session_identity_config_root) differs from the one \
-                     the mob's session service reports for its agent builds: the mob seats \
-                     members under the declared root, and a member whose first build keeps its \
-                     key pair under the reported one is refused at its first wake"
-                );
-            }
-            builder = builder.with_member_comms_identity_root(root);
-        }
-        if let Some(preparer) = spec.member_build_preparer.clone() {
-            builder = builder.with_member_build_preparer(preparer);
-        }
-        if let Some(registry) = spec.tool_consequence_policy_registry.clone() {
-            builder = builder.with_tool_consequence_policy_registry(registry);
-        }
-
-        if let Some(provider) = spec.default_external_tools_provider.clone() {
-            builder = builder.with_default_external_tools_provider(Some(provider));
-        }
-        for (name, dispatcher) in &spec.tool_bundles {
-            builder = builder.register_tool_bundle(name.clone(), Arc::clone(dispatcher));
-        }
-        #[cfg(feature = "extension-state")]
-        if let Some(callback) = &spec.before_activation {
-            builder = builder.before_activation(Arc::clone(callback));
-        }
-
-        // Apply-time WorkGraph attention overlays: the provisioner's
-        // MobSessionRuntimeExecutor injects the scoped tool overlay before
-        // apply_runtime_turn for every mob-executor turn iff the builder
-        // carries the service.
-        builder = builder.with_workgraph_service(spec.workgraph_service.clone());
-        // The same service decides which member builds get their WorkGraph
-        // tools behind this runtime's admission: bound here, before the mob
-        // is built, so no member is built without it.
-        spec.member_workgraph_tools
-            .bind(spec.workgraph_service.as_ref(), &mob_id);
-
-        // Durable workers (members spawned with a durable identity: the
-        // members of a `durable = true` profile, and every identity-first
-        // member): before Meerkat resumes such a worker's interrupted run,
-        // the gate checks over the same mob-realm service that the worker
-        // still holds its WorkGraph work. Without a service there is no claim
-        // to read, no gate is installed, and the run resumes unchecked. A
-        // candidate launch installs none: Meerkat asks the gate before it
-        // checks the run-start hold, and a superseded verdict would settle a
-        // run the candidate holds for the authoritative launch.
-        if let Some(gate) = crate::workgraph_resume_gate::launch_resume_gate(
-            spec.workgraph_service.clone(),
-            spec.composition_authority,
-        ) {
-            builder = builder.with_durable_resume_gate(Arc::new(gate));
-        }
-
-        if let Some(client) = default_llm_client {
-            builder = builder.with_default_llm_client(client);
-        }
 
         let mut pending_activation: Option<PendingMobActivation> = None;
-        let handle = if event_log_empty {
-            crate::boxed_future::boxed(|| builder.create()).await?
-        } else {
-            let handle = crate::boxed_future::boxed(|| builder.resume())
-                .await
-                .map_err(|error| root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(error)))?;
+        if !created {
             // A candidate launch delivers no operator instruction: Meerkat
             // keeps the delivery owner of a non-authoritative composition
             // idle, so the members owed a snapshot stay owed for the
@@ -12008,22 +13579,23 @@ impl MobRuntime {
                      snapshot stay owed; the authoritative launch delivers them"
                 );
             }
-            // A Stop an earlier process placed and never finished is a durable
-            // barrier: resume hands back a handle that still reads Running, and
-            // Core's recovery finishes that Stop afterwards. The phase is read
-            // once it has landed, or the boot would take the mob for running,
-            // never lift it, and refuse every later send.
-            settle_recovered_placed_stop(&handle).await?;
-            // A completed explicit Stop records `MobStopped`, so replaying
-            // that durable phase hands back a handle in `Stopped`. Actor
-            // shutdown alone does not record a Stop. Identity restoration
-            // cannot spawn into a stopped mob until its activation is consumed.
+            // The launch's declaration that it runs its mob, first half: the
+            // phase is read once the mob owes no lifecycle intent. A Stop an
+            // earlier process placed and never finished is a durable barrier:
+            // resume hands back a handle that still reads Running, and Core's
+            // recovery finishes that Stop afterwards; a phase read before it
+            // landed would take the mob for running, never lift it, and
+            // refuse every later send.
+            //
+            // A completed explicit Stop replays as `Stopped`. Actor shutdown
+            // alone does not record a Stop. Identity restoration cannot spawn
+            // into a stopped mob until its activation is consumed.
             //
             // `bootstrap` is an operational bootstrap: the caller asked for a
-            // running mob. So lift it here, once, rather than leaving every
-            // downstream actuator to discover a stopped mob and interpret it
-            // for itself. Any failure stays typed.
-            match handle.status().await? {
+            // running mob. So the lift is decided here, once, rather than
+            // leaving every downstream actuator to discover a stopped mob and
+            // interpret it for itself. Any failure stays typed.
+            match default_mob_phase_after_its_load(&handle).await? {
                 // Defer the lift until the resolver has its handle and the
                 // delivery owner is armed. Identity-first composition also
                 // needs its owners registered before machine-authorized
@@ -12067,48 +13639,25 @@ impl MobRuntime {
                     ));
                 }
             }
-            handle
-        };
+        }
         // A side chat's `memory` tool is gated as its source agent's own is:
         // by the definition this mob runs (a resumed mob runs its stored
         // one), which is the handle's.
         spec.side_chat_memory_slot
             .bind_definition(handle.definition());
-        if let Some(state) = agent_mob_mcp_state.as_ref() {
-            state.mob_insert_handle(mob_id, handle.observer()).await;
-            match child_mob_root_claim.as_ref() {
-                // Durable child mobs: complete the native restore on the final
-                // state now, before the managed set is complete and before
-                // delivery arms, so a persisted child is never reported gone
-                // for good while it is merely not restored yet. The restore
-                // itself completes the managed set.
-                Some(claim) => {
-                    // From here a child actor may run, so the root stays owned
-                    // for the rest of the process.
-                    crate::child_mob_storage::retain_until_process_exit(claim);
-                    if let Err(error) = state.mob_list().await {
-                        // Children restored before the failure may still be
-                        // running and are not reachable from here, so the claim
-                        // stays retained for the rest of the process.
-                        let stop =
-                            stop_after_failed_startup(&handle, spec.composition_authority).await;
-                        tracing::error!(
-                            %error,
-                            root_stop = ?stop,
-                            child_root = %claim.root().display(),
-                            "durable child mob restore failed; the child root stays owned \
-                             until process exit"
-                        );
-                        return Err(MobRuntimeError::ChildMobStorage(
-                            crate::child_mob_storage::ChildMobStorageError::Restore(error),
-                        ));
-                    }
-                }
-                // Process-bound child mobs: this state restores this spec's one
-                // root handle and has no later restored-handle ingress. Other
-                // hosts sharing the inbox keep custody of their own rows.
-                None => state.declare_mob_set_restored(),
-            }
+        // A mob built over an opened storage is a handle built outside the
+        // mob set: it is inserted. A declared mob is the set's own.
+        if declared_set.is_none()
+            && let Some(state) = agent_mob_mcp_state.as_ref()
+        {
+            register_opened_storage_mob(
+                state,
+                mob_id,
+                &handle,
+                child_mob_root_claim.as_ref(),
+                spec.composition_authority,
+            )
+            .await?;
         }
         // A candidate launch arms no runtime delivery owner; the delivery
         // records that decision as its owner state.
@@ -12136,6 +13685,11 @@ impl MobRuntime {
         // A restored classic mob starts only after its address resolver has
         // its handle and the native delivery owner has been armed. Identity
         // composition retains the activation until its owners are registered.
+        // What decides it is the composition, not the mob's identity runtime
+        // slot (every mob has one): the lift is handed to the host only when
+        // the composition has agent mob tools. A mob built without them is
+        // lifted here, and a host may still give it an identity runtime
+        // later.
         if identity_runtime_slot.is_none()
             && let Some(pending) = pending_activation.take()
         {
@@ -12243,56 +13797,78 @@ impl MobRuntime {
                 .follow_private_member_ends(&spec.private_owners)
                 .await;
         }
+        // The mob's one identity runtime slot: the one the agent mob tools
+        // were given, or a slot of the mob's own.
+        let identity_plane = MobIdentityPlane::new(
+            handle.mob_id().clone(),
+            identity_runtime_slot.unwrap_or_default(),
+        );
         let runtime = Self {
-            handle,
-            runtime_delivery,
-            session_service: Some(session_service),
-            member_model_config,
-            agent_mob_mcp_state,
-            implicit_delegate_retirement_overrides,
-            binary_blob_store,
-            baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            console_spawn_sink_slot,
-            identity_runtime_slot,
-            composition_release: Some(spec.composition_release),
-            workgraph_service: spec.workgraph_service,
-            workgraph_admission,
-            workgraph_realm_migration,
-            resolved_storage: spec.resolved_storage.map(|mut summary| {
-                summary.slots.extend(
-                    candidate_composition_slot
-                        .into_iter()
-                        .chain(held_private_member_bindings_slot),
-                );
-                summary
-            }),
-            durable_runtime_store: spec.durable_runtime_store,
-            committed_boundary_recoverer: spec.committed_boundary_recoverer,
-            controller_pin_source: spec.controller_pin_source,
-            native_work_governed,
-            _ephemeral_dir: ephemeral_dir,
-            state_dir_claims: Arc::new(std::sync::Mutex::new(state_dir_claims)),
-            composition_authority: spec.composition_authority,
-            member_auth_binding: spec.member_auth_binding,
-            member_auth_binding_recorded: spec.member_auth_binding_recorded,
-            child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::new(
-                child_mob_root_claim,
-            ),
-            #[cfg(not(target_arch = "wasm32"))]
-            member_mcp_custody: spec.member_mcp_custody,
-            side_chat_lineages: Arc::default(),
-            run_members: Arc::default(),
-            private_owners: spec.private_owners,
-            ask_user_slot: spec.ask_user_slot,
-            console_schedules: crate::console_schedules::ConsoleSchedules::default(),
-            personal_accounts: spec.personal_accounts_slot,
-            mob_schedules: spec.mob_schedules,
+            mob: MobRuntimeMobPart {
+                handle,
+                baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                identity_plane,
+                workgraph_service: spec.workgraph_service,
+                workgraph_admission,
+                workgraph_realm_migration,
+                side_chat_lineages: Arc::default(),
+                console_mob_records: Arc::default(),
+                run_members: Arc::default(),
+            },
+            process: MobRuntimeProcessPart {
+                runtime_delivery,
+                session_service: Some(session_service),
+                member_model_config,
+                agent_mob_mcp_state,
+                implicit_delegate_retirement_overrides,
+                binary_blob_store,
+                console_spawn_sink_slot,
+                composition_release: Some(spec.composition_release),
+                resolved_storage: spec.resolved_storage.map(|mut summary| {
+                    summary.slots.extend(
+                        candidate_composition_slot
+                            .into_iter()
+                            .chain(held_private_member_bindings_slot),
+                    );
+                    summary
+                }),
+                durable_runtime_store: spec.durable_runtime_store,
+                committed_boundary_recoverer: spec.committed_boundary_recoverer,
+                controller_pin_source: spec.controller_pin_source,
+                native_work_governed,
+                _ephemeral_dir: ephemeral_dir,
+                state_dir_claims: Arc::new(std::sync::Mutex::new(state_dir_claims)),
+                composition_authority: spec.composition_authority,
+                member_auth_binding: spec.member_auth_binding,
+                member_auth_binding_recorded: spec.member_auth_binding_recorded,
+                child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::new(
+                    child_mob_root_claim,
+                ),
+                #[cfg(not(target_arch = "wasm32"))]
+                member_mcp_custody: spec.member_mcp_custody,
+                private_owners: spec.private_owners,
+                dispatch_taint_slot: spec.dispatch_taint_slot,
+                side_chat_memory_slot: spec.side_chat_memory_slot,
+                ask_user_slot: spec.ask_user_slot,
+                console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+                personal_accounts: spec.personal_accounts_slot,
+                mob_schedules: spec.mob_schedules,
+                mob_announcements_release: spec.mob_announcements_release,
+                mob_memory_release: spec.mob_memory_release,
+            },
         };
         // Agent schedule tools attached over an injected schedule store
         // judge their targets with this runtime's mobs and with who its
-        // members are private to.
+        // members are private to. A wrapper built from a bootstrap spec is
+        // its host's launch mob, so its mob is the host's default mob: the
+        // wrapper of another mob of a host is never built here
+        // (`MobRuntime::of_hosted_mob`), and a registry refuses an adoption
+        // that states another default mob than its first.
         if let Some(registry) = spec.schedule_target_registry {
-            registry.adopt_mob_runtime(&runtime);
+            registry.adopt_mob_runtime(
+                &runtime,
+                &crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone()),
+            );
         }
         Ok((runtime, pending_activation))
     }
@@ -12319,52 +13895,64 @@ impl MobRuntime {
             None,
             None,
         ));
+        let identity_plane = MobIdentityPlane::detached(handle.mob_id().clone());
         Self {
-            // A runtime adopted from a bare handle made no declaration, so it
-            // keeps the safe default: it speaks for the composition unless told
-            // otherwise. A candidate must say so explicitly.
-            composition_authority:
-                crate::mob_composition_manifest::CompositionAuthority::Authoritative,
-            handle,
-            runtime_delivery: None,
-            session_service: None,
-            member_model_config: None,
-            agent_mob_mcp_state: None,
-            implicit_delegate_retirement_overrides: None,
-            binary_blob_store: None,
-            baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            console_spawn_sink_slot: None,
-            identity_runtime_slot: None,
-            composition_release: None,
-            workgraph_service: None,
-            workgraph_admission,
-            workgraph_realm_migration: None,
-            resolved_storage: None,
-            durable_runtime_store: None,
-            committed_boundary_recoverer: None,
-            controller_pin_source: None,
-            native_work_governed: false,
-            _ephemeral_dir: None,
-            state_dir_claims: Arc::default(),
-            member_auth_binding: None,
-            member_auth_binding_recorded: None,
-            child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            member_mcp_custody: None,
-            side_chat_lineages: Arc::default(),
-            run_members: Arc::default(),
-            private_owners: crate::private_owners::PrivateOwners::default(),
-            ask_user_slot: crate::ask_user::AskUserSlot::default(),
-            console_schedules: crate::console_schedules::ConsoleSchedules::default(),
-            personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
-            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
+            mob: MobRuntimeMobPart {
+                handle,
+                baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                identity_plane,
+                workgraph_service: None,
+                workgraph_admission,
+                workgraph_realm_migration: None,
+                side_chat_lineages: Arc::default(),
+                console_mob_records: Arc::default(),
+                run_members: Arc::default(),
+            },
+            process: MobRuntimeProcessPart {
+                runtime_delivery: None,
+                // A runtime adopted from a bare handle made no declaration, so it
+                // keeps the safe default: it speaks for the composition unless told
+                // otherwise. A candidate must say so explicitly.
+                composition_authority:
+                    crate::mob_composition_manifest::CompositionAuthority::Authoritative,
+                session_service: None,
+                member_model_config: None,
+                agent_mob_mcp_state: None,
+                implicit_delegate_retirement_overrides: None,
+                binary_blob_store: None,
+                console_spawn_sink_slot: None,
+                composition_release: None,
+                resolved_storage: None,
+                durable_runtime_store: None,
+                committed_boundary_recoverer: None,
+                controller_pin_source: None,
+                native_work_governed: false,
+                _ephemeral_dir: None,
+                state_dir_claims: Arc::default(),
+                member_auth_binding: None,
+                member_auth_binding_recorded: None,
+                child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                member_mcp_custody: None,
+                private_owners: crate::private_owners::PrivateOwners::default(),
+                dispatch_taint_slot: crate::memory::dispatch_taint::DispatchTaintSlot::default(),
+                side_chat_memory_slot: crate::memory::side_chat_memory::SideChatMemorySlot::default(
+                ),
+                ask_user_slot: crate::ask_user::AskUserSlot::default(),
+                console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+                personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
+                mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
+                mob_announcements_release:
+                    crate::mob_announcements_release::MobAnnouncementsSlot::default(),
+                mob_memory_release: crate::mob_memory_release::MobMemorySlot::default(),
+            },
         }
     }
 
     /// The launch's member auth binding, when it declared one (see
     /// [`MobBootstrapSpec::with_member_auth_binding`]).
     pub(crate) fn member_auth_binding(&self) -> Option<&meerkat_core::AuthBindingRef> {
-        self.member_auth_binding.as_ref()
+        self.process.member_auth_binding.as_ref()
     }
 
     /// The composition's personal accounts on MCP servers, when it has any
@@ -12372,7 +13960,7 @@ impl MobRuntime {
     pub(crate) fn personal_mcp_accounts(
         &self,
     ) -> Option<Arc<crate::personal_accounts::PersonalMcpAccounts>> {
-        self.personal_accounts.accounts()
+        self.process.personal_accounts.accounts()
     }
 
     /// The owner check the composition gave its spec, when it has personal
@@ -12381,20 +13969,26 @@ impl MobRuntime {
     pub(crate) fn personal_account_owner_check(
         &self,
     ) -> Option<crate::personal_accounts::PersonalAccountOwnerCheck> {
-        self.personal_accounts.check()
+        self.process.personal_accounts.check()
     }
 
     /// The verified side chat lineages of this runtime's member incarnations,
     /// as the console reads them (see
     /// [`crate::side_chat::SideChatLineageCache`]).
     pub(crate) fn side_chat_lineages(&self) -> &crate::side_chat::SideChatLineageCache {
-        &self.side_chat_lineages
+        &self.mob.side_chat_lineages
+    }
+
+    /// The creation records this runtime's consoles have read of the mobs
+    /// it holds (see [`crate::console_mob_listing::ConsoleMobRecords`]).
+    pub(crate) fn console_mob_records(&self) -> &crate::console_mob_listing::ConsoleMobRecords {
+        &self.mob.console_mob_records
     }
 
     /// The members each flow run of this runtime's mob reached, read from
     /// the mob's per-target dispatch records (see [`crate::run_members`]).
     pub(crate) fn run_members(&self) -> &crate::run_members::RunMembersIndex {
-        &self.run_members
+        &self.mob.run_members
     }
 
     /// Who each member of this runtime's mobs is private to (see
@@ -12402,37 +13996,96 @@ impl MobRuntime {
     /// the seed that reads the durable records runs in the background from
     /// the runtime's start, and no caller waits for it.
     pub(crate) fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
-        &self.private_owners
+        &self.process.private_owners
+    }
+
+    /// The slot that says which memory observes a member's model calls,
+    /// the launch's own: every member build of the launch's mobs passes it
+    /// (see [`crate::memory::dispatch_taint::DispatchTaintSlot`]).
+    pub(crate) fn dispatch_taint_slot(&self) -> crate::memory::dispatch_taint::DispatchTaintSlot {
+        self.process.dispatch_taint_slot.clone()
+    }
+
+    /// The slot that binds the `memory` tool of a side chat and of a member
+    /// private to a person, the launch's own (see
+    /// [`crate::memory::side_chat_memory::SideChatMemorySlot`]).
+    pub(crate) fn side_chat_memory_slot(
+        &self,
+    ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
+        self.process.side_chat_memory_slot.clone()
     }
 
     /// The surface the `ask_user` tool of this runtime's members reads, and
     /// the durable decisions their question sets are held in once the
     /// runtime filled it (see [`crate::ask_user::AskUserSlot`]).
     pub(crate) fn ask_user_slot(&self) -> &crate::ask_user::AskUserSlot {
-        &self.ask_user_slot
+        &self.process.ask_user_slot
     }
 
     /// The Steward's source of the members of this runtime's mob private to
-    /// a person, whose memory no dream covers.
+    /// a person, whose memory no dream covers: the members of the memory
+    /// of this runtime's own mob, and of no other mob's
+    /// ([`crate::private_owners::PrivateOwners::steward_source`]).
     pub(crate) fn private_member_source(
         &self,
     ) -> Arc<dyn crate::memory::steward::PrivateMemberSource> {
-        self.private_owners.steward_source(&self.handle)
+        self.process.private_owners.steward_source(&self.mob.handle)
+    }
+
+    /// Have the record of who each member is private to read the private
+    /// retirements `store`, the memory store of this runtime's mob, recorded
+    /// in `realm`: they name members of this mob's memory, and of no other
+    /// mob's. Which mob that is, is this runtime's own mob id, which the
+    /// caller does not pass
+    /// ([`crate::private_owners::PrivateOwners::bind_private_retirements_of`]).
+    /// What composes a memory for a mob beside the launch mob calls it
+    /// where it composes it, at every composition. The mob's own read
+    /// holds `store` weakly: the caller keeps the mob's memory alive for
+    /// as long as it is composed.
+    pub(crate) fn bind_private_retirements(
+        &self,
+        store: Arc<dyn crate::memory::capabilities::StewardStore>,
+        realm: String,
+    ) {
+        self.process.private_owners.bind_private_retirements_of(
+            self.mob.handle.mob_id(),
+            store,
+            realm,
+        );
     }
 
     /// Where this runtime's console schedules live: the schedule service the
     /// gateway's schedule host attached, if it attached one (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
     pub(crate) fn console_schedules(&self) -> &crate::console_schedules::ConsoleSchedules {
-        &self.console_schedules
+        &self.process.console_schedules
     }
 
     /// The launch's late-bound release of the schedules it keeps under a
     /// mob's id (see [`crate::mob_schedules_release`]): the composition
-    /// that owns the schedule service binds it, and the create admission
-    /// asks it before a mob is created under an id.
+    /// that owns the schedule service binds it, and the runtime asks it
+    /// when its mob set creates a mob beside the launch mob.
     pub(crate) fn mob_schedules(&self) -> &crate::mob_schedules_release::MobSchedulesSlot {
-        &self.mob_schedules
+        &self.process.mob_schedules
+    }
+
+    /// The launch's late-bound release of what its announcements keep
+    /// under a mob's id (see [`crate::mob_announcements_release`]): bound
+    /// where the announcements' owner is attached, and asked by the
+    /// runtime when its mob set creates a mob.
+    pub(crate) fn mob_announcements_release(
+        &self,
+    ) -> &crate::mob_announcements_release::MobAnnouncementsSlot {
+        &self.process.mob_announcements_release
+    }
+
+    /// The late-bound release of the agent memory the launch keeps for the
+    /// mobs it hosts beside its launch mob (see
+    /// [`crate::mob_memory_release`]): bound where the launch hands its
+    /// memory over, and asked by the runtime when its mob set creates a mob
+    /// and after its mob set destroyed one.
+    pub(crate) fn mob_memory_release(&self) -> &crate::mob_memory_release::MobMemorySlot {
+        &self.process.mob_memory_release
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's
@@ -12444,13 +14097,13 @@ impl MobRuntime {
         method: &str,
         session_id: &meerkat_core::types::SessionId,
     ) -> Option<crate::native_realm::MemberRouteRefusal> {
-        let binding = self.member_auth_binding.as_ref()?;
+        let binding = self.process.member_auth_binding.as_ref()?;
         crate::native_realm::attach_binding_refusal(
-            self.session_service.as_deref(),
+            self.process.session_service.as_deref(),
             method,
             session_id,
             binding,
-            self.member_auth_binding_recorded.as_ref(),
+            self.process.member_auth_binding_recorded.as_ref(),
         )
         .await
     }
@@ -12465,13 +14118,13 @@ impl MobRuntime {
         method: &str,
         source_session_id: &meerkat_core::types::SessionId,
     ) -> Option<crate::native_realm::MemberRouteRefusal> {
-        let binding = self.member_auth_binding.as_ref()?;
+        let binding = self.process.member_auth_binding.as_ref()?;
         crate::native_realm::fork_binding_refusal(
-            self.session_service.as_deref(),
+            self.process.session_service.as_deref(),
             method,
             source_session_id,
             binding,
-            self.member_auth_binding_recorded.as_ref(),
+            self.process.member_auth_binding_recorded.as_ref(),
         )
         .await
     }
@@ -12481,12 +14134,12 @@ impl MobRuntime {
     pub(crate) fn member_mcp_custody(
         &self,
     ) -> Option<&Arc<crate::member_mcp_custody::MemberMcpCustody>> {
-        self.member_mcp_custody.as_ref()
+        self.process.member_mcp_custody.as_ref()
     }
 
     /// Whether this runtime owns a durable child-mob root.
     pub(crate) fn owns_child_mob_root(&self) -> bool {
-        self.child_mob_root.owns_claim()
+        self.process.child_mob_root.owns_claim()
     }
 
     /// Stand down every durable child mob this runtime manages.
@@ -12565,25 +14218,25 @@ impl MobRuntime {
         let delivery_retired = self.retire_runtime_delivery(deadline).await;
         self.release_composition_slots();
         // A root already released (or never claimed) answers at once.
-        if let Some(unclaimed) = self.child_mob_root.unclaimed_outcome() {
+        if let Some(unclaimed) = self.process.child_mob_root.unclaimed_outcome() {
             return unclaimed;
         }
         // One stand-down at a time through every clone; a retry that waited
         // here sees the result of the one before it. The wait is bounded by
         // this call's deadline and never cancels the running stand-down.
-        let Some(_stand_down) = self.child_mob_root.begin_stand_down(deadline).await else {
+        let Some(_stand_down) = self.process.child_mob_root.begin_stand_down(deadline).await else {
             tracing::warn!(
                 "another stand-down of the durable child root was still running at this \
                  call's deadline; the child root stays owned"
             );
             return crate::child_mob_storage::ChildMobStandDownOutcome::InProgress;
         };
-        if let Some(unclaimed) = self.child_mob_root.unclaimed_outcome() {
+        if let Some(unclaimed) = self.process.child_mob_root.unclaimed_outcome() {
             return unclaimed;
         }
-        let Some(state) = self.agent_mob_mcp_state.as_ref() else {
+        let Some(state) = self.process.agent_mob_mcp_state.as_ref() else {
             // A claim is only taken for an installed agent mob-tool state.
-            return self.child_mob_root.outcome(0);
+            return self.process.child_mob_root.outcome(0);
         };
         // Admission closes before the snapshot: no caller admitted before
         // the close can add a child after it.
@@ -12619,11 +14272,12 @@ impl MobRuntime {
         // alone (it reports it handed over); this order does not rely on
         // that alone.
         if admission.is_clean() && state_stand_down.is_clean() {
-            self.child_mob_root
+            self.process
+                .child_mob_root
                 .settle_pending_unregisters(deadline)
                 .await;
         }
-        let outcome = self.child_mob_root.outcome(child_mobs);
+        let outcome = self.process.child_mob_root.outcome(child_mobs);
         if !outcome.child_actors_settled()
             || !admission.is_clean()
             || !state_stand_down.is_clean()
@@ -12639,7 +14293,7 @@ impl MobRuntime {
             );
             return outcome;
         }
-        let released = self.child_mob_root.release(child_mobs);
+        let released = self.process.child_mob_root.release(child_mobs);
         if !released.cleanup_complete() {
             tracing::warn!(
                 ?released,
@@ -12666,7 +14320,7 @@ impl MobRuntime {
         state: &meerkat_mob_mcp::MobMcpState,
         deadline: std::time::Instant,
     ) -> meerkat_mob_mcp::MobStateStandDown {
-        let mut root_actor = self.handle.actor_task_watch();
+        let mut root_actor = self.mob.handle.actor_task_watch();
         {
             let close = state.close_admission(deadline);
             tokio::pin!(close);
@@ -12691,7 +14345,7 @@ impl MobRuntime {
         child_mobs: &mut usize,
     ) -> Result<(), crate::child_mob_storage::ChildMobStandDownOutcome> {
         use crate::child_mob_storage::{ChildIncarnation, ChildMobStandDownOutcome, ChildShutdown};
-        let root_mob_id = self.handle.definition().id.clone();
+        let root_mob_id = self.mob.handle.definition().id.clone();
         let enumeration_failed = |error: MobError| ChildMobStandDownOutcome::EnumerationFailed {
             detail: format!("child mobs could not be enumerated: {error}"),
         };
@@ -12712,8 +14366,12 @@ impl MobRuntime {
             };
             *child_mobs += 1;
             let incarnation = ChildIncarnation::of(&handle);
-            if self.child_mob_root.clean_in(mob_id.as_ref(), &incarnation)
+            if self
+                .process
+                .child_mob_root
+                .clean_in(mob_id.as_ref(), &incarnation)
                 || self
+                    .process
                     .child_mob_root
                     .pending_in(mob_id.as_ref(), &incarnation)
             {
@@ -12742,7 +14400,8 @@ impl MobRuntime {
                 }
                 Err(error) => ChildShutdown::Unsettled(error.to_string()),
             };
-            self.child_mob_root
+            self.process
+                .child_mob_root
                 .record(mob_id.as_ref(), incarnation, outcome);
         }
         Ok(())
@@ -12754,7 +14413,7 @@ impl MobRuntime {
     /// task without joining it, so a pass already in blocking store work may
     /// still finish after this returns.
     pub fn stop_runtime_delivery(&self) {
-        if let Some(delivery) = self.runtime_delivery.as_ref() {
+        if let Some(delivery) = self.process.runtime_delivery.as_ref() {
             delivery.stop();
         }
     }
@@ -12769,7 +14428,7 @@ impl MobRuntime {
         &self,
         deadline: std::time::Instant,
     ) -> Result<(), meerkat::RuntimeDeliveryOwnerRetirementIncomplete> {
-        match self.runtime_delivery.as_ref() {
+        match self.process.runtime_delivery.as_ref() {
             Some(delivery) => {
                 delivery
                     .retire(deadline.saturating_duration_since(std::time::Instant::now()))
@@ -12785,7 +14444,7 @@ impl MobRuntime {
     /// slots live in that service's builder. Without this the whole
     /// composition outlives shutdown and drop.
     pub(crate) fn release_composition_slots(&self) {
-        if let Some(release) = self.composition_release.as_ref() {
+        if let Some(release) = self.process.composition_release.as_ref() {
             release.release();
         }
     }
@@ -12794,7 +14453,8 @@ impl MobRuntime {
     /// stand-down, so a successor in this process can open the directory
     /// without waiting for every clone of this runtime to drop.
     fn release_state_dir_claims(&self) {
-        self.state_dir_claims
+        self.process
+            .state_dir_claims
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -12803,7 +14463,8 @@ impl MobRuntime {
     /// The state-directory claims this runtime still holds, for an owner
     /// that must keep the directory claimed past this runtime's stand-down.
     pub(crate) fn state_dir_claim_refs(&self) -> Vec<Arc<crate::state_dir_claim::StateDirClaim>> {
-        self.state_dir_claims
+        self.process
+            .state_dir_claims
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -12813,6 +14474,7 @@ impl MobRuntime {
     /// and no clean stand-down has released it.
     pub(crate) fn holds_state_dir_claims(&self) -> bool {
         !self
+            .process
             .state_dir_claims
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -12820,7 +14482,8 @@ impl MobRuntime {
     }
 
     pub fn runtime_delivery_pass(&self) -> Option<meerkat::RuntimeDeliveryPass> {
-        self.runtime_delivery
+        self.process
+            .runtime_delivery
             .as_ref()
             .map(|owner| owner.last_pass())
     }
@@ -12835,7 +14498,8 @@ impl MobRuntime {
     /// returns one. `None` when the runtime has no delivery composition, or
     /// when its launch, a candidate, armed no delivery owner.
     pub fn continuation_source_announcer(&self) -> Option<ContinuationSourceAnnouncer> {
-        self.runtime_delivery
+        self.process
+            .runtime_delivery
             .as_ref()
             .map(|delivery| delivery.source_announcer())
     }
@@ -12849,7 +14513,7 @@ impl MobRuntime {
     /// would otherwise open.
     #[must_use]
     pub fn speaks_for_composition(&self) -> bool {
-        self.composition_authority.speaks_for_composition()
+        self.process.composition_authority.speaks_for_composition()
     }
 
     /// The options of this runtime's terminal mob Shutdowns (the root mob's
@@ -12859,7 +14523,7 @@ impl MobRuntime {
         &self,
         deadline: std::time::Instant,
     ) -> meerkat_mob::ShutdownOptions {
-        mob_shutdown_options_for(self.composition_authority, deadline)
+        mob_shutdown_options_for(self.process.composition_authority, deadline)
     }
 
     /// Stop the mob after a startup that failed once this runtime was
@@ -12867,11 +14531,16 @@ impl MobRuntime {
     pub(crate) async fn stop_after_failed_startup(
         &self,
     ) -> Result<meerkat_mob::MobStopReport, MobError> {
-        stop_after_failed_startup(&self.handle, self.composition_authority).await
+        stop_after_failed_startup(&self.mob.handle, self.process.composition_authority).await
     }
 
     pub fn handle(&self) -> MobHandle {
-        self.handle.clone()
+        self.mob.handle.clone()
+    }
+
+    /// The id of this runtime's mob.
+    pub(crate) fn mob_id(&self) -> &meerkat_mob::MobId {
+        self.mob.handle.mob_id()
     }
 
     /// The same runtime over a non-owning observer handle (D67): holders that
@@ -12880,12 +14549,62 @@ impl MobRuntime {
     /// keep the mob publicly owned.
     pub fn observer(&self) -> Self {
         let mut observer = self.clone();
-        observer.handle = self.handle.observer();
+        observer.mob.handle = self.mob.handle.observer();
         observer
     }
 
+    /// The wrapper of another mob this launch hosts: `handle`'s mob with
+    /// what is bound to one mob made new for it (its identity plane with no
+    /// identity runtime attached, its admission, its caches, and its view
+    /// of the launch's WorkGraph), and this wrapper's process part, which is
+    /// the same for every mob of the launch. The mob set owns that mob, so
+    /// the wrapper holds `handle` as an observer.
+    ///
+    /// Its WorkGraph service is the launch's scoped to that mob's realm by
+    /// the formula the mob's members are built with
+    /// ([`meerkat_mob::mob_scoped_workgraph_service`]): none where the
+    /// launch has none, and none over a backend that has no WorkGraph. Its
+    /// admission is the launch's for another mob
+    /// ([`WorkGraphAdmission::of_hosted_mob`](crate::workgraph_admission::WorkGraphAdmission::of_hosted_mob)).
+    /// No attention binding of that mob predates the realm rule, so it has
+    /// no migration to report.
+    pub(crate) fn of_hosted_mob(&self, handle: &MobHandle) -> Self {
+        let handle = handle.observer();
+        let workgraph_admission =
+            Arc::new(self.mob.workgraph_admission.of_hosted_mob(handle.clone()));
+        let workgraph_service = self.mob.workgraph_service.as_ref().and_then(|host| {
+            match meerkat_mob::mob_scoped_workgraph_service(host, handle.mob_id()) {
+                Ok(service) => service,
+                Err(error) => {
+                    // The mob set built this mob with the same formula, and
+                    // refuses the build of a mob whose id forms no realm.
+                    tracing::warn!(
+                        mob_id = %handle.mob_id(),
+                        %error,
+                        "a hosted mob has no WorkGraph realm; its WorkGraph methods are unavailable"
+                    );
+                    None
+                }
+            }
+        });
+        Self {
+            mob: MobRuntimeMobPart {
+                identity_plane: MobIdentityPlane::detached(handle.mob_id().clone()),
+                handle,
+                baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                workgraph_service,
+                workgraph_admission,
+                workgraph_realm_migration: None,
+                side_chat_lineages: Arc::default(),
+                console_mob_records: Arc::default(),
+                run_members: Arc::default(),
+            },
+            process: self.process.clone(),
+        }
+    }
+
     pub fn agent_mob_mcp_state(&self) -> Option<Arc<meerkat_mob_mcp::MobMcpState>> {
-        self.agent_mob_mcp_state.clone()
+        self.process.agent_mob_mcp_state.clone()
     }
 
     /// The persisted child mobs whose stores did not restore, kept
@@ -12896,7 +14615,7 @@ impl MobRuntime {
     /// error, never an empty list, when the restore of the persisted child
     /// mobs failed.
     pub async fn quarantined_mobs(&self) -> Result<Vec<meerkat_mob_mcp::QuarantinedMob>, MobError> {
-        match &self.agent_mob_mcp_state {
+        match &self.process.agent_mob_mcp_state {
             Some(state) => state.quarantined_mobs().await,
             None => Ok(Vec::new()),
         }
@@ -12904,7 +14623,7 @@ impl MobRuntime {
 
     /// The realm-scoped WorkGraph service the runtime was bootstrapped with.
     pub fn workgraph_service(&self) -> Option<meerkat::WorkGraphService> {
-        self.workgraph_service.clone()
+        self.mob.workgraph_service.clone()
     }
 
     /// Report of the bootstrap-time migration of member-bound attention
@@ -12912,7 +14631,7 @@ impl MobRuntime {
     pub fn workgraph_realm_migration(
         &self,
     ) -> Option<Arc<crate::workgraph_realm::WorkGraphRealmMigrationReport>> {
-        self.workgraph_realm_migration.clone()
+        self.mob.workgraph_realm_migration.clone()
     }
 
     /// The runtime-wide admission authority for the workgraph
@@ -12923,48 +14642,64 @@ impl MobRuntime {
     pub(crate) fn workgraph_admission(
         &self,
     ) -> Arc<crate::workgraph_admission::WorkGraphAdmission> {
-        Arc::clone(&self.workgraph_admission)
+        Arc::clone(&self.mob.workgraph_admission)
     }
 
     /// Install the console sink that agent-tool spawns project into. A no-op
     /// for runtimes built without agent mob tools (no slot to fill).
     pub(crate) fn install_console_spawn_sink(&self, sink: ConsoleSpawnSink) {
-        if let Some(slot) = self.console_spawn_sink_slot.as_ref() {
+        if let Some(slot) = self.process.console_spawn_sink_slot.as_ref() {
             *slot
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
         }
     }
 
-    /// The installed console spawn sink, if any.
+    /// The installed console spawn sink, if any, over the console of this
+    /// runtime's mob: the launch mob's for the launch's runtime, and for the
+    /// runtime of a mob the launch composes beside its launch mob, that
+    /// mob's own ([`ConsoleSpawnSink::of_mob`]). Every read a runtime makes
+    /// of what agent-tool spawns registered goes through it, so a runtime
+    /// reads what was registered with its own mob's console: what a spawn
+    /// registered with the launch mob's console says nothing of another
+    /// mob's members.
     pub(crate) fn console_spawn_sink(&self) -> Option<ConsoleSpawnSink> {
-        self.console_spawn_sink_slot.as_ref().and_then(|slot| {
-            slot.read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        })
+        let sink = self
+            .process
+            .console_spawn_sink_slot
+            .as_ref()
+            .and_then(|slot| {
+                slot.read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })?;
+        let mob_id = self.mob.handle.mob_id();
+        let beside_the_launch_mob = self
+            .process
+            .private_owners
+            .hosted_mobs()
+            .holds(mob_id.as_str());
+        Some(sink.of_mob(beside_the_launch_mob.then_some(mob_id)))
+    }
+
+    /// This mob's identity plane: its id and its one late-bound identity
+    /// runtime slot.
+    pub(crate) fn identity_plane(&self) -> &MobIdentityPlane {
+        &self.mob.identity_plane
     }
 
     pub(crate) fn install_identity_runtime_authority(
         &self,
         identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
     ) {
-        if let Some(slot) = self.identity_runtime_slot.as_ref() {
-            *slot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity_runtime);
-        }
+        self.mob.identity_plane.set_attached(Some(identity_runtime));
     }
 
     /// The installed identity authority, if any.
     pub(crate) fn installed_identity_runtime(
         &self,
     ) -> Option<Arc<crate::identity_first::IdentityRuntime>> {
-        self.identity_runtime_slot.as_ref().and_then(|slot| {
-            slot.read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        })
+        self.mob.identity_plane.attached()
     }
 
     /// Remove the late-bound identity authority after the mob has fully
@@ -12972,24 +14707,19 @@ impl MobRuntime {
     /// retaining the reverse Arc here would form a shutdown cycle and keep
     /// persistent controller locks alive after failed construction.
     pub(crate) fn clear_identity_runtime_authority(&self) {
-        if let Some(slot) = self.identity_runtime_slot.as_ref() {
-            let detached = slot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            // The family of the mob's long-term agents holds the identity
-            // runtime, which holds the family: it ends with the authority.
-            if let Some(identity_runtime) = detached {
-                identity_runtime.detach_identity_family();
-            }
+        // The family of the mob's long-term agents holds the identity
+        // runtime, which holds the family: it ends with the authority.
+        if let Some(identity_runtime) = self.mob.identity_plane.detach() {
+            identity_runtime.detach_identity_family();
         }
     }
 
-    /// Console identity metadata registered by agent-tool spawns: the spawn
-    /// registry, each entry under its mob and console identity, settled
-    /// against the member lifecycle journal of each mob it holds an entry of
-    /// ([`Self::settled_spawn_registry`]). Empty when no console sink is
-    /// installed.
+    /// Console identity metadata registered by agent-tool spawns for this
+    /// runtime's mob: the spawn registry, each entry under its mob and
+    /// console identity, settled against the member lifecycle journal of
+    /// each mob it holds an entry of ([`Self::settled_spawn_registry`]).
+    /// Empty when no console sink is installed. It is the registry of this
+    /// runtime's own mob's console ([`Self::console_spawn_sink`]).
     pub(crate) async fn console_identity_labels(&self) -> crate::console_spawn::SpawnRegistry {
         match self.console_spawn_sink() {
             Some(sink) => self.settled_spawn_registry(&sink).await,
@@ -13064,15 +14794,15 @@ impl MobRuntime {
     pub(crate) fn implicit_delegate_retirement_overrides(
         &self,
     ) -> Option<ImplicitDelegateRetirementOverrides> {
-        self.implicit_delegate_retirement_overrides.clone()
+        self.process.implicit_delegate_retirement_overrides.clone()
     }
 
     pub async fn set_baseline_member_specs(&self, specs: Vec<SpawnMemberSpec>) {
-        *self.baseline_member_specs.write().await = specs;
+        *self.mob.baseline_member_specs.write().await = specs;
     }
 
     pub async fn baseline_member_specs(&self) -> Vec<SpawnMemberSpec> {
-        self.baseline_member_specs.read().await.clone()
+        self.mob.baseline_member_specs.read().await.clone()
     }
 
     /// The session-boundary authority Core holds for `session_id` in the
@@ -13084,7 +14814,7 @@ impl MobRuntime {
         &self,
         session_id_str: &str,
     ) -> Option<meerkat_runtime::RuntimeSessionAuthority> {
-        let store = self.durable_runtime_store.as_ref()?;
+        let store = self.process.durable_runtime_store.as_ref()?;
         if store.session_boundary_authority_read_cost()
             != meerkat_runtime::store::RuntimeSessionAuthorityReadCost::Bounded
         {
@@ -13115,7 +14845,7 @@ impl MobRuntime {
                 "session_id must not be empty",
             ));
         }
-        let Some(session_service) = self.session_service.as_ref() else {
+        let Some(session_service) = self.process.session_service.as_ref() else {
             return Err(MobRuntimeError::InvalidInput(
                 "session history unavailable for this runtime",
             ));
@@ -13127,7 +14857,7 @@ impl MobRuntime {
         // seated) does not exist until the member's first wake creates it:
         // it reads as a session with no history yet, never as a missing one,
         // and the read does not wake the member. Core's mob holds the fact.
-        if self.handle.session_unborn(&session_id) {
+        if self.mob.handle.session_unborn(&session_id) {
             return Ok(SessionHistoryPage::from_messages(session_id, &[], query));
         }
         SessionServiceHistoryExt::read_history(session_service.as_ref(), &session_id, query)
@@ -13141,12 +14871,13 @@ impl MobRuntime {
         &self,
         session_id_str: &str,
     ) -> Result<Vec<meerkat_core::ToolApplicationObservation>, MobRuntimeError> {
-        let service = self
-            .session_service
-            .as_ref()
-            .ok_or(MobRuntimeError::InvalidInput(
-                "tool application observations unavailable for this runtime",
-            ))?;
+        let service =
+            self.process
+                .session_service
+                .as_ref()
+                .ok_or(MobRuntimeError::InvalidInput(
+                    "tool application observations unavailable for this runtime",
+                ))?;
         let session_id = meerkat_core::SessionId::parse(session_id_str)
             .map_err(|_| MobRuntimeError::InvalidInput("invalid session_id format"))?;
         service
@@ -13172,11 +14903,12 @@ impl MobRuntime {
         // failed. Only the composition's actual durable store grants negative
         // evidence here. Custom/ephemeral runtimes without it keep provisional
         // notices until an exact discard event or positive history arrives.
-        let Some(store) = self.durable_runtime_store.as_ref() else {
+        let Some(store) = self.process.durable_runtime_store.as_ref() else {
             return settled;
         };
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
         let adapter = self
+            .process
             .session_service
             .as_ref()
             .and_then(|service| observed_runtime_adapter(service.as_ref()));
@@ -13229,7 +14961,7 @@ impl MobRuntime {
         &self,
         session_id: &meerkat_core::types::SessionId,
     ) -> Option<bool> {
-        let store = self.durable_runtime_store.as_ref()?;
+        let store = self.process.durable_runtime_store.as_ref()?;
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
         let rows = store.load_input_states(&runtime_id).await.ok()?;
         durable_inputs_owe_work(&rows)
@@ -13253,7 +14985,8 @@ impl MobRuntime {
     ///   a boundary commit holds until it lands, so a timeout usually means a
     ///   commit is in flight.
     pub async fn session_commit_pending(&self, session_id: &str) -> Option<bool> {
-        let runtime_adapter = observed_runtime_adapter(self.session_service.as_ref()?.as_ref())?;
+        let runtime_adapter =
+            observed_runtime_adapter(self.process.session_service.as_ref()?.as_ref())?;
         let session_id = meerkat_core::types::SessionId::parse(session_id).ok()?;
         bounded_commit_pending(
             runtime_adapter.session_has_uncommitted_run_input(&session_id),
@@ -13267,7 +15000,8 @@ impl MobRuntime {
     /// `None` when the runtime adapter does not answer within the bound
     /// (inconclusive, never a guessed `false`).
     pub async fn session_has_active_inputs(&self, session_id: &str) -> Option<bool> {
-        let runtime_adapter = observed_runtime_adapter(self.session_service.as_ref()?.as_ref())?;
+        let runtime_adapter =
+            observed_runtime_adapter(self.process.session_service.as_ref()?.as_ref())?;
         let session_id = meerkat_core::types::SessionId::parse(session_id).ok()?;
         bounded_commit_pending(
             async {
@@ -13293,7 +15027,7 @@ impl MobRuntime {
                 "session_id must not be empty",
             ));
         }
-        let Some(session_service) = self.session_service.as_ref() else {
+        let Some(session_service) = self.process.session_service.as_ref() else {
             return Ok(None);
         };
         let Some(runtime_adapter) = session_service
@@ -13323,7 +15057,7 @@ impl MobRuntime {
                 "session_id must not be empty",
             ));
         }
-        let Some(session_service) = self.session_service.as_ref() else {
+        let Some(session_service) = self.process.session_service.as_ref() else {
             return Ok(None);
         };
         let session_id = meerkat_core::types::SessionId::parse(session_id_str)
@@ -13347,7 +15081,7 @@ impl MobRuntime {
                 "session_id must not be empty",
             ));
         }
-        let Some(session_service) = self.session_service.as_ref() else {
+        let Some(session_service) = self.process.session_service.as_ref() else {
             return Ok(None);
         };
         let Some(runtime_adapter) = session_service
@@ -13379,7 +15113,7 @@ impl MobRuntime {
                 "session_id must not be empty",
             ));
         }
-        let Some(session_service) = self.session_service.as_ref() else {
+        let Some(session_service) = self.process.session_service.as_ref() else {
             return Ok(None);
         };
         let Some(runtime_adapter) = session_service
@@ -13414,7 +15148,7 @@ impl MobRuntime {
     /// `MobRuntime::from_handle(...)`. HTTP handlers that need to read session
     /// history reach through this accessor.
     pub fn session_service(&self) -> Option<&Arc<dyn MobSessionService>> {
-        self.session_service.as_ref()
+        self.process.session_service.as_ref()
     }
 
     /// This runtime with `service` as its session service: for a row that
@@ -13425,7 +15159,7 @@ impl MobRuntime {
         mut self,
         service: Arc<dyn MobSessionService>,
     ) -> Self {
-        self.session_service = Some(service);
+        self.process.session_service = Some(service);
         self
     }
 
@@ -13434,7 +15168,7 @@ impl MobRuntime {
     /// ([`MobBootstrapSpec::with_member_model_config`]): the image checks'
     /// source for self-hosted and config-declared models.
     pub fn member_model_config(&self) -> Option<Arc<meerkat::Config>> {
-        self.member_model_config.clone()
+        self.process.member_model_config.clone()
     }
 
     /// Access the committed-boundary heal authority recorded at bootstrap,
@@ -13443,7 +15177,7 @@ impl MobRuntime {
     pub fn committed_boundary_recoverer(
         &self,
     ) -> Option<Arc<dyn crate::identity_first::bridge::CommittedBoundaryRecoverer>> {
-        self.committed_boundary_recoverer.clone()
+        self.process.committed_boundary_recoverer.clone()
     }
 
     /// The concrete session owner's controller pin operation recorded at
@@ -13451,25 +15185,25 @@ impl MobRuntime {
     pub fn controller_pin_source(
         &self,
     ) -> Option<Arc<dyn crate::identity_first::bridge::ControllerPinSource>> {
-        self.controller_pin_source.clone()
+        self.process.controller_pin_source.clone()
     }
 
     /// Whether this runtime's machine has a host's native work authorization
     /// owner installed: its members admit only governed input. A composition
     /// observation, never a permission decision.
     pub fn native_work_governed(&self) -> bool {
-        self.native_work_governed
+        self.process.native_work_governed
     }
 
     pub fn binary_blob_store(&self) -> Option<Arc<dyn BinaryBlobStore>> {
-        self.binary_blob_store.clone()
+        self.process.binary_blob_store.clone()
     }
 
     /// Composition-time storage durability resolution carried over from the
     /// bootstrap spec. `None` for externally-composed specs that did not
     /// declare it (see [`MobBootstrapSpec::resolved_storage`]).
     pub fn resolved_storage(&self) -> Option<ResolvedStorageSummary> {
-        self.resolved_storage.clone()
+        self.process.resolved_storage.clone()
     }
 }
 
@@ -14573,214 +16307,115 @@ pub(crate) async fn send_console_human_on_mob(
 mod tests {
     use super::*;
 
-    /// A mob event history from `kinds`, in order.
-    fn mob_history(kinds: Vec<meerkat_mob::MobEventKind>) -> Vec<meerkat_mob::event::MobEvent> {
-        kinds
-            .into_iter()
-            .enumerate()
-            .map(|(index, kind)| meerkat_mob::event::MobEvent {
-                cursor: index as u64 + 1,
-                timestamp: chrono::Utc::now(),
-                mob_id: meerkat_mob::MobId::from("recovered-stop"),
-                kind,
-            })
-            .collect()
+    /// Core's wait on a mob that still owes a lifecycle intent: it answers
+    /// `phase` once `lands_after` has passed.
+    async fn owed_intent_lands_after(
+        lands_after: std::time::Duration,
+        phase: Result<meerkat_mob::MobState, MobError>,
+    ) -> Result<meerkat_mob::MobState, MobError> {
+        tokio::time::sleep(lands_after).await;
+        phase
     }
 
-    /// The boot waits for exactly the Stops Core's recovery finishes after
-    /// resume: an open placed Stop on a mob whose history still replays as
-    /// running (the shape an earlier process's interrupted shutdown leaves).
-    /// A Stop that landed, a resume, a reset or another intent waits for
-    /// nothing.
-    #[test]
-    fn the_boot_waits_only_for_a_placed_stop_core_recovery_finishes() {
-        use meerkat_mob::MobEventKind as Kind;
-        use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
-        let started = |intent| Kind::PlacedCompletionLifecycleQuiesceStarted { intent };
-        let ended = |intent| Kind::PlacedCompletionLifecycleQuiesceEnded { intent };
-        let cases: Vec<(&str, Vec<Kind>, bool)> = vec![
-            ("no history", vec![], false),
-            (
-                "an interrupted shutdown Stop",
-                vec![started(Intent::Stop)],
-                true,
-            ),
-            (
-                "a Stop that landed",
-                vec![started(Intent::Stop), Kind::MobStopped],
-                false,
-            ),
-            (
-                "a landed Stop the next boot resumed",
-                vec![started(Intent::Stop), Kind::MobStopped, ended(Intent::Stop)],
-                false,
-            ),
-            (
-                "a second Stop interrupted after a resume",
-                vec![
-                    started(Intent::Stop),
-                    Kind::MobStopped,
-                    ended(Intent::Stop),
-                    started(Intent::Stop),
-                ],
-                true,
-            ),
-            (
-                "a Stop marker on a mob already stopped",
-                vec![Kind::MobStopped, started(Intent::Stop)],
-                false,
-            ),
-            (
-                "a reset closes it",
-                vec![started(Intent::Stop), Kind::MobReset],
-                false,
-            ),
-            ("another intent", vec![started(Intent::Reset)], false),
-            (
-                "a destroy was admitted: Core retries the destroy",
-                vec![started(Intent::Stop), Kind::MobDestroying],
-                false,
-            ),
-        ];
-        for (name, kinds, waits) in cases {
-            assert_eq!(
-                recovery_finishes_a_placed_stop(
-                    &meerkat_mob::MobId::from("recovered-stop"),
-                    &mob_history(kinds)
-                ),
-                waits,
-                "{name}"
-            );
-        }
-        // Only the mob's own events count.
-        let mut foreign = mob_history(vec![started(Intent::Stop)]);
-        foreign[0].mob_id = meerkat_mob::MobId::from("another-mob");
-        assert!(!recovery_finishes_a_placed_stop(
-            &meerkat_mob::MobId::from("recovered-stop"),
-            &foreign
-        ));
-    }
-
-    // The boot's wait for a placed Stop, over scripted reads on a paused
-    // clock: the history read the mob actor answers, and the wait for the
-    // Stop to land (`settle_recovered_placed_stop` wires both to the mob).
-
-    /// A history read the mob actor answers with `answer` only after
-    /// `delay`, as it does behind a long restore.
-    async fn history_read_after(
-        delay: std::time::Duration,
-        answer: Result<Vec<meerkat_mob::event::MobEvent>, MobError>,
-    ) -> Result<Vec<meerkat_mob::event::MobEvent>, MobError> {
-        tokio::time::sleep(delay).await;
-        answer
-    }
-
-    /// A resume slower than the bound lets the boot go on when its history
-    /// holds no placed Stop: the history read is not bounded. This history is
-    /// the one a graceful shutdown leaves (its Stop's quiesce began, then the
-    /// Stop landed), so the boot asks for no Stop to land.
+    /// The wait on an owed Stop, over its two reads and with no mob: a Stop
+    /// that lands within the bound answers the phase it leaves, Stopped,
+    /// once it has landed, never the Running that was read while the Stop
+    /// was owed. (That preparation and the activation take the phase from
+    /// this wait is the source guard's row; a real mob's lift from Stopped
+    /// is `a_stopped_default_mob_is_loaded_by_the_set_and_runs_again_only_because_the_launch_declares_it`.)
     #[tokio::test(start_paused = true)]
-    async fn a_resume_slower_than_the_bound_without_a_placed_stop_lets_the_boot_go_on() {
-        use meerkat_mob::MobEventKind as Kind;
+    async fn the_wait_on_an_owed_stop_answers_the_phase_the_stop_left_once_it_landed() {
         use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
-        let slow_read = RECOVERED_PLACED_STOP_SETTLE_BOUND * 3;
-        let asked = std::sync::atomic::AtomicBool::new(false);
+        let lands_after = DEFAULT_MOB_OWED_INTENT_BOUND / 2;
         let begun = tokio::time::Instant::now();
-        let settled = settle_placed_stop_after_history(
-            &meerkat_mob::MobId::from("recovered-stop"),
-            history_read_after(
-                slow_read,
-                Ok(mob_history(vec![
-                    Kind::PlacedCompletionLifecycleQuiesceStarted {
-                        intent: Intent::Stop,
-                    },
-                    Kind::MobStopped,
-                ])),
-            ),
-            |_| {
-                asked.store(true, std::sync::atomic::Ordering::SeqCst);
-                std::future::pending()
-            },
-            RECOVERED_PLACED_STOP_SETTLE_BOUND,
+        let phase = phase_once_no_intent_is_owed_within(
+            owed_intent_lands_after(lands_after, Ok(meerkat_mob::MobState::Stopped)),
+            || Some(Intent::Stop),
+            DEFAULT_MOB_OWED_INTENT_BOUND,
         )
-        .await;
-        assert!(settled.is_ok(), "{settled:?}");
-        assert!(
-            begun.elapsed() >= slow_read,
-            "the boot waited for the whole history read"
-        );
-        assert!(
-            !asked.load(std::sync::atomic::Ordering::SeqCst),
-            "no Stop to wait for"
-        );
-    }
-
-    /// A placed Stop that lands lets the boot go on once it has landed. The
-    /// bound starts after the history read, so a read slower than the bound
-    /// does not count against the Stop.
-    #[tokio::test(start_paused = true)]
-    async fn a_placed_stop_that_lands_lets_the_boot_go_on_once_it_landed() {
-        use meerkat_mob::MobEventKind as Kind;
-        use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
-        let slow_read = RECOVERED_PLACED_STOP_SETTLE_BOUND * 3;
-        let landing = RECOVERED_PLACED_STOP_SETTLE_BOUND / 2;
-        let asked_after = std::sync::Mutex::new(Vec::new());
-        let begun = tokio::time::Instant::now();
-        let settled = settle_placed_stop_after_history(
-            &meerkat_mob::MobId::from("recovered-stop"),
-            history_read_after(
-                slow_read,
-                Ok(mob_history(vec![
-                    Kind::PlacedCompletionLifecycleQuiesceStarted {
-                        intent: Intent::Stop,
-                    },
-                ])),
-            ),
-            |after_cursor| {
-                asked_after.lock().unwrap().push(after_cursor);
-                async move {
-                    tokio::time::sleep(landing).await;
-                    Ok::<(), MobError>(())
-                }
-            },
-            RECOVERED_PLACED_STOP_SETTLE_BOUND,
-        )
-        .await;
-        assert!(settled.is_ok(), "{settled:?}");
+        .await
+        .expect("a Stop that lands within the bound lets the launch go on");
         assert_eq!(
-            *asked_after.lock().unwrap(),
-            [1],
-            "the boot waits for the Stop after the history it read"
+            phase,
+            meerkat_mob::MobState::Stopped,
+            "the phase the landed Stop left, which the launch lifts"
         );
         assert!(
-            begun.elapsed() >= slow_read + landing,
-            "the boot waited for the Stop to land"
+            begun.elapsed() >= lands_after,
+            "the launch waited for the Stop to land"
         );
     }
 
-    /// A placed Stop that never lands refuses the boot typed, naming the
-    /// Stop, once the bound has passed after the history read.
+    /// The bound on an owed intent starts once the mob's restore is over.
+    /// The read the mob's actor answers after its load is awaited with no
+    /// bound: a large mob over a slow store restores for as long as that
+    /// takes, and a launch whose owed Stop then lands within the bound is
+    /// not refused for it.
     #[tokio::test(start_paused = true)]
-    async fn a_placed_stop_that_never_lands_refuses_the_boot_naming_the_stop() {
-        use meerkat_mob::MobEventKind as Kind;
+    async fn a_restore_longer_than_the_bound_does_not_refuse_a_launch_whose_owed_stop_then_lands() {
         use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
-        let slow_read = RECOVERED_PLACED_STOP_SETTLE_BOUND * 3;
+        let restore_takes = DEFAULT_MOB_OWED_INTENT_BOUND * 3;
+        let lands_after = DEFAULT_MOB_OWED_INTENT_BOUND / 2;
         let begun = tokio::time::Instant::now();
-        let settled = settle_placed_stop_after_history(
-            &meerkat_mob::MobId::from("recovered-stop"),
-            history_read_after(
-                slow_read,
-                Ok(mob_history(vec![
-                    Kind::PlacedCompletionLifecycleQuiesceStarted {
-                        intent: Intent::Stop,
-                    },
-                ])),
-            ),
-            |_| std::future::pending(),
-            RECOVERED_PLACED_STOP_SETTLE_BOUND,
+        let phase = phase_once_restored_and_no_intent_is_owed_within(
+            async move {
+                tokio::time::sleep(restore_takes).await;
+                Ok(())
+            },
+            owed_intent_lands_after(lands_after, Ok(meerkat_mob::MobState::Stopped)),
+            || Some(Intent::Stop),
+            DEFAULT_MOB_OWED_INTENT_BOUND,
+        )
+        .await
+        .expect("a restore longer than the bound does not refuse the launch");
+        assert_eq!(
+            phase,
+            meerkat_mob::MobState::Stopped,
+            "the phase the landed Stop left"
+        );
+        assert!(
+            begun.elapsed() >= restore_takes + lands_after,
+            "the launch waited for the restore, then for the Stop to land"
+        );
+    }
+
+    /// A mob whose actor ends before it answered the read after its load
+    /// refuses the launch with that read's own error, and the wait on the
+    /// owed intent is never begun.
+    #[tokio::test(start_paused = true)]
+    async fn a_restore_that_fails_refuses_the_launch_with_its_own_error() {
+        use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
+        let refused = phase_once_restored_and_no_intent_is_owed_within(
+            async { Err(MobError::ActorCommandChannelClosed) },
+            std::future::pending::<Result<meerkat_mob::MobState, MobError>>(),
+            || Some(Intent::Stop),
+            DEFAULT_MOB_OWED_INTENT_BOUND,
         )
         .await;
-        let error = settled.expect_err("a Stop that never lands refuses the boot");
+        assert!(
+            matches!(
+                refused,
+                Err(MobRuntimeError::Mob(MobError::ActorCommandChannelClosed))
+            ),
+            "the restore's own error refuses the launch: {refused:?}"
+        );
+    }
+
+    /// A Stop that never lands refuses the launch typed, naming the Stop,
+    /// once the bound has passed: the error, its intent and its stage text
+    /// are the ones a boot answered before the launch read the owed intent
+    /// from Core.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_that_never_lands_refuses_the_launch_typed() {
+        use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
+        let begun = tokio::time::Instant::now();
+        let refused = phase_once_no_intent_is_owed_within(
+            std::future::pending::<Result<meerkat_mob::MobState, MobError>>(),
+            || Some(Intent::Stop),
+            DEFAULT_MOB_OWED_INTENT_BOUND,
+        )
+        .await;
+        let error = refused.expect_err("a Stop that never lands refuses the launch");
         assert!(
             matches!(
                 error,
@@ -14793,31 +16428,103 @@ mod tests {
             "{error:?}"
         );
         assert!(
-            begun.elapsed() >= slow_read + RECOVERED_PLACED_STOP_SETTLE_BOUND,
-            "the bound runs from the history read"
+            begun.elapsed() >= DEFAULT_MOB_OWED_INTENT_BOUND,
+            "the launch waited the whole bound"
+        );
+        assert!(
+            begun.elapsed() < DEFAULT_MOB_OWED_INTENT_BOUND * 2,
+            "and refused when the bound passed with the Stop still owed"
         );
     }
 
-    /// A history read that fails refuses the boot with the read's own error,
-    /// which names no Stop: none was found. A slow read is never refused (see
-    /// the row above for a resume slower than the bound).
+    /// Another intent that never lands refuses the launch the same way and
+    /// names itself, never a Stop.
     #[tokio::test(start_paused = true)]
-    async fn a_failed_history_read_refuses_the_boot_with_its_own_error_naming_no_stop() {
-        let asked = std::sync::atomic::AtomicBool::new(false);
-        let settled = settle_placed_stop_after_history(
-            &meerkat_mob::MobId::from("recovered-stop"),
-            history_read_after(
-                RECOVERED_PLACED_STOP_SETTLE_BOUND * 3,
-                Err(MobError::ActorCommandChannelClosed),
-            ),
-            |_| {
-                asked.store(true, std::sync::atomic::Ordering::SeqCst);
-                std::future::pending()
-            },
-            RECOVERED_PLACED_STOP_SETTLE_BOUND,
+    async fn an_owed_intent_other_than_a_stop_that_never_lands_refuses_the_launch_naming_it() {
+        use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
+        let refused = phase_once_no_intent_is_owed_within(
+            std::future::pending::<Result<meerkat_mob::MobState, MobError>>(),
+            || Some(Intent::Complete),
+            DEFAULT_MOB_OWED_INTENT_BOUND,
         )
         .await;
-        let error = settled.expect_err("a failed history read refuses the boot");
+        let error = refused.expect_err("a Complete that never lands refuses the launch");
+        assert!(
+            matches!(
+                error,
+                MobRuntimeError::Mob(MobError::LifecycleOperationProgressStalled {
+                    ref intent,
+                    member_id: None,
+                    stage: "boot awaiting a lifecycle intent an earlier process placed",
+                }) if intent == "Complete"
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("Stop"), "{error}");
+    }
+
+    /// The bound refuses a launch only for an intent that is still owed when
+    /// it passes. A wait that is still pending then with no intent read (the
+    /// intent landed as the bound passed) is given the bound again, and the
+    /// launch goes on with the phase it answers.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_still_pending_at_the_bound_with_no_intent_owed_is_not_refused() {
+        let lands_after = DEFAULT_MOB_OWED_INTENT_BOUND * 3 / 2;
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let phase = phase_once_no_intent_is_owed_within(
+            owed_intent_lands_after(lands_after, Ok(meerkat_mob::MobState::Running)),
+            || {
+                asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                None
+            },
+            DEFAULT_MOB_OWED_INTENT_BOUND,
+        )
+        .await
+        .expect("no intent is owed at the bound: the launch is not refused");
+        assert_eq!(phase, meerkat_mob::MobState::Running);
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the owed intent is read once, when the bound passed"
+        );
+    }
+
+    /// A mob that owes nothing answers at once and the owed intent is never
+    /// read: a healthy restart waits for nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_default_mob_that_owes_nothing_is_read_at_once() {
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let begun = tokio::time::Instant::now();
+        let phase = phase_once_no_intent_is_owed_within(
+            std::future::ready(Ok(meerkat_mob::MobState::Stopped)),
+            || {
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+                None
+            },
+            DEFAULT_MOB_OWED_INTENT_BOUND,
+        )
+        .await
+        .expect("a mob that owes nothing answers its phase");
+        assert_eq!(phase, meerkat_mob::MobState::Stopped);
+        assert_eq!(begun.elapsed(), std::time::Duration::ZERO);
+        assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A mob whose actor ends while an intent is owed refuses the launch
+    /// with the wait's own error, which names no Stop and is no stall.
+    #[tokio::test(start_paused = true)]
+    async fn a_default_mob_whose_actor_ended_refuses_the_launch_with_the_waits_own_error() {
+        use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
+        let refused = phase_once_no_intent_is_owed_within(
+            owed_intent_lands_after(
+                DEFAULT_MOB_OWED_INTENT_BOUND / 4,
+                Err(MobError::ActorCommandChannelClosed),
+            ),
+            || Some(Intent::Stop),
+            DEFAULT_MOB_OWED_INTENT_BOUND,
+        )
+        .await;
+        let error = refused.expect_err("an ended actor refuses the launch");
         assert!(
             matches!(
                 error,
@@ -14826,10 +16533,6 @@ mod tests {
             "{error:?}"
         );
         assert!(!error.to_string().contains("Stop"), "{error}");
-        assert!(
-            !asked.load(std::sync::atomic::Ordering::SeqCst),
-            "no Stop to wait for"
-        );
     }
 
     // `session_commit_pending` answers only what the runtime read concluded
@@ -15158,14 +16861,127 @@ mod tests {
             inner: Arc::new(EmptyDispatcher),
             implicit_delegate_retirement_overrides: overrides,
             console_spawn_sink: new_console_spawn_sink_slot(),
-            identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-            protected_mob_id: "test-mob".to_string(),
+            identity_plane: MobIdentityPlane::detached("test-mob"),
             spawner_comms_name: None,
             realm_profiles: None,
             caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         }
+    }
+
+    /// `mob_destroy` naming `mob_id`, through `dispatcher`.
+    async fn raw_mob_destroy(
+        dispatcher: &AutoWireParentMobToolDispatcher,
+        mob_id: &str,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        use meerkat_core::AgentToolDispatcher as _;
+        let args = serde_json::value::RawValue::from_string(
+            serde_json::json!({ "mob_id": mob_id }).to_string(),
+        )
+        .expect("raw args");
+        dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "destroy-1",
+                    name: "mob_destroy",
+                    args: &args,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+            )
+            .await
+    }
+
+    /// While an identity runtime is attached to the mob a tool surface
+    /// serves, `mob_destroy` naming that mob is refused before the mob tools
+    /// see the call, with this text. Another mob's id reaches the mob tools,
+    /// and so does this mob's id while no identity runtime is attached.
+    #[tokio::test]
+    async fn raw_mob_destroy_of_the_mob_an_identity_runtime_is_attached_to_is_refused() {
+        let dispatcher = wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default());
+        let reached_the_mob_tools = |outcome: Result<_, meerkat_core::ToolError>| {
+            matches!(outcome, Err(meerkat_core::ToolError::NotFound { .. }))
+        };
+        assert!(
+            reached_the_mob_tools(raw_mob_destroy(&dispatcher, "test-mob").await),
+            "no identity runtime is attached"
+        );
+
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("continuity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "raw-mob-destroy".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: None,
+                default_timeout: None,
+            },
+        ));
+        dispatcher
+            .identity_plane
+            .set_attached(Some(identity_runtime));
+
+        let refused = raw_mob_destroy(&dispatcher, "test-mob")
+            .await
+            .expect_err("this mob's id is refused");
+        assert_eq!(
+            refused,
+            meerkat_core::ToolError::invalid_arguments(
+                "mob_destroy",
+                "mob 'test-mob' is owned by the attached IdentityRuntime and cannot be destroyed \
+                 through raw agent tools",
+            )
+        );
+        assert!(
+            reached_the_mob_tools(raw_mob_destroy(&dispatcher, "another-mob").await),
+            "another mob's id is not this surface's to protect"
+        );
+    }
+
+    /// A mob's identity plane answers for its own mob only, and every clone
+    /// reads the one slot its identity runtime is attached to.
+    #[tokio::test]
+    async fn an_identity_plane_answers_for_its_own_mob_only() {
+        let plane = MobIdentityPlane::detached("this-mob");
+        assert_eq!(plane.mob_id().as_str(), "this-mob");
+        assert!(plane.is_of_mob("this-mob"));
+        assert!(!plane.is_of_mob("another-mob"));
+        assert!(plane.attached().is_none());
+        assert!(plane.attached_for("this-mob").is_none());
+
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("continuity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "identity-plane".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: None,
+                default_timeout: None,
+            },
+        ));
+        let held_elsewhere = plane.clone();
+        plane.set_attached(Some(Arc::clone(&identity_runtime)));
+        assert!(
+            held_elsewhere
+                .attached_for("this-mob")
+                .is_some_and(|attached| Arc::ptr_eq(&attached, &identity_runtime))
+        );
+        assert!(
+            held_elsewhere.attached_for("another-mob").is_none(),
+            "an attached identity runtime serves no other mob"
+        );
+        assert!(Arc::ptr_eq(held_elsewhere.slot(), plane.slot()));
+
+        plane.set_attached(None);
+        assert!(held_elsewhere.attached().is_none());
     }
 
     /// Under a member auth binding, `mob_create` refuses a child mob that
@@ -16581,10 +18397,9 @@ mod tests {
             })
             .await
             .expect("the identity registers");
-        *dispatcher
-            .identity_runtime
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity_runtime);
+        dispatcher
+            .identity_plane
+            .set_attached(Some(identity_runtime));
 
         let args = serde_json::value::RawValue::from_string(
             serde_json::json!({"member_id": "lead"}).to_string(),
@@ -16692,8 +18507,7 @@ mod tests {
             inner: Arc::new(ForkOffOnly),
             implicit_delegate_retirement_overrides: ImplicitDelegateRetirementOverrides::default(),
             console_spawn_sink: new_console_spawn_sink_slot(),
-            identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-            protected_mob_id: "test-mob".to_string(),
+            identity_plane: MobIdentityPlane::detached("test-mob"),
             spawner_comms_name: None,
             realm_profiles: None,
             caller: None,
@@ -16825,8 +18639,7 @@ mod tests {
             }),
             implicit_delegate_retirement_overrides: ImplicitDelegateRetirementOverrides::default(),
             console_spawn_sink: new_console_spawn_sink_slot(),
-            identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-            protected_mob_id: "test-mob".to_string(),
+            identity_plane: MobIdentityPlane::detached("test-mob"),
             spawner_comms_name: None,
             realm_profiles: None,
             caller: None,
@@ -16898,8 +18711,7 @@ mod tests {
             }),
             implicit_delegate_retirement_overrides: ImplicitDelegateRetirementOverrides::default(),
             console_spawn_sink: new_console_spawn_sink_slot(),
-            identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-            protected_mob_id: "test-mob".to_string(),
+            identity_plane: MobIdentityPlane::detached("test-mob"),
             spawner_comms_name: None,
             realm_profiles: None,
             caller: None,
@@ -24445,13 +26257,14 @@ comms = true
             let left = meerkat_mob::AgentIdentity::from("left");
             let right = meerkat_mob::AgentIdentity::from("right");
             for member in [&left, &right] {
-                Box::pin(runtime.handle.spawn_spec(SpawnMemberSpec::new(
+                Box::pin(runtime.mob.handle.spawn_spec(SpawnMemberSpec::new(
                     ProfileName::from("worker"),
                     member.clone(),
                 )))
                 .await
                 .expect("create comms-enabled member");
                 let session = runtime
+                    .mob
                     .handle
                     .resolve_bridge_session_id(member)
                     .await
@@ -24462,11 +26275,13 @@ comms = true
                 );
             }
             runtime
+                .mob
                 .handle
                 .wire(left, right)
                 .await
                 .expect("reconcile an actual member edge");
             let report = runtime
+                .mob
                 .handle
                 .destroy()
                 .await
@@ -24623,6 +26438,7 @@ comms = true
 
         let runtime = MobRuntime::bootstrap(spec).await.expect("root bootstrap");
         let final_state = runtime
+            .process
             .agent_mob_mcp_state
             .clone()
             .expect("final mob-tool state");
@@ -24922,10 +26738,13 @@ comms = true
         spec.options.default_llm_client = Some(Arc::new(meerkat_client::TestClient::for_provider(
             meerkat_core::Provider::OpenAI,
         )));
+        // The row makes its mob by a host's create, in the place of an
+        // agent's.
         let runtime = MobRuntime::bootstrap(spec)
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         let state = runtime
+            .process
             .agent_mob_mcp_state
             .clone()
             .expect("agent mob MCP state should be installed");
@@ -25324,6 +27143,7 @@ comms = true
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         let profile = runtime
+            .mob
             .handle
             .definition()
             .profiles
@@ -25340,6 +27160,7 @@ comms = true
             "bootstrap must not turn ordinary profile fields into operator authority"
         );
         runtime
+            .mob
             .handle
             .shutdown()
             .await
@@ -25775,8 +27596,7 @@ image_generation = true
                 implicit_delegate_retirement_overrides:
                     ImplicitDelegateRetirementOverrides::default(),
                 console_spawn_sink,
-                identity_runtime: Arc::new(std::sync::RwLock::new(None)),
-                protected_mob_id: "test-mob".to_string(),
+                identity_plane: MobIdentityPlane::detached("test-mob"),
                 spawner_comms_name: Some("ops/orchestrator/ops-lead".to_string()),
                 realm_profiles: None,
                 caller: None,
@@ -26205,6 +28025,1365 @@ image_generation = true
     fn acquisition_definition() -> MobDefinition {
         MobDefinition::from_toml(&format!("[mob]\nid = \"{}\"\n", unique_test_mob_id()))
             .expect("acquisition fixture definition")
+    }
+
+    /// Whether a restored mob that reads `Stopped` is lifted where it is
+    /// built or held for its identity owners is decided by the composition:
+    /// built without agent mob tools it is lifted at once; built with them
+    /// the lift is handed to the host, which consumes it once the mob's
+    /// identity owners are registered.
+    #[tokio::test]
+    async fn a_restored_stopped_mob_is_lifted_at_once_without_agent_tools_and_held_with_them() {
+        for agent_tools in [false, true] {
+            let dir = tempfile::tempdir().expect("fixture directory");
+            let (service, selected, store, _blobs, jobs) = acquisition_fixture(dir.path());
+            let definition = MobDefinition::from_toml(&format!(
+                "[mob]\nid = \"{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+                unique_test_mob_id()
+            ))
+            .expect("a definition with one profile");
+            let storage = MobStorage::in_memory();
+            let first = MobRuntime::bootstrap(
+                MobBootstrapSpec::new(definition.clone(), storage.clone(), service.clone())
+                    .with_session_runtime_adapter(selected.clone())
+                    .expect("adopt owner"),
+            )
+            .await
+            .expect("first boot");
+            first
+                .handle()
+                .stop()
+                .await
+                .expect("record an explicit Stop");
+            assert_eq!(
+                first.handle().status().await.expect("stopped state"),
+                meerkat_mob::MobState::Stopped
+            );
+            first
+                .handle()
+                .shutdown()
+                .await
+                .expect("close the stopped actor");
+            drop(first);
+
+            let mut spec = MobBootstrapSpec::new(definition, storage, service)
+                .with_declared_ephemeral_mob_storage()
+                .with_session_runtime_adapter(selected)
+                .expect("same owner");
+            if agent_tools {
+                spec = spec
+                    .with_runtime_delivery(MobRuntimeDelivery::new(store, jobs))
+                    .with_agent_mob_tools(Arc::new(std::sync::RwLock::new(None)))
+                    .expect("install agent mob tools");
+            }
+            let (runtime, pending) = MobRuntime::prepare(spec)
+                .await
+                .expect("prepare the restored mob");
+            let restored = runtime.handle().status().await.expect("restored state");
+            if agent_tools {
+                assert_eq!(
+                    restored,
+                    meerkat_mob::MobState::Stopped,
+                    "with agent mob tools the restored mob is held for its identity owners"
+                );
+                pending
+                    .expect("the lift is handed to the host")
+                    .activate()
+                    .await
+                    .expect("the host consumes the lift");
+            } else {
+                assert!(
+                    pending.is_none(),
+                    "without agent mob tools the lift is consumed where the mob is built"
+                );
+                assert_eq!(
+                    restored,
+                    meerkat_mob::MobState::Running,
+                    "without agent mob tools the restored mob is lifted at once"
+                );
+            }
+            assert_eq!(
+                runtime.handle().status().await.expect("running state"),
+                meerkat_mob::MobState::Running
+            );
+            runtime.handle().shutdown().await.expect("shutdown");
+        }
+    }
+
+    /// A spec over the declared `store`, with the agent mob tools installed:
+    /// the mob set the launch declares its mob to. The mobs its members
+    /// create live for the process (these rows are about the launch's mob).
+    fn declared_launch_spec(
+        definition: &MobDefinition,
+        store: crate::mob_composition_manifest::DeclaredMobStore,
+        fixture: &AcquisitionFixture,
+    ) -> MobBootstrapSpec {
+        let (service, selected, runtime_store, _blobs, jobs) = fixture;
+        MobBootstrapSpec::declared(definition.clone(), store, service.clone())
+            .with_session_runtime_adapter(selected.clone())
+            .expect("adopt owner")
+            .with_runtime_delivery(MobRuntimeDelivery::new(runtime_store.clone(), jobs.clone()))
+            .with_agent_mob_tools(Arc::new(std::sync::RwLock::new(None)))
+            .expect("install agent mob tools")
+            .with_child_mob_storage(crate::ChildMobStorage::ProcessBound)
+    }
+
+    fn declared_launch_definition() -> MobDefinition {
+        MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+            unique_test_mob_id()
+        ))
+        .expect("a definition with one profile")
+    }
+
+    /// A launch over a declared store declares its mob to its mob set, and
+    /// the set creates the mob: the set names it as the host's default mob,
+    /// lists it among the mobs it manages, serves the handle the launch
+    /// runs, and refuses a handle built outside it under the mob's id. The
+    /// store records the host as the mob's creator.
+    #[tokio::test]
+    async fn a_declared_launch_mob_is_created_by_the_set_and_listed_as_a_host_mob() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        let runtime = MobRuntime::bootstrap(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+            &fixture,
+        ))
+        .await
+        .expect("a launch over a declared store");
+        let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+        assert_eq!(
+            state.default_mob_id(),
+            Some(&definition.id),
+            "the launch declared its mob to the set as the host's default mob"
+        );
+        let inventory = state.mob_inventory().await.expect("the set's inventory");
+        assert!(
+            inventory.managed.iter().any(|(id, _)| id == &definition.id),
+            "the set lists the launch's mob among the mobs it manages"
+        );
+        assert!(
+            inventory.dormant.is_empty() && inventory.quarantined.is_empty(),
+            "the served mob is neither awaited nor quarantined"
+        );
+        let served = state
+            .handle_for(&definition.id)
+            .await
+            .expect("the set serves the launch's mob");
+        assert_eq!(
+            served.status().await.expect("the served mob's state"),
+            meerkat_mob::MobState::Running
+        );
+        assert_eq!(
+            runtime.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        let foreign = state
+            .try_mob_insert_handle(definition.id.clone(), runtime.handle().observer())
+            .await;
+        assert!(
+            matches!(&foreign, Err(MobError::MobAlreadyExists(id)) if id == &definition.id),
+            "the set refuses a handle built outside it under the launch mob's id: {foreign:?}"
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
+        drop(served);
+        drop(state);
+        drop(runtime);
+        let stored = MobStorage::persistent(&store_file).expect("the launch store opens");
+        assert_eq!(
+            stored
+                .creation_provenance()
+                .await
+                .expect("the store's creation record"),
+            Some(meerkat_mob::MobProvenance::Host),
+            "the store records the host as the creator of the launch's mob"
+        );
+    }
+
+    /// The next launch over the same declared store has the set load the
+    /// mob, and the set's load leaves a mob that reads `Stopped` as it is:
+    /// the mob runs again only because the launch declares that it runs its
+    /// mob, which the host consumes once the mob's identity owners are
+    /// registered.
+    #[tokio::test]
+    async fn a_stopped_default_mob_is_loaded_by_the_set_and_runs_again_only_because_the_launch_declares_it()
+     {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        let first = MobRuntime::bootstrap(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+            &fixture,
+        ))
+        .await
+        .expect("the first launch creates the mob");
+        first
+            .handle()
+            .stop()
+            .await
+            .expect("record an explicit Stop");
+        first
+            .handle()
+            .shutdown()
+            .await
+            .expect("close the stopped actor");
+        drop(first);
+
+        let (runtime, pending) = MobRuntime::prepare(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file),
+            &fixture,
+        ))
+        .await
+        .expect("the next launch prepares over the stored mob");
+        let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+        assert_eq!(
+            state.default_mob_id(),
+            Some(&definition.id),
+            "the launch declared its mob to the set as the host's default mob"
+        );
+        let served = state
+            .handle_for(&definition.id)
+            .await
+            .expect("the set loaded the launch's mob");
+        assert_eq!(
+            served.status().await.expect("the loaded mob's state"),
+            meerkat_mob::MobState::Stopped,
+            "the set's load leaves a stopped mob stopped"
+        );
+        pending
+            .expect("the launch's declaration is handed to the host")
+            .activate()
+            .await
+            .expect("the host consumes the declaration");
+        assert_eq!(
+            served
+                .status()
+                .await
+                .expect("the mob's state through the set"),
+            meerkat_mob::MobState::Running,
+            "the launch's declaration runs its mob"
+        );
+        assert_eq!(
+            runtime.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
+    }
+
+    /// A launch over a declared store in memory joins its mob set as one
+    /// over a file does: the set creates the mob and names it as the host's
+    /// default mob.
+    #[tokio::test]
+    async fn a_declared_launch_mob_in_memory_is_created_by_the_set() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let runtime = MobRuntime::bootstrap(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+            &fixture,
+        ))
+        .await
+        .expect("a launch over a declared store in memory");
+        let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+        assert_eq!(state.default_mob_id(), Some(&definition.id));
+        let inventory = state.mob_inventory().await.expect("the set's inventory");
+        assert!(
+            inventory.managed.iter().any(|(id, _)| id == &definition.id),
+            "the set lists the launch's mob among the mobs it manages"
+        );
+        assert_eq!(
+            runtime.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
+    }
+
+    /// On a launch over a declared store the mob set owns the launch mob's
+    /// id: a destroy of the launch's mob through the set is refused and the
+    /// mob serves on, and a create under its id, from a definition or from
+    /// a mob pack, answers that the mob exists.
+    #[tokio::test]
+    async fn the_set_refuses_a_destroy_of_a_declared_launch_mob_and_a_create_under_its_id() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let runtime = MobRuntime::bootstrap(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+            &fixture,
+        ))
+        .await
+        .expect("a launch over a declared store");
+        let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+        let destroyed = state.mob_destroy(&definition.id).await;
+        assert!(
+            matches!(
+                &destroyed,
+                Err(meerkat_mob_mcp::MobMcpDestroyError::Mob(
+                    MobError::WiringError(_)
+                ))
+            ),
+            "the set refuses a destroy of the launch's mob: {:?}",
+            destroyed.as_ref().err()
+        );
+        assert_eq!(
+            runtime.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running,
+            "the mob serves on"
+        );
+        let created = state.mob_create_definition(definition.clone()).await;
+        assert!(
+            matches!(&created, Err(MobError::MobAlreadyExists(id)) if id == &definition.id),
+            "a create under the launch mob's id answers that the mob exists: {created:?}"
+        );
+        let packed = state
+            .mob_create_from_mobpack(
+                definition.clone(),
+                BTreeMap::new(),
+                meerkat_mob::MobDefinitionSourceIdentity::mobpack("a".repeat(64), Vec::new()),
+            )
+            .await;
+        assert!(
+            matches!(&packed, Err(MobError::MobAlreadyExists(id)) if id == &definition.id),
+            "a create from a mob pack under the launch mob's id answers that the mob exists: \
+             {packed:?}"
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
+    }
+
+    /// A launch over a declared store that installed no agent mob tools
+    /// holds a mob set of its own and declares its mob to it, as a launch
+    /// with the tools declares its mob to theirs: the set creates the mob,
+    /// names it as the host's default mob and lists it, the store records
+    /// the host as the mob's creator, and the next launch over the same
+    /// file has the set load the mob.
+    #[tokio::test]
+    async fn a_declared_launch_without_agent_mob_tools_declares_its_mob_to_a_set_of_its_own() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let (service, selected, _store, _blobs, _jobs) = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        for launch in ["the first launch", "the second launch"] {
+            let runtime = MobRuntime::bootstrap(
+                MobBootstrapSpec::declared(
+                    definition.clone(),
+                    crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+                    service.clone(),
+                )
+                .with_session_runtime_adapter(selected.clone())
+                .expect("adopt owner"),
+            )
+            .await
+            .expect("a launch over a declared store without agent mob tools");
+            let state = runtime
+                .agent_mob_mcp_state()
+                .expect("the launch's own mob set");
+            assert_eq!(
+                state.default_mob_id(),
+                Some(&definition.id),
+                "{launch} declared its mob to its own set as the host's default mob"
+            );
+            let inventory = state.mob_inventory().await.expect("the set's inventory");
+            assert!(
+                inventory.managed.iter().any(|(id, _)| id == &definition.id),
+                "{launch}: the set lists the launch's mob among the mobs it manages"
+            );
+            assert_eq!(
+                runtime.handle().status().await.expect("the launch's state"),
+                meerkat_mob::MobState::Running,
+                "{launch}"
+            );
+            runtime.handle().shutdown().await.expect("shutdown");
+            drop(state);
+            drop(runtime);
+        }
+        let stored = MobStorage::persistent(&store_file).expect("the launch store opens");
+        assert_eq!(
+            stored
+                .creation_provenance()
+                .await
+                .expect("the store's creation record"),
+            Some(meerkat_mob::MobProvenance::Host),
+            "the store records the host as the creator of the launch's mob"
+        );
+    }
+
+    /// A declared launch spec over `store_file` that was handed the storage
+    /// the launch opened there itself, as a gateway opens its launch store
+    /// before it reads what init needs of it.
+    fn declared_launch_spec_with_its_own_open(
+        definition: &MobDefinition,
+        store_file: &Path,
+        fixture: &AcquisitionFixture,
+    ) -> MobBootstrapSpec {
+        declared_launch_spec(
+            definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.to_path_buf()),
+            fixture,
+        )
+        .with_declared_store_opened(
+            MobStorage::persistent(store_file).expect("the launch's own open of its store"),
+        )
+    }
+
+    /// A first launch over the declared `store_file` that creates the mob
+    /// and is shut down: what a later launch finds there.
+    async fn a_first_declared_launch(
+        definition: &MobDefinition,
+        store_file: &Path,
+        fixture: &AcquisitionFixture,
+    ) {
+        let first = MobRuntime::bootstrap(declared_launch_spec(
+            definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.to_path_buf()),
+            fixture,
+        ))
+        .await
+        .expect("the first launch creates the mob");
+        first.handle().shutdown().await.expect("shutdown");
+    }
+
+    /// What a launch reads of its declared store before preparation decides
+    /// nothing for preparation: the launch's mob set is built in
+    /// preparation, from what the spec holds then, and preparation reads
+    /// the store and judges the resume again itself. So a spec changed
+    /// after that read is served as it then stands: a member restore policy
+    /// set since is taken, a provenance set since is the declared store's
+    /// own again, and a definition changed to one the store's recorded
+    /// composition does not permit is refused by preparation's judgement.
+    #[tokio::test]
+    async fn a_spec_changed_after_the_read_before_preparation_is_served_by_preparations_own_read() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        a_first_declared_launch(&definition, &store_file, &fixture).await;
+        for what in [
+            "the member restore policy",
+            "the mob storage provenance",
+            "the definition",
+        ] {
+            let mut spec =
+                declared_launch_spec_with_its_own_open(&definition, &store_file, &fixture);
+            spec.read_launch_definition()
+                .await
+                .expect("the read before preparation");
+            let changed = match what {
+                "the member restore policy" => {
+                    spec.with_member_restore(crate::identity_first::MemberRestore::Eager)
+                }
+                "the mob storage provenance" => spec.with_declared_ephemeral_mob_storage(),
+                _ => {
+                    spec.definition = MobDefinition::from_toml(&format!(
+                        "[mob]\nid = \"{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.4\"\n",
+                        definition.id
+                    ))
+                    .expect("the definition with another model");
+                    spec
+                }
+            };
+            let served = MobRuntime::bootstrap(changed).await;
+            if what == "the definition" {
+                assert!(
+                    matches!(&served, Err(MobRuntimeError::CompositionProvenance(_))),
+                    "preparation judges the resume itself: a definition the recorded composition \
+                     does not permit is refused by that judgement: {:?}",
+                    served.as_ref().err()
+                );
+            } else {
+                let runtime = served.unwrap_or_else(|error| {
+                    panic!("a spec whose {what} changed after the read is served: {error:?}")
+                });
+                assert_eq!(
+                    runtime.handle().status().await.expect("the launch's state"),
+                    meerkat_mob::MobState::Running,
+                    "{what}"
+                );
+                runtime.handle().shutdown().await.expect("shutdown");
+            }
+        }
+    }
+
+    /// A launch opens its store itself for what init reads before
+    /// preparation and closes it again; preparation's mob set then opens
+    /// the same file. The two opens of one store file in one process, one
+    /// after the other, serve the mob the store holds, and the file opens
+    /// again once the launch is shut down.
+    #[tokio::test]
+    async fn a_store_the_launch_opened_for_its_read_and_closed_is_opened_again_by_its_mob_set() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        a_first_declared_launch(&definition, &store_file, &fixture).await;
+        let events_before = stored_event_rows(&store_file).len();
+
+        let mut spec = declared_launch_spec_with_its_own_open(&definition, &store_file, &fixture);
+        let read = spec
+            .read_launch_definition()
+            .await
+            .expect("the read before preparation");
+        assert_eq!(read.id, definition.id, "the read answers the stored mob");
+        let runtime = MobRuntime::bootstrap(spec)
+            .await
+            .expect("the mob set opens the store the launch opened and closed");
+        let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+        let inventory = state.mob_inventory().await.expect("the set's inventory");
+        assert!(
+            inventory.managed.iter().any(|(id, _)| id == &definition.id),
+            "the set loaded the launch's mob from the store"
+        );
+        assert_eq!(
+            runtime.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
+        drop(state);
+        drop(runtime);
+        let reopened = MobStorage::persistent(&store_file).expect("the store opens again");
+        let held = reopened
+            .created_definition_snapshot()
+            .await
+            .expect("the store's definition reads")
+            .expect("the store holds the mob");
+        assert_eq!(held.definition().id, definition.id);
+        assert!(
+            stored_event_rows(&store_file).len() >= events_before,
+            "no event the first launch wrote is gone"
+        );
+    }
+
+    /// Preparation's own read of the store is the authority: a store whose
+    /// definition moved after the launch's read before preparation is not
+    /// what the launch resolved from, and preparation refuses it with the
+    /// refusal of a definition that changed under the launch.
+    #[tokio::test]
+    async fn preparation_refuses_a_store_whose_definition_moved_after_the_read_before_preparation()
+    {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        a_first_declared_launch(&definition, &store_file, &fixture).await;
+
+        let mut spec = declared_launch_spec_with_its_own_open(&definition, &store_file, &fixture);
+        spec.read_launch_definition()
+            .await
+            .expect("the read before preparation");
+        let other = MobStorage::persistent(&store_file).expect("another opener of the store");
+        let read = other
+            .created_definition_snapshot()
+            .await
+            .expect("the store's definition reads")
+            .expect("the store holds the mob");
+        let moved = MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.4\"\n",
+            definition.id
+        ))
+        .expect("the definition with another model");
+        other
+            .update_definition(read.epoch(), moved)
+            .await
+            .expect("the definition moves by one epoch");
+        drop(other);
+
+        let refused = MobRuntime::prepare(spec).await.map(|_| ());
+        assert!(
+            matches!(
+                &refused,
+                Err(MobRuntimeError::Mob(
+                    MobError::MobDefinitionAuthorityChanged { .. }
+                ))
+            ),
+            "a definition that moved after the read before preparation refuses the launch as \
+             a definition that changed under it: {refused:?}"
+        );
+    }
+
+    /// A launch that is refused after its mob set ran its first verb and
+    /// before it asked the set to serve its mob stands the set down: no
+    /// serve comes any more, so a lookup of the launch's mob through the set
+    /// is answered at once, where it would wait for the launch's serve for
+    /// as long as the process lives.
+    #[tokio::test]
+    async fn a_launch_refused_after_its_mob_sets_first_verb_stands_the_set_down() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        a_first_declared_launch(&definition, &store_file, &fixture).await;
+
+        // The agent mob tools are installed over a slot of the row's own.
+        let mob_tools = Arc::new(std::sync::RwLock::new(None));
+        let (service, selected, runtime_store, _blobs, jobs) = &fixture;
+        let mut spec = MobBootstrapSpec::declared(
+            definition.clone(),
+            crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+            service.clone(),
+        )
+        .with_session_runtime_adapter(selected.clone())
+        .expect("adopt owner")
+        .with_runtime_delivery(MobRuntimeDelivery::new(runtime_store.clone(), jobs.clone()))
+        .with_agent_mob_tools(Arc::clone(&mob_tools))
+        .expect("install agent mob tools")
+        .with_child_mob_storage(crate::ChildMobStorage::ProcessBound)
+        .with_declared_store_opened(
+            MobStorage::persistent(&store_file).expect("the launch's own open of its store"),
+        );
+        let owners = spec.private_owners.clone();
+        spec.read_launch_definition()
+            .await
+            .expect("the read before preparation");
+        let other = MobStorage::persistent(&store_file).expect("another opener of the store");
+        let read = other
+            .created_definition_snapshot()
+            .await
+            .expect("the store's definition reads")
+            .expect("the store holds the mob");
+        let moved = MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.4\"\n",
+            definition.id
+        ))
+        .expect("the definition with another model");
+        other
+            .update_definition(read.epoch(), moved)
+            .await
+            .expect("the definition moves by one epoch");
+        drop(other);
+
+        // Something that holds the launch's mob set, as a member's mob tools
+        // do: it takes the set as soon as preparation built it, and keeps
+        // it past the refusal.
+        let holder = {
+            let owners = owners.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Some(state) = owners.child_mob_state_for_tests()
+                        && state.default_mob_id().is_some()
+                    {
+                        return state;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let refused = MobRuntime::prepare(spec).await.map(|_| ());
+        assert!(
+            matches!(
+                &refused,
+                Err(MobRuntimeError::Mob(
+                    MobError::MobDefinitionAuthorityChanged { .. }
+                ))
+            ),
+            "the launch is refused after its mob set read the store: {refused:?}"
+        );
+        let state = tokio::time::timeout(std::time::Duration::from_secs(5), holder)
+            .await
+            .expect("preparation built a mob set that declares the launch's mob")
+            .expect("the holder of the mob set");
+        assert_eq!(state.default_mob_id(), Some(&definition.id));
+        let looked = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.handle_for(&definition.id),
+        )
+        .await;
+        assert!(
+            matches!(&looked, Ok(Err(_))),
+            "a lookup of the launch's mob through the set of a refused launch is answered at \
+             once, refused: waited {}",
+            looked.is_err()
+        );
+    }
+
+    /// The mob set of a launch over a declared store holds the launch's
+    /// composition from the moment preparation builds the set, and nothing
+    /// waits on the launch there. A load of the launch's default mob that
+    /// asks what the launch judged before the launch has judged its store
+    /// is refused at once, typed. A build of another mob of the host is
+    /// held to nothing of that: its load is bound to no snapshot, and it is
+    /// composed at once.
+    #[tokio::test]
+    async fn a_load_of_the_default_mob_before_the_launch_judged_its_store_is_refused_at_once() {
+        use meerkat_mob_mcp::{HostMobBuild, HostMobBuildStage};
+        let at_once = std::time::Duration::from_secs(2);
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let mut spec = declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+            &fixture,
+        );
+        spec.settle_before_first_use()
+            .await
+            .expect("preparation builds the mob set");
+        let composition = spec
+            .host_composition_for_tests()
+            .expect("preparation built the launch's composition with the mob set");
+        let storage = MobStorage::in_memory();
+
+        let asked = tokio::time::timeout(
+            at_once,
+            composition.resume_expectation(&HostMobBuild::new(
+                HostMobBuildStage::Load,
+                &definition,
+                &storage,
+                true,
+            )),
+        )
+        .await;
+        assert!(
+            matches!(&asked, Ok(Err(MobError::WiringError(_)))),
+            "a load of the default mob before the launch judged its store is refused at once, \
+             typed: {:?}",
+            asked.as_ref().map(|answer| answer.as_ref().map(|_| ()))
+        );
+
+        let other = declared_launch_definition();
+        let unbound = tokio::time::timeout(
+            at_once,
+            composition.resume_expectation(&HostMobBuild::new(
+                HostMobBuildStage::Load,
+                &other,
+                &storage,
+                false,
+            )),
+        )
+        .await;
+        assert!(
+            matches!(&unbound, Ok(Ok(None))),
+            "the load of another mob of the host is bound to no snapshot, at once"
+        );
+        let composed = tokio::time::timeout(
+            at_once,
+            composition.compose(
+                &HostMobBuild::new(HostMobBuildStage::Create, &other, &storage, false),
+                MobBuilder::new(other.clone(), storage.clone()),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(&composed, Ok(Ok(_))),
+            "another mob of the host is composed at once, whatever the launch has judged"
+        );
+    }
+
+    /// What the launch judged of its default mob's store is written once:
+    /// the cell keeps its first value, and a second write is refused and
+    /// changes nothing.
+    #[tokio::test]
+    async fn the_snapshot_the_launch_judged_is_written_once_and_kept() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+        a_first_declared_launch(&definition, &store_file, &fixture).await;
+        let snapshot = MobStorage::persistent(&store_file)
+            .expect("the store opens")
+            .created_definition_snapshot()
+            .await
+            .expect("the store's definition reads")
+            .expect("the store holds the mob");
+
+        let cell = JudgedDefaultMobDefinition::default();
+        assert!(cell.get().is_none(), "nothing is judged yet");
+        cell.judged(Some(snapshot.clone()))
+            .expect("the launch's judgement is written");
+        let again = cell.judged(None);
+        assert!(
+            matches!(&again, Err(MobRuntimeError::InvalidConfig(_))),
+            "a second write is refused: {again:?}"
+        );
+        let kept = cell
+            .get()
+            .expect("the judgement is kept")
+            .as_ref()
+            .expect("the first value, a snapshot, is kept");
+        assert_eq!(
+            (kept.epoch(), kept.event_cursor()),
+            (snapshot.epoch(), snapshot.event_cursor())
+        );
+        assert_eq!(
+            cell.clone().get().map(Option::is_some),
+            Some(true),
+            "every holder of the cell reads the one value"
+        );
+    }
+
+    /// A definition whose inline profile names `tools.bundles` is built by
+    /// a fresh launch over a declared store as by one over an opened
+    /// storage: the launch's mob is the host's own, so the mob set's serve
+    /// takes the definition, and the mob's builder mounts each named bundle
+    /// the launch registered and withholds the rest.
+    #[tokio::test]
+    async fn a_fresh_declared_launch_builds_a_profile_that_names_a_tool_bundle_as_an_opened_launch_does()
+     {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let opting = |mob_id: &str| {
+            MobDefinition::from_toml(&format!(
+                "[mob]\nid = \"{mob_id}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\n\
+                 [profiles.worker.tools]\nbundles = [\"host\"]\n"
+            ))
+            .expect("a launch definition whose inline profile opts into a tool bundle")
+        };
+
+        let opened = MobRuntime::bootstrap(opened_launch_spec(
+            &opting(&unique_test_mob_id()),
+            &dir.path().join("opened.sqlite3"),
+            &fixture,
+        ))
+        .await
+        .expect("a fresh launch over an opened storage builds the definition");
+        opened.handle().shutdown().await.expect("shutdown");
+        drop(opened);
+
+        let declared = MobRuntime::bootstrap(declared_launch_spec(
+            &opting(&unique_test_mob_id()),
+            crate::mob_composition_manifest::declared_mob_store(
+                dir.path().join("declared.sqlite3"),
+            ),
+            &fixture,
+        ))
+        .await
+        .expect("a fresh launch over a declared store builds the same definition");
+        assert_eq!(
+            declared
+                .handle()
+                .status()
+                .await
+                .expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        declared.handle().shutdown().await.expect("shutdown");
+    }
+
+    /// A spec over the persistent storage at `store_file`, opened by the
+    /// launch itself, with the agent mob tools installed: the launch as
+    /// every launch was before a launch could declare its store. It builds
+    /// its mob over the storage and inserts the handle into its mob set.
+    fn opened_launch_spec(
+        definition: &MobDefinition,
+        store_file: &Path,
+        fixture: &AcquisitionFixture,
+    ) -> MobBootstrapSpec {
+        let (service, selected, runtime_store, _blobs, jobs) = fixture;
+        let (storage, provenance) =
+            crate::mob_composition_manifest::persistent_mob_storage(store_file.to_path_buf())
+                .expect("the launch store opens");
+        MobBootstrapSpec::new(definition.clone(), storage, service.clone())
+            .with_mob_storage_provenance(provenance)
+            .with_session_runtime_adapter(selected.clone())
+            .expect("adopt owner")
+            .with_runtime_delivery(MobRuntimeDelivery::new(runtime_store.clone(), jobs.clone()))
+            .with_agent_mob_tools(Arc::new(std::sync::RwLock::new(None)))
+            .expect("install agent mob tools")
+            .with_child_mob_storage(crate::ChildMobStorage::ProcessBound)
+    }
+
+    /// Every event row of the mob store at `store_file`, in order, as it is
+    /// stored.
+    fn stored_event_rows(store_file: &Path) -> Vec<(i64, Vec<u8>)> {
+        let store = rusqlite::Connection::open_with_flags(
+            store_file,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("the launch store");
+        let mut rows = store
+            .prepare("SELECT cursor, event_json FROM mob_events ORDER BY cursor")
+            .expect("the event rows");
+        rows.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("read the event rows")
+            .collect::<Result<_, _>>()
+            .expect("every event row reads")
+    }
+
+    /// The creation record of the mob store at `store_file`.
+    async fn stored_creation_record(store_file: &Path) -> Option<meerkat_mob::MobProvenance> {
+        MobStorage::persistent(store_file)
+            .expect("the launch store opens")
+            .creation_provenance()
+            .await
+            .expect("the store's creation record")
+    }
+
+    /// The upgrade. A store written by a launch that opened it itself, as
+    /// every launch did before a launch could declare its store, is served
+    /// by the mob set of a launch that declares it: the set loads the mob
+    /// as the host's default mob and lists it, and nothing the store held
+    /// is rewritten. Every event row it held is there unchanged, the
+    /// declared launch only adds rows after them, and the store's creation
+    /// record, which names the host, is the one the first launch left.
+    #[tokio::test]
+    async fn a_store_written_by_a_launch_that_opened_it_is_served_by_a_launch_that_declares_it() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+
+        let first = MobRuntime::bootstrap(opened_launch_spec(&definition, &store_file, &fixture))
+            .await
+            .expect("a launch over a storage it opened");
+        first.handle().shutdown().await.expect("shutdown");
+        drop(first);
+        let written = stored_event_rows(&store_file);
+        assert!(!written.is_empty(), "the first launch wrote its mob");
+        let record = stored_creation_record(&store_file).await;
+        assert_eq!(
+            record,
+            Some(meerkat_mob::MobProvenance::Host),
+            "a launch that opens its store records the host as its mob's creator"
+        );
+
+        let second = MobRuntime::bootstrap(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+            &fixture,
+        ))
+        .await
+        .expect("a launch that declares the store an earlier launch opened");
+        let state = second.agent_mob_mcp_state().expect("the launch's mob set");
+        assert_eq!(state.default_mob_id(), Some(&definition.id));
+        let inventory = state.mob_inventory().await.expect("the set's inventory");
+        assert!(
+            inventory.managed.iter().any(|(id, _)| id == &definition.id)
+                && inventory.quarantined.is_empty(),
+            "the set serves the mob the earlier launch created"
+        );
+        assert_eq!(
+            second.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        second.handle().shutdown().await.expect("shutdown");
+        drop(state);
+        drop(second);
+
+        let after = stored_event_rows(&store_file);
+        assert!(
+            after.len() >= written.len(),
+            "no event row the first launch left is gone: {} rows then, {} now",
+            written.len(),
+            after.len()
+        );
+        assert!(
+            after[..written.len()] == written[..],
+            "every event row the first launch left is there unchanged: the declared launch \
+             writes only after them ({} rows then, {} now)",
+            written.len(),
+            after.len()
+        );
+        assert_eq!(
+            stored_creation_record(&store_file).await,
+            record,
+            "the creation record is the one the first launch left"
+        );
+    }
+
+    /// The way back. A store a launch that declares it wrote is resumed by
+    /// a launch that opens the store itself, as every launch did before a
+    /// launch could declare its store: its composition is verified against
+    /// the record the declared launch left beside the store, the mob runs,
+    /// and every event row the declared launch left is there unchanged.
+    #[tokio::test]
+    async fn a_store_written_by_a_launch_that_declares_it_is_resumed_by_a_launch_that_opens_it() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let store_file = dir.path().join("event_log.sqlite3");
+
+        let first = MobRuntime::bootstrap(declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::declared_mob_store(store_file.clone()),
+            &fixture,
+        ))
+        .await
+        .expect("a launch over a declared store");
+        first.handle().shutdown().await.expect("shutdown");
+        drop(first);
+        let written = stored_event_rows(&store_file);
+        assert!(!written.is_empty(), "the declared launch wrote its mob");
+        assert_eq!(
+            stored_creation_record(&store_file).await,
+            Some(meerkat_mob::MobProvenance::Host)
+        );
+
+        let second = MobRuntime::bootstrap(opened_launch_spec(&definition, &store_file, &fixture))
+            .await
+            .expect("a launch that opens the store a declared launch wrote");
+        assert_eq!(
+            second.handle().status().await.expect("the launch's state"),
+            meerkat_mob::MobState::Running
+        );
+        second.handle().shutdown().await.expect("shutdown");
+        drop(second);
+
+        let after = stored_event_rows(&store_file);
+        assert!(
+            after.len() >= written.len(),
+            "no event row the declared launch left is gone: {} rows then, {} now",
+            written.len(),
+            after.len()
+        );
+        assert!(
+            after[..written.len()] == written[..],
+            "every event row the declared launch left is there unchanged: the launch that \
+             opened the store writes only after them ({} rows then, {} now)",
+            written.len(),
+            after.len()
+        );
+    }
+
+    /// The schedule target registry a spec carries learns the host's default
+    /// mob when preparation hands it the launch's runtime: a Console
+    /// schedule that names no mob is then judged as one of the launch's
+    /// mob, and follows the agent of its name there. A registry that
+    /// learned no default mob cannot judge it (the follow's own rows).
+    #[tokio::test]
+    async fn the_schedule_registry_a_launch_adopts_knows_the_launchs_mob_as_the_default_mob() {
+        use crate::identity_creation::{AgentSchedules, ScheduleEffect};
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let (service, selected, _store, _blobs, _jobs) = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
+        let mut spec = MobBootstrapSpec::new(definition.clone(), MobStorage::in_memory(), service)
+            .with_session_runtime_adapter(selected)
+            .expect("adopt owner");
+        spec.schedule_target_registry = Some(registry.clone());
+        let runtime = MobRuntime::bootstrap(spec).await.expect("the launch");
+
+        let schedules =
+            meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+        let default_mob = crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone());
+        let target = crate::console_schedules::ConsoleScheduledSend::new(
+            &default_mob,
+            default_mob.mob_id(),
+            "scout".to_owned(),
+            "Post the morning summary.".to_owned(),
+            crate::console_schedules::ConsoleScheduleSender::Anonymous,
+            0,
+        )
+        .target()
+        .expect("a console schedule's target");
+        schedules
+            .create(meerkat::CreateScheduleRequest {
+                name: Some("by-console".to_owned()),
+                description: None,
+                trigger: meerkat::TriggerSpec::Once {
+                    due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+                },
+                target,
+                misfire_policy: meerkat::MisfirePolicy::default(),
+                overlap_policy: meerkat::OverlapPolicy::default(),
+                missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("the console schedule is created");
+
+        let following = crate::schedule_wiring::MobAgentSchedules::new(schedules, registry);
+        let planned = following
+            .planned(definition.id.as_str(), "scout", ScheduleEffect::Paused)
+            .await;
+        assert!(
+            !planned.incomplete,
+            "the adopted registry knows the default mob, so the schedule is judged: {planned:?}"
+        );
+        assert_eq!(
+            planned.schedules.len(),
+            1,
+            "the schedule that names no mob is the launch mob's agent's: {planned:?}"
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
+    }
+
+    /// A spawn customizer that counts the member spawns it was asked to
+    /// customize: which wiring a mob was built with shows in whose
+    /// customizer its spawns reach.
+    #[derive(Default)]
+    struct CountingCustomizer(std::sync::atomic::AtomicUsize);
+
+    impl CountingCustomizer {
+        fn spawns(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl meerkat_mob::SpawnMemberCustomizer for CountingCustomizer {
+        fn customize_spawn(
+            &self,
+            _ctx: &meerkat_mob::SpawnCustomizationContext,
+            _spec: &mut meerkat_mob::SpawnMemberSpec,
+        ) -> Result<(), MobError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Ask the mob set to spawn one turn-driven member of the profile
+    /// `worker` in `mob_id`. Whatever the spawn answers, the mob's spawn
+    /// customizer was asked first.
+    async fn spawn_one_member(
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &meerkat_mob::MobId,
+        member: &str,
+    ) {
+        let _ = state
+            .mob_spawn(
+                mob_id,
+                ProfileName::from("worker"),
+                meerkat_mob::AgentIdentity::from(member),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await;
+    }
+
+    /// The entry of a second mob, as a double: it answers its own member
+    /// wiring for the one mob it serves, and records every mob it was asked
+    /// for.
+    struct SecondEntryDouble {
+        mob_id: meerkat_mob::MobId,
+        wiring: HostMobMemberWiring,
+        asked: std::sync::Mutex<Vec<meerkat_mob::MobId>>,
+    }
+
+    #[async_trait]
+    impl HostMobEntryWiring for SecondEntryDouble {
+        /// The double keeps nothing under a mob's id: there is nothing to
+        /// release.
+        async fn release_before_create(
+            &self,
+            _mob_id: &meerkat_mob::MobId,
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+
+        async fn member_wiring(
+            &self,
+            mob_id: &meerkat_mob::MobId,
+        ) -> Result<HostMobMemberWiring, MobError> {
+            self.asked.lock().expect("asked").push(mob_id.clone());
+            if mob_id == &self.mob_id {
+                Ok(self.wiring.clone())
+            } else {
+                Err(MobError::WiringError(format!(
+                    "no entry serves the mob '{mob_id}'"
+                )))
+            }
+        }
+
+        /// The double holds nothing of a mob: there is nothing to end.
+        fn after_destroy(&self, _destroyed: &meerkat_mob::MobId) {}
+    }
+
+    /// The entry double of a second mob `mob_id` that answers `customizer`
+    /// as that mob's spawn customizer and holds no member back.
+    fn second_entry(
+        mob_id: &meerkat_mob::MobId,
+        customizer: &Arc<CountingCustomizer>,
+    ) -> Arc<SecondEntryDouble> {
+        Arc::new(SecondEntryDouble {
+            mob_id: mob_id.clone(),
+            wiring: HostMobMemberWiring {
+                member_build_preparer: None,
+                spawn_member_customizer: Some(
+                    Arc::clone(customizer) as Arc<dyn meerkat_mob::SpawnMemberCustomizer>
+                ),
+                host_pending_members: Vec::new(),
+            },
+            asked: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// What customizes the builds of a mob's members is that mob's own. A
+    /// second mob of the host, created through the launch's mob set, is
+    /// built by the launch's composition with the member wiring its own
+    /// entry answers, asked by the mob's id: a spawn in it reaches its
+    /// entry's spawn customizer and never the launch's, and with no entry
+    /// to ask it reaches neither. A spawn in the launch's own mob reaches
+    /// the launch's customizer alone.
+    #[tokio::test]
+    async fn a_second_host_mob_is_built_with_its_own_entrys_member_wiring_never_the_default_mobs() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        for with_entries in [true, false] {
+            let definition = declared_launch_definition();
+            let second_definition = declared_launch_definition();
+            let launch = Arc::new(CountingCustomizer::default());
+            let entry = Arc::new(CountingCustomizer::default());
+            let entries = second_entry(&second_definition.id, &entry);
+            let mut spec = declared_launch_spec(
+                &definition,
+                crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+                &fixture,
+            )
+            .with_spawn_member_customizer(
+                Arc::clone(&launch) as Arc<dyn meerkat_mob::SpawnMemberCustomizer>
+            )
+            .with_host_pending_members([meerkat_mob::AgentIdentity::from("scout")]);
+            if with_entries {
+                spec = spec.with_host_mob_entry_wiring(entries.clone());
+            }
+            let runtime = MobRuntime::bootstrap(spec)
+                .await
+                .expect("a launch over a declared store");
+            let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+            state
+                .mob_create_definition(second_definition.clone())
+                .await
+                .expect("the mob set creates a second mob of the host");
+
+            spawn_one_member(&state, &second_definition.id, "scout").await;
+            assert_eq!(
+                launch.spawns(),
+                0,
+                "a spawn in the second mob never reaches the launch's spawn customizer (an \
+                 entry installed: {with_entries})"
+            );
+            assert_eq!(
+                entry.spawns(),
+                usize::from(with_entries),
+                "a spawn in the second mob reaches its own entry's spawn customizer, when it \
+                 has an entry"
+            );
+            let asked_for = if with_entries {
+                vec![second_definition.id.clone()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                *entries.asked.lock().expect("asked"),
+                asked_for,
+                "the entries are asked for the second mob alone"
+            );
+
+            spawn_one_member(&state, &definition.id, "worker-1").await;
+            assert_eq!(
+                launch.spawns(),
+                1,
+                "a spawn in the launch's own mob reaches the launch's spawn customizer"
+            );
+            assert_eq!(
+                entry.spawns(),
+                usize::from(with_entries),
+                "and never the second mob's"
+            );
+            if let Ok(second) = state.handle_for(&second_definition.id).await {
+                let _ = second.shutdown().await;
+            }
+            runtime.handle().shutdown().await.expect("shutdown");
+        }
+    }
+
+    /// The members whose first build waits for the host are a mob's own,
+    /// and they travel in the member wiring the composition answers for a
+    /// build: the launch's list is answered for its default mob and for no
+    /// other mob. For a second mob the answer is the list its own entry
+    /// holds, empty here, and with no entry to ask an empty one. (That a
+    /// build is given exactly the wiring answered for it is the row of the
+    /// second mob built through the mob set.)
+    #[tokio::test]
+    async fn the_launchs_composition_answers_the_launchs_pending_members_for_its_default_mob_alone()
+    {
+        use meerkat_mob_mcp::{HostMobBuild, HostMobBuildStage};
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let held_back = meerkat_mob::AgentIdentity::from("scout");
+        for with_entries in [true, false] {
+            let definition = declared_launch_definition();
+            let second_definition = declared_launch_definition();
+            let entry = Arc::new(CountingCustomizer::default());
+            let mut spec = declared_launch_spec(
+                &definition,
+                crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+                &fixture,
+            )
+            .with_host_pending_members([held_back.clone()]);
+            if with_entries {
+                spec = spec.with_host_mob_entry_wiring(second_entry(&second_definition.id, &entry));
+            }
+            spec.settle_before_first_use()
+                .await
+                .expect("preparation builds the launch's composition");
+            let composition = spec
+                .launch_composition
+                .clone()
+                .expect("the launch's composition");
+            let storage = MobStorage::in_memory();
+            let own = composition
+                .member_wiring_of(&HostMobBuild::new(
+                    HostMobBuildStage::Load,
+                    &definition,
+                    &storage,
+                    true,
+                ))
+                .await
+                .expect("the default mob's member wiring");
+            assert_eq!(
+                own.host_pending_members,
+                vec![held_back.clone()],
+                "the launch's default mob is answered the members the launch holds back"
+            );
+            let second = composition
+                .member_wiring_of(&HostMobBuild::new(
+                    HostMobBuildStage::Load,
+                    &second_definition,
+                    &storage,
+                    false,
+                ))
+                .await
+                .expect("the second mob's member wiring");
+            assert!(
+                second.host_pending_members.is_empty(),
+                "a second mob is never answered the launch's pending members (an entry \
+                 installed: {with_entries}): {:?}",
+                second.host_pending_members
+            );
+        }
+    }
+
+    /// What the launch gives its own mob through its composition is taken
+    /// from the spec when preparation builds the composition, so it may be
+    /// set after the launch's read of a declared store: a spawn customizer
+    /// set then is the one a spawn in the launch's mob reaches.
+    #[tokio::test]
+    async fn what_the_launchs_composition_carries_may_be_set_after_the_read_of_a_declared_store() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let fixture = acquisition_fixture(dir.path());
+        let definition = declared_launch_definition();
+        let mut spec = declared_launch_spec(
+            &definition,
+            crate::mob_composition_manifest::DeclaredMobStore::in_memory(),
+            &fixture,
+        );
+        spec.read_launch_definition()
+            .await
+            .expect("the read before preparation");
+        let customizer = Arc::new(CountingCustomizer::default());
+        let runtime =
+            MobRuntime::bootstrap(spec.with_spawn_member_customizer(
+                Arc::clone(&customizer) as Arc<dyn meerkat_mob::SpawnMemberCustomizer>
+            ))
+            .await
+            .expect("what the composition carries is not refused");
+        let state = runtime.agent_mob_mcp_state().expect("the launch's mob set");
+        spawn_one_member(&state, &definition.id, "worker-1").await;
+        assert_eq!(
+            customizer.spawns(),
+            1,
+            "the spawn customizer set after the read reaches the launch's mob"
+        );
+        runtime.handle().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]

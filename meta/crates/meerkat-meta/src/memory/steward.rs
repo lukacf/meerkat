@@ -130,6 +130,14 @@ const MAX_GATHERED_TOTAL_BYTES: usize = 48 * 1024;
 const MAX_PROPOSALS_PER_DREAM: usize = 32;
 const MAX_QUARANTINE_PER_DREAM: usize = 16;
 const MAX_HARVESTS_PER_DREAM: usize = 4;
+/// How many waiting exit interviews one dream looks at, oldest first, to
+/// find the [`MAX_HARVESTS_PER_DREAM`] it takes. An interview that is held
+/// because whether its member was private to a person cannot be told
+/// ([`TranscriptSource::private_to_a_person`] answered an error) is looked
+/// at and does not count against those the dream takes. More held
+/// interviews than this, all older than one that could run, still keep it
+/// waiting.
+const MAX_HARVESTS_LOOKED_AT_PER_DREAM: usize = 64;
 const MAX_TOMBSTONES_RENDERED: usize = 32;
 const MAX_DISTILLATES_RENDERED: usize = 8;
 
@@ -1232,6 +1240,12 @@ impl StewardEngine {
         self.handle.provider_auth_authority()
     }
 
+    /// The transcript source the engine reads sessions through.
+    #[cfg(test)]
+    pub(crate) fn transcripts_in_tests(&self) -> &Arc<dyn TranscriptSource> {
+        &self.transcripts
+    }
+
     pub fn with_gating(mut self, gating: Arc<dyn MemoryGatingBridge>) -> Self {
         self.gating = Some(gating);
         self
@@ -1922,9 +1936,12 @@ impl StewardEngine {
                     reason,
                 });
             } else {
+                // No word the model made from the records goes into the
+                // run's skips: they are filed in the dream's end, an event
+                // whose readers are not the records' readers.
                 run.skips.push(format!(
-                    "operational contradiction on '{entity}'/'{topic}' had no conflict \
-                     bridge wired"
+                    "operational contradiction over {} record(s) had no conflict bridge wired",
+                    finding.record_ids.len()
                 ));
             }
         }
@@ -2575,12 +2592,22 @@ impl StewardEngine {
                 ))
             }
             GatherRequest::Evidence { session_id, range } => {
-                if self
-                    .private_session(&session_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    return Err(format!("session '{session_id}' not found"));
+                // A session this steward's source does not hold, one no
+                // store holds and the session of a member private to a
+                // person are all answered the same words, so what the
+                // model is shown does not tell them apart; and the
+                // transcript of a member known to be private to a person
+                // is never read. The privacy question comes first. A
+                // source that has no answer to it (it has none for a
+                // session it does not hold) is asked for the session
+                // itself: one it does not hold is `not found`; one it
+                // holds whose privacy stays unknown is not handed on, and
+                // the request answers that error. A source that cannot be
+                // read answers its error, as a failing store does.
+                let not_found = || format!("session '{session_id}' not found");
+                let private = self.private_session(&session_id).await;
+                if matches!(private, Ok(true)) {
+                    return Err(not_found());
                 }
                 let from = range.map(|(start, _)| start).unwrap_or(0);
                 let slice = self
@@ -2588,7 +2615,10 @@ impl StewardEngine {
                     .read(&session_id, from)
                     .await
                     .map_err(|err| err.to_string())?
-                    .ok_or_else(|| format!("session '{session_id}' not found"))?;
+                    .ok_or_else(not_found)?;
+                if let Err(unknown) = private {
+                    return Err(unknown.to_string());
+                }
                 let end = range.map(|(_, end)| end).unwrap_or(u64::MAX);
                 let mut lines = Vec::new();
                 for message in slice
@@ -4035,14 +4065,22 @@ impl StewardEngine {
     ) -> Result<(), StewardError> {
         let harvests = self
             .store
-            .pending_harvests(&self.realm, MAX_HARVESTS_PER_DREAM)
+            .pending_harvests(&self.realm, MAX_HARVESTS_LOOKED_AT_PER_DREAM)
             .await
             .map_err(store_err)?;
         if harvests.is_empty() {
             return Ok(());
         }
         let template = self.profile.phase_template("harvest")?;
+        // The interviews this dream takes: one it settles as a private
+        // member's, and one it runs. An interview held because whether its
+        // member was private cannot be told is looked at and passed over:
+        // it does not count, so held ones keep no later one waiting.
+        let mut taken = 0;
         for harvest in harvests {
+            if taken == MAX_HARVESTS_PER_DREAM {
+                break;
+            }
             // A member private to a person has no exit interview: its
             // memory is its own, never promoted, and no later dream reads it.
             let private = if partition.private.contains(&harvest.identity) {
@@ -4054,8 +4092,9 @@ impl StewardEngine {
                 }
             };
             match private {
-                Ok(false) => {}
+                Ok(false) => taken += 1,
                 Ok(true) => {
+                    taken += 1;
                     match self
                         .store
                         .record_private_retirement(
@@ -5103,6 +5142,9 @@ mod tests {
         sessions: StdMutex<HashMap<String, Vec<String>>>,
         /// Sessions of members private to a person.
         private: StdMutex<HashSet<String>>,
+        /// Sessions of which the source cannot tell whether their member
+        /// was private to a person.
+        unknown: StdMutex<HashSet<String>>,
     }
 
     impl ScriptedTranscripts {
@@ -5110,7 +5152,17 @@ mod tests {
             Self {
                 sessions: StdMutex::new(HashMap::new()),
                 private: StdMutex::new(HashSet::new()),
+                unknown: StdMutex::new(HashSet::new()),
             }
+        }
+
+        /// The source cannot tell whether the member of `session` was
+        /// private to a person: its privacy question answers an error.
+        fn mark_unknown(&self, session: &str) {
+            self.unknown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session.to_string());
         }
 
         /// Mark `session` as the session of a member private to a person.
@@ -5169,6 +5221,18 @@ mod tests {
             &self,
             session_key: &str,
         ) -> Result<bool, crate::memory::distiller::DistillerError> {
+            if self
+                .unknown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(session_key)
+            {
+                return Err(crate::memory::distiller::DistillerError::Transcript(
+                    format!(
+                        "whether the session '{session_key}' is private to a person is unknown"
+                    ),
+                ));
+            }
             Ok(self
                 .private
                 .lock()
@@ -8271,6 +8335,114 @@ mod tests {
         );
     }
 
+    /// A record of the launch mob is not raised to "agent verified" on a
+    /// citation of another mob's session: the store's validator asks the
+    /// evidence resolver, which stands on the launch's transcript source,
+    /// and that source holds no session of a mob with a memory of its own.
+    /// The same raise that cites a session of the launch mob's own member,
+    /// one the launch mob's journal bound, is accepted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_of_the_launch_mob_is_not_raised_to_agent_verified_on_a_citation_of_another_mobs_session()
+     {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SqliteAgentMemoryStore::open(dir.path()).expect("store");
+        let sessions = Arc::new(meerkat::MemoryStore::new());
+        // The record of a launch that composes the mob `second` beside its
+        // launch mob.
+        let owners = crate::private_owners::PrivateOwners::default();
+        owners.hosted_mobs().name("second");
+        let of_the_launch_mob = crate::memory_wiring::a_stored_member_session_in_tests(
+            &sessions,
+            Some(("launch", "desk")),
+        )
+        .await;
+        let of_the_second_mob = crate::memory_wiring::a_stored_member_session_in_tests(
+            &sessions,
+            Some(("second", "desk")),
+        )
+        .await;
+        // The launch mob's journal bound its own member's session; the
+        // second mob's session is bound by no journal the launch asks.
+        store.set_evidence_resolver(Arc::new(SessionStoreEvidenceResolver::new(
+            crate::memory_wiring::launch_transcript_source_over(
+                sessions,
+                meerkat_mob::MobId::from("launch"),
+                crate::memory_wiring::JournalInTests::binding(&[(
+                    of_the_launch_mob.as_str(),
+                    false,
+                )]),
+                Arc::new(owners),
+            ),
+            tokio::runtime::Handle::current(),
+        )));
+
+        for (session, raised, what) in [
+            (of_the_second_mob, false, "a session of the second mob"),
+            (of_the_launch_mob, true, "a session of the launch mob"),
+        ] {
+            // A record of its own for each case: the store folds an
+            // authored write of the same title and body into the record
+            // that stands.
+            let mut record = new_record(
+                &format!("A fact checked against {what}"),
+                "checked against a transcript",
+            );
+            record.verification = Some(VerificationClaim {
+                checked: "read the session and saw the line".to_string(),
+                evidence: vec![EvidenceRef {
+                    session_id: session,
+                    generation: 0,
+                    revision: None,
+                    range: Some((0, 0)),
+                }],
+            });
+            let receipt = store
+                .remember_authored(
+                    &identity_scope("identity:worker"),
+                    record,
+                    MemoryAuthor::Agent {
+                        identity: "identity:worker".to_string(),
+                    },
+                )
+                .await
+                .expect("seed");
+            let staged = store
+                .stage(StagedMutationBatch {
+                    kind: StagedBatchKind::FreshWrite,
+                    realm: REALM.to_string(),
+                    author: MemoryAuthor::Steward {
+                        run_id: "dream-test".to_string(),
+                    },
+                    ops: vec![StagedOp::Retier {
+                        id: receipt.memory_id.clone(),
+                        trust: TrustTier::AgentVerified,
+                        rationale: Some("the dream endorses the verification".to_string()),
+                    }],
+                })
+                .await;
+            assert_eq!(
+                staged.is_ok(),
+                raised,
+                "a raise that cites {what}: {:?}",
+                staged.as_ref().err().map(ToString::to_string)
+            );
+            if let Ok(token) = staged {
+                store.commit(token).await.expect("commit");
+            }
+            let trust = store
+                .records_by_ids(REALM, std::slice::from_ref(&receipt.memory_id))
+                .await
+                .expect("read")
+                .remove(0)
+                .trust;
+            assert_eq!(
+                trust == TrustTier::AgentVerified,
+                raised,
+                "the record's trust after a raise that cites {what}: {trust:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn note_identity_retired_queues_harvest() {
         let fixture = build_fixture(vec![], vec![]);
@@ -8309,6 +8481,111 @@ mod tests {
                 ],
             }]
         }
+    }
+
+    /// An exit interview held because whether its member was private to a
+    /// person cannot be told does not count against the interviews a dream
+    /// runs. Five retired members wait. The source cannot tell of the four
+    /// oldest whether their sessions were private (its privacy question
+    /// answers an error); the fifth's session is one it answers for. The
+    /// dream holds the four, saying so of each, and runs the fifth: its
+    /// interview is done and leaves the queue, and the four still wait.
+    #[tokio::test]
+    async fn an_exit_interview_held_for_unknown_privacy_does_not_keep_a_later_one_from_its_dream() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        let held: Vec<String> = (1..=MAX_HARVESTS_PER_DREAM)
+            .map(|nth| format!("identity:held-{nth}"))
+            .collect();
+        for (nth, identity) in held.iter().enumerate() {
+            let session = format!("sess-held-{nth}");
+            fixture.transcripts.mark_unknown(&session);
+            fixture
+                .store
+                .record_pending_harvest_at(
+                    REALM,
+                    identity,
+                    Some(session.as_str()),
+                    "retire",
+                    1_000 + nth as u64,
+                )
+                .await
+                .expect("an older exit interview waits");
+        }
+        fixture.transcripts.insert("sess-later", vec!["a word"]);
+        fixture
+            .store
+            .record_pending_harvest_at(REALM, "identity:later", Some("sess-later"), "retire", 9_000)
+            .await
+            .expect("the newest exit interview waits");
+
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("the dream runs: {outcome:?}");
+        };
+        let said_held = run
+            .skips
+            .iter()
+            .filter(|skip| skip.contains("held: whether it is private is unknown"))
+            .count();
+        let mut waiting: Vec<String> = fixture
+            .store
+            .pending_harvests(REALM, 16)
+            .await
+            .expect("the exit interviews that wait")
+            .into_iter()
+            .map(|harvest| harvest.identity)
+            .collect();
+        waiting.sort();
+        assert!(
+            said_held == held.len() && waiting == held && run.verdicts.harvests_completed == 1,
+            "the dream held the four interviews whose privacy is unknown, saying so of each \
+             ({said_held}: {:?}), and ran the one after them ({} done; still waiting: \
+             {waiting:?})",
+            run.skips,
+            run.verdicts.harvests_completed
+        );
+    }
+
+    /// A dream takes four exit interviews and no more. Six retired members
+    /// wait, none of them held and none with a record to harvest: one dream
+    /// does the four oldest interviews and leaves the two newest waiting.
+    #[tokio::test]
+    async fn a_dream_takes_four_exit_interviews_and_leaves_the_rest_waiting() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        for nth in 1..=MAX_HARVESTS_PER_DREAM + 2 {
+            fixture
+                .store
+                .record_pending_harvest_at(
+                    REALM,
+                    &format!("identity:retired-{nth}"),
+                    None,
+                    "retire",
+                    1_000 + nth as u64,
+                )
+                .await
+                .expect("an exit interview waits");
+        }
+
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("the dream runs: {outcome:?}");
+        };
+        let mut waiting: Vec<String> = fixture
+            .store
+            .pending_harvests(REALM, 16)
+            .await
+            .expect("the exit interviews that wait")
+            .into_iter()
+            .map(|harvest| harvest.identity)
+            .collect();
+        waiting.sort();
+        assert!(
+            run.verdicts.harvests_completed == MAX_HARVESTS_PER_DREAM
+                && waiting == ["identity:retired-5", "identity:retired-6"],
+            "one dream does the four oldest exit interviews ({} done) and leaves the two \
+             newest waiting ({waiting:?})",
+            run.verdicts.harvests_completed
+        );
     }
 
     /// A member private to a person (`console.private_to`) feeds no dream,

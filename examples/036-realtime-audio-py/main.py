@@ -29,7 +29,7 @@ from playback import Playback
 
 
 DEFAULT_LIVE_MODEL = "gpt-realtime-2"
-DEFAULT_HELPER_MODEL = "gpt-6-astra"
+DEFAULT_HELPER_MODEL = "gpt-6.2-astra"
 HELPER_OUTPUT_MAX_BYTES = 4000
 HOST_IDENTITY = "voice-host"
 

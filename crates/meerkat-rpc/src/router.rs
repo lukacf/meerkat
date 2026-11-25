@@ -29972,6 +29972,8 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         use super::caller_idempotency_key::keyed_router;
         use super::*;
 
+        /// A session whose first turn has run and whose runtime loop is at
+        /// rest (see [`session_at_rest`]).
         async fn create_session(router: &MethodRouter) -> String {
             let resp = router
                 .dispatch(make_request(
@@ -29980,14 +29982,51 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 ))
                 .await
                 .unwrap();
-            result_value(&resp)["session_id"]
+            let session_id = result_value(&resp)["session_id"]
                 .as_str()
                 .expect("session id")
-                .to_string()
+                .to_string();
+            session_at_rest(router, &session_id).await;
+            session_id
         }
 
-        /// Queue one external event on an idle session and return its input
-        /// id. Nothing runs it until the session's next turn.
+        /// Wait until the session's runtime loop is parked with no run
+        /// current. A turn's call answers before the loop has looked at its
+        /// queue for the last time, and that look takes an event admitted
+        /// without a wake as a turn of its own, so an event queued right
+        /// after the create's answer may not stay queued. The park is a
+        /// positive event, published only while nothing is buffered for the
+        /// loop, and the pass that ran the first turn cleared it: a park seen
+        /// after the create's answer is after that last look. This holds for
+        /// a fixture without background hooks, as this module's is: the park
+        /// says nothing about a pending hook completion, which can wake a
+        /// parked loop into another look.
+        async fn session_at_rest(router: &MethodRouter, session_id: &str) {
+            let sid = meerkat_core::SessionId::parse(session_id).expect("session id");
+            let mut parked = router.runtime_adapter.runtime_loop_parked();
+            loop {
+                tokio::time::timeout(
+                    Duration::from_mins(1),
+                    parked.wait_for(|sessions| sessions.contains(&sid)),
+                )
+                .await
+                .expect("the session's runtime loop parks after its first turn")
+                .expect("runtime-loop park watch");
+                if router.runtime_adapter.current_run(&sid).await.is_none() {
+                    break;
+                }
+                tokio::time::timeout(
+                    Duration::from_mins(1),
+                    router.runtime_adapter.wait_current_run_settled(&sid),
+                )
+                .await
+                .expect("the session's current run settles");
+            }
+        }
+
+        /// Queue one external event on a session at rest (every session of
+        /// this module is, from [`create_session`]) and return its input id.
+        /// Nothing runs it until the session's next turn.
         async fn queue_event(router: &MethodRouter, session_id: &str, body: &str) -> String {
             let admitted = result_value(
                 &router

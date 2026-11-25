@@ -2284,6 +2284,7 @@ async fn keep_and_follow(launch: &Launch) -> Arc<KeptEnds> {
             kept: kept.clone(),
             schedules: crate::schedule_wiring::EndedPrivateMemberSchedules::new(
                 launch.attached.service.clone(),
+                crate::member_key::DefaultMob::new(launch.mob().mob_id().clone()),
             ),
         }))
         .await;
@@ -2712,6 +2713,7 @@ async fn an_end_a_launch_only_held_is_shown_to_the_launch_that_speaks_for_the_co
         .follow_member_ends(Arc::new(
             crate::schedule_wiring::EndedPrivateMemberSchedules::new(
                 launch.attached.service.clone(),
+                crate::member_key::DefaultMob::new(launch.mob().mob_id().clone()),
             ),
         ))
         .await;
@@ -2749,6 +2751,95 @@ async fn an_end_a_launch_only_held_is_shown_to_the_launch_that_speaks_for_the_co
     );
     speaks.abort();
     let _ = speaks.await;
+    launch.finish().await;
+}
+
+/// The event pump of a mob takes the creates its record admitted when its
+/// task is made, and shows its record every event with them. Two pumps are
+/// made over the launch mob's handle, each with a record and a follower of
+/// its own. Then a create under the mob's id is admitted in the first
+/// record, as it is once the mob that held the id is gone and a mob is
+/// created anew under it; then the private side chat is closed. The second
+/// pump is the pump of the mob that holds the id: its record notes the row
+/// and its follower is handed the side chat's end. The first pump's row is
+/// an earlier mob's: its record notes nothing and its follower is handed
+/// nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pump_made_before_a_create_under_its_mobs_id_follows_no_end_of_that_mob() {
+    use crate::PersistentMetadataStore;
+    use crate::private_owners::PrivateOwners;
+    use crate::unified_runtime::mob_events::MobEventsStore;
+    use crate::unified_runtime::run_mob_events_subscription;
+
+    let launch = boot("pump-of-an-earlier-mob").await;
+    let (app, owner) = private_side_chat(&launch).await;
+
+    let pump = |record: &PrivateOwners| {
+        let cursors: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::InMemoryMetadataStore::new());
+        tokio::spawn(run_mob_events_subscription(
+            launch.mob().handle(),
+            MobEventsStore::new(),
+            cursors,
+            None,
+            record.clone(),
+            true,
+        ))
+    };
+    let (of_an_earlier_mob, of_the_mob) = (PrivateOwners::default(), PrivateOwners::default());
+    let (kept_of_an_earlier_mob, kept_of_the_mob) =
+        (Arc::new(KeptEnds::default()), Arc::new(KeptEnds::default()));
+    of_an_earlier_mob
+        .follow_member_ends(kept_of_an_earlier_mob.clone())
+        .await;
+    of_the_mob.follow_member_ends(kept_of_the_mob.clone()).await;
+    let pumps = [pump(&of_an_earlier_mob), pump(&of_the_mob)];
+    // Both pumps subscribe to the journal.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // A create under the mob's id is admitted in the first record.
+    of_an_earlier_mob.admit_a_create_in_tests(&launch.mob_id, "another-mob");
+
+    close(&launch, &app, &owner, SIDE_NAME).await;
+    let mut handed = Vec::new();
+    for _ in 0..100 {
+        handed = kept_of_the_mob.members();
+        if !handed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The first pump is shown the same event: it is given as long again.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for pump in pumps {
+        pump.abort();
+        let _ = pump.await;
+    }
+
+    launch.expect(
+        handed.len() == 1,
+        format!(
+            "the pump of the mob that holds the id hands the side chat's end over (handed: \
+             {handed:?})"
+        ),
+    );
+    launch.expect(
+        of_the_mob.name_seatings_noted() > 0,
+        "the pump of the mob that holds the id notes the journal's row",
+    );
+    launch.expect(
+        kept_of_an_earlier_mob.members().is_empty(),
+        format!(
+            "the pump made before the create under its mob's id hands no end over (handed: {:?})",
+            kept_of_an_earlier_mob.members()
+        ),
+    );
+    launch.expect(
+        of_an_earlier_mob.name_seatings_noted() == 0,
+        format!(
+            "the pump made before the create under its mob's id notes no row (noted: {})",
+            of_an_earlier_mob.name_seatings_noted()
+        ),
+    );
     launch.finish().await;
 }
 

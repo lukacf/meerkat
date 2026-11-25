@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import inspect
 import logging
 import time
@@ -18,6 +18,7 @@ from .jobs import (
     _DetachedJobReporter,
 )
 from .decisions import _enter_tool_callback, _leave_tool_callback
+from .errors import ContractMismatchError
 from .models import SessionBuildOptions
 from .live import LiveAssistantOutputAddress
 from .tool_requester import ToolCallRequester, _accepts_requester
@@ -83,6 +84,47 @@ class SessionAgentBuilder(Protocol):
         ...
 
 
+def _callback_mob(params: Mapping[str, Any]) -> str | None:
+    """The mob a member-building callback names: its top-level ``mob_id``.
+
+    ``None`` when the host sent none (or null): a host of an earlier
+    release, which serves its own mob only. A host that names mobs names
+    them by text, so any other value is refused with
+    :class:`~meerkat_meta.errors.ContractMismatchError`: read as "none" it
+    would stand for the host's own mob, the wrong one for a member of
+    another.
+    """
+    mob_id = params.get("mob_id")
+    if mob_id is None:
+        return None
+    if not isinstance(mob_id, str):
+        raise ContractMismatchError(
+            f"a callback's mob_id must be a string, got {type(mob_id).__name__}"
+        )
+    return mob_id
+
+
+def _callback_mob_incarnation(params: Mapping[str, Any]) -> str | None:
+    """The incarnation of the mob a customize callback names: its top-level
+    ``mob_incarnation``.
+
+    ``None`` when the host sent none (or null): a host of an earlier
+    release. A host that names it names it by a non-empty text, so any
+    other value is refused with
+    :class:`~meerkat_meta.errors.ContractMismatchError`: read as "none" it
+    would keep the tools of a mob that may be gone.
+    """
+    incarnation = params.get("mob_incarnation")
+    if incarnation is None:
+        return None
+    if not isinstance(incarnation, str) or not incarnation:
+        raise ContractMismatchError(
+            "a callback's mob_incarnation must be a non-empty string, got "
+            f"{type(incarnation).__name__}"
+        )
+    return incarnation
+
+
 class CallbackDispatcher:
     """Routes incoming JSON-RPC callback requests from the Rust runtime
     to the registered SessionAgentBuilder and tool handlers.
@@ -100,9 +142,20 @@ class CallbackDispatcher:
         self._scope_tools: dict[str, list[str]] = {}
         # customize_build runs again, with a fresh scope, at each seat, fresh
         # life, role migration and build of an identity; track the latest
-        # scope per identity so we can release the previous one (the gateway
-        # has no scope-release signal: newest wins).
-        self._customizer_scope_by_identity: dict[str, str] = {}
+        # scope per member so we can release the previous one (the gateway
+        # has no scope-release signal: newest wins). A member is its mob and
+        # its identity: two mobs of one host can each have a member of the
+        # same name, and a build of one must not release the other's tools.
+        # The mob is ``None`` for a host that names none (its own mob).
+        self._customizer_scope_by_member: dict[tuple[str | None, str], str] = {}
+        # The incarnations the gateway named for each mob id, from the
+        # customize callback, in the order they were first named: the last
+        # is the mob's, the ones before it are of mobs that are gone. A mob
+        # created under the id of a destroyed one is another incarnation:
+        # its first build releases every scope kept under that mob id, which
+        # are the destroyed mob's. One entry per incarnation named in this
+        # process; nothing is stored.
+        self._customizer_incarnations_by_mob: dict[str, list[str]] = {}
         # Identity-first providers (REQ-45)
         self._roster_provider: Any | None = None
         self._topology_provider: Any | None = None
@@ -181,6 +234,38 @@ class CallbackDispatcher:
         """Remove all tool handlers for a scope. Call when a session ends."""
         for tool_name in self._scope_tools.pop(scope_id, []):
             self._tool_handlers.pop((scope_id, tool_name), None)
+
+    def _note_mob_incarnation(self, mob_id: str, incarnation: str) -> bool:
+        """Record the incarnation a customize callback names for a mob, and
+        answer whether the build is of the mob as it is named now.
+
+        An incarnation named for the first time, for a mob id that was named
+        by another: the mob of the earlier builds is gone (a mob keeps its
+        incarnation for as long as it exists), so every customizer scope
+        kept under that mob id is released and the later mob starts with
+        none of them. An incarnation that was named before a later one: the
+        build is of a mob that is gone and was handled late (callbacks can
+        be handled in another order than they arrived); it releases nothing
+        and the answer is ``False``.
+        """
+        named = self._customizer_incarnations_by_mob.setdefault(mob_id, [])
+        if named and named[-1] == incarnation:
+            return True
+        if incarnation in named:
+            return False
+        if named:
+            of_the_earlier_mob = [
+                member for member in self._customizer_scope_by_member if member[0] == mob_id
+            ]
+            for member in of_the_earlier_mob:
+                self.release_scope(self._customizer_scope_by_member.pop(member))
+        named.append(incarnation)
+        return True
+
+    def _is_mob_incarnation(self, mob_id: str, incarnation: str) -> bool:
+        """Whether ``incarnation`` is the one last named for ``mob_id``."""
+        named = self._customizer_incarnations_by_mob.get(mob_id)
+        return bool(named) and named[-1] == incarnation
 
     def register_live_output_queue(
         self, channel_id: str, capacity: int
@@ -691,10 +776,12 @@ class CallbackDispatcher:
         op = method.rsplit("/", 1)[-1]
 
         if op == "compute_edges":
-            edges = await provider.compute_edges(
-                params["target_identities"],
-                params.get("context", {}),
-            )
+            context = params.get("context", {})
+            mob_id = _callback_mob(params)
+            if mob_id is not None and isinstance(context, Mapping):
+                # The provider's context names the mob whose edges are asked.
+                context = {**context, "mob_id": mob_id}
+            edges = await provider.compute_edges(params["target_identities"], context)
             return [e.to_dict() for e in edges]
 
         raise ValueError(f"unknown topology_provider operation: {op}")
@@ -715,26 +802,44 @@ class CallbackDispatcher:
 
         if op == "customize_build":
             scope_id = params.get("scope_id")
-            context = AgentBuildContext.from_dict(params["context"])
+            mob_id = _callback_mob(params)
+            incarnation = _callback_mob_incarnation(params)
+            context = replace(AgentBuildContext.from_dict(params["context"]), mob_id=mob_id)
             spec = DurableAgentSpec.from_dict(params["spec"])
             draft = AgentBuildDraft.from_dict(params["draft"])
+            # Before the customizer is asked, and whatever it does with the
+            # build: a build that names another incarnation of its mob
+            # releases what was kept for the earlier one. A build of an
+            # incarnation that a later one superseded is of a mob that is
+            # gone: the customizer is asked and the draft answered, and its
+            # tools are not registered.
+            of_the_mob_as_named = True
+            if mob_id is not None and incarnation is not None:
+                of_the_mob_as_named = self._note_mob_incarnation(mob_id, incarnation)
             await customizer.customize_build(context, spec, draft)
+            # While the customizer ran, a build of a later incarnation of
+            # this mob may have been named: this build is then of a mob that
+            # is gone too.
+            if of_the_mob_as_named and mob_id is not None and incarnation is not None:
+                of_the_mob_as_named = self._is_mob_incarnation(mob_id, incarnation)
             # Capture any tool handlers the customizer registered via
             # draft.register_tool(), keyed by this build's scope — the same
             # (scope_id, tool) map build_agent uses, so callback/call_tool
             # dispatches to them. Guard on scope_id for forward/backward compat
             # with a gateway that does not yet send it.
             handlers = draft.tool_handlers
-            if scope_id and handlers:
-                # Release the previous scope for this identity before registering
+            if scope_id and handlers and of_the_mob_as_named:
+                # Release the previous scope for this member before registering
                 # the new one: customize_build runs again at each seat, fresh
                 # life, role migration and build of the identity, and the
                 # gateway never signals scope release, so this bounds growth to
-                # one live scope per identity (newest wins).
-                prior = self._customizer_scope_by_identity.get(context.identity)
+                # one live scope per member (newest wins). The member of
+                # another mob with the same identity keeps its own.
+                member = (mob_id, context.identity)
+                prior = self._customizer_scope_by_member.get(member)
                 if prior and prior != scope_id:
                     self.release_scope(prior)
-                self._customizer_scope_by_identity[context.identity] = scope_id
+                self._customizer_scope_by_member[member] = scope_id
                 tool_names = self._scope_tools.setdefault(scope_id, [])
                 for name, handler in handlers.items():
                     self._tool_handlers[(scope_id, name)] = handler
@@ -747,7 +852,10 @@ class CallbackDispatcher:
             # The gateway sends the context's fields beside the identity and
             # the session, as for callback/after_create; a nested ``context``
             # object is read when one is present.
-            context = SessionCreatedContext.from_dict(params.get("context") or params)
+            context = replace(
+                SessionCreatedContext.from_dict(params.get("context") or params),
+                mob_id=_callback_mob(params),
+            )
             if hasattr(customizer, "after_create"):
                 result = customizer.after_create(identity, session_id, context)
                 if asyncio.iscoroutine(result):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of durable in-turn Steer delivery.
 #
-# usage: durable_in_turn_steer_audit.sh <max-steps> [extra tlc args...]
+# usage: durable_in_turn_steer_audit.sh <max-steps> [--recovery-scene [--mutants]] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
@@ -30,10 +30,33 @@
 # under a bound of one the late input never joins (the run's batch input
 # fills it) and TLC must reach it waiting for that refused join; under two
 # it must join. Every such run keeps the audited run within the bound.
+#
+# With --recovery-scene the script runs the recovery scene instead
+# (AuditRecoverySpec in the audit module; the runs are in
+# durable_in_turn_steer_recovery_scene.sh), so the lane can run the two as
+# separate blocks: a start over the same store recovers the batch input bound
+# to the run it resumes and the late input from one stored row. The row of a
+# steer that never left the Steer lane must join the resumed run; a row with
+# a stage attempt, a row that still names a run, a row in the Queue lane and
+# a row that stores no class (one run over the four) and a governed row must
+# hold no class after recovery and never join. With --mutants four defects
+# are then seeded into a copy of the generated model and TLC must refuse
+# each.
 set -euo pipefail
 
-max_steps="${1:?usage: durable_in_turn_steer_audit.sh <max-steps> [extra tlc args...]}"
+usage="usage: durable_in_turn_steer_audit.sh <max-steps> [--recovery-scene [--mutants]] [extra tlc args...]"
+max_steps="${1:?${usage}}"
 shift
+recovery_scene=false
+run_mutants=false
+if [[ "${1:-}" == "--recovery-scene" ]]; then
+  recovery_scene=true
+  shift
+  if [[ "${1:-}" == "--mutants" ]]; then
+    run_mutants=true
+    shift
+  fi
+fi
 if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 9 )); then
   echo "error: max-steps must be an integer >= 9 (the deterministic prefix is 8 steps)" >&2
   exit 2
@@ -74,7 +97,9 @@ else
 fi
 replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}
-  AuditLateKinds = {${safety_kinds}}" "${audit_cfg}"
+  AuditLateKinds = {${safety_kinds}}
+  AuditRows <- AuditRowsThatNeverLeft
+  AuditRowGoverned = FALSE" "${audit_cfg}"
 replace_exact_line "INVARIANTS" "INVARIANTS
   AuditRetainedJoinNeverRequeued
   AuditPublishedJoinIsStaged
@@ -103,7 +128,7 @@ fi
 #    cannot reach a state the Prompt run misses, and this audit takes none of
 #    them. Their bodies are left out of the scan; naming one fails the run.
 model="${spec_dir}/model.tla"
-if [[ "${DURABLE_STEER_AUDIT_ALL_KINDS:-0}" != "1" ]]; then
+if [[ "${recovery_scene}" != "true" && "${DURABLE_STEER_AUDIT_ALL_KINDS:-0}" != "1" ]]; then
   scan_model="${work_dir}/model-without-verdicts.tla"
   MODEL="${model}" OUT="${scan_model}" AUDIT="${spec_dir}/durable_in_turn_steer_audit.tla" python3 - <<'PY'
 import os, re
@@ -184,6 +209,12 @@ run_tlc() {
   grep -E 'states generated|distinct states|is violated|Error:' "${log}" | sed "s/^/[${name}] /" || true
 }
 extra_tlc_args=("$@")
+
+if [[ "${recovery_scene}" == "true" ]]; then
+  # shellcheck source=durable_in_turn_steer_recovery_scene.sh
+  source "${spec_dir}/durable_in_turn_steer_recovery_scene.sh"
+  exit 0
+fi
 
 run_tlc safety "${audit_cfg}"
 if [[ "${tlc_status}" != "0" ]] \

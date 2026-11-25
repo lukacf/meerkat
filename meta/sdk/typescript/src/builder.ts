@@ -59,6 +59,7 @@ const AGENT_MEMORY_KEYS = new Set([
   "contentTrust",
   "selector",
   "operatorScope",
+  "ownMemoryOnlyProfiles",
   "distiller",
   "steward",
   "hygienist",
@@ -151,6 +152,8 @@ export interface MetaBuilderConfig {
   allowRemote: boolean | null;
   consoleRequireAppAuth: boolean | null;
   consoleReadOnly: boolean | null;
+  /** `runtime_options.console_list_nested_mobs`; `null` sends nothing. */
+  consoleListNestedMobs: boolean | null;
   consoleFetchTimeoutMs: number | null;
   demoLlm: boolean;
   memberCommsAddress: string | null;
@@ -221,6 +224,7 @@ function defaultConfig(): MetaBuilderConfig {
     allowRemote: null,
     consoleRequireAppAuth: null,
     consoleReadOnly: null,
+    consoleListNestedMobs: null,
     consoleFetchTimeoutMs: null,
     demoLlm: false,
     memberCommsAddress: null,
@@ -570,6 +574,20 @@ export class MetaBuilder {
 
   consoleReadOnly(readOnly = true): this {
     this._config.consoleReadOnly = readOnly;
+    return this;
+  }
+
+  /**
+   * Set whether the console lists the mobs nested under the gateway's mob.
+   *
+   * Emitted as `runtime_options.console_list_nested_mobs`. The gateway
+   * default lists them: the mobs a member of that mob created, and the mobs
+   * made under those at any depth, with their members, to the callers the
+   * access rules allow. Pass `false` to hide every nested mob and its
+   * members on every console read, as releases before the listing did.
+   */
+  consoleListNestedMobs(listed: boolean): this {
+    this._config.consoleListNestedMobs = listed;
     return this;
   }
 
@@ -931,6 +949,17 @@ export class MetaBuilder {
        */
       selector?: "off";
       operatorScope?: "off" | "provisional";
+      /**
+       * Distinct profile names of the launch mob. An agent of a listed
+       * profile, an agent it created (and so on up the agents that created
+       * each other), and an agent whose profile its own mob does not define,
+       * is listed the records of its own memory only in the memory index of
+       * its build: none of its mob's shared records and none of the realm's.
+       * A filter on what an agent is listed, not a boundary between tenants;
+       * it takes effect at an agent's next new session. The gateway refuses
+       * the start when a listed name is no profile of the launch mob.
+       */
+      ownMemoryOnlyProfiles?: string[];
       distiller?: boolean | {
         enabled?: boolean;
         runsPerHour?: number;
@@ -1027,6 +1056,11 @@ export class MetaBuilder {
     }
     if (config.operatorScope !== undefined) {
       wire.operator_scope = config.operatorScope;
+    }
+    if (config.ownMemoryOnlyProfiles !== undefined) {
+      // Forwarded as given: the gateway checks the names against the launch
+      // mob's definition and refuses the start on one it lacks.
+      wire.own_memory_only_profiles = [...config.ownMemoryOnlyProfiles];
     }
     if (config.distiller !== undefined) {
       if (typeof config.distiller === "boolean") {

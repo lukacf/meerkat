@@ -27,6 +27,7 @@ struct FaultStore {
 // A stalled page must contain a frame: empty pages are valid legacy terminals.
 fn repeated_frame(cursor: Option<&ConsoleCursor>) -> ConsoleFrame {
     ConsoleFrame {
+        mob_id: None,
         id: "stalled-frame".into(),
         cursor: cursor.cloned().unwrap_or_else(|| "console:0".into()),
         dedupe_key: "stalled-frame".into(),
@@ -322,6 +323,7 @@ async fn approval_origin_access_cannot_be_bypassed_by_whitespace_ids()
                     topic: None,
                 },
                 Some(crate::GatingOrigin {
+                    mob_id: None,
                     identity: "hidden-reviewer".into(),
                     conversation_id,
                     interaction_id,
@@ -416,5 +418,90 @@ async fn approval_origin_access_cannot_be_bypassed_by_whitespace_ids()
         }
     }
     runtime.mob_runtime().handle().stop().await?;
+    Ok(())
+}
+
+/// `meta/console/query_timeline` takes no mob from its caller: a request
+/// that names the gateway's own mob, or any other, is answered as the
+/// request that names none, with the default mob's timeline.
+#[tokio::test]
+async fn member_keyed_timeline_rpc_takes_no_mob_from_its_caller()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (_temp, runtime) = super::tests::build_empty_console_test_runtime("timeline-mob").await?;
+    let store = Arc::new(InMemoryConsoleLogStore::new());
+    let frame: crate::console_aggregator::NewConsoleFrame = serde_json::from_value(json!({
+        "dedupe_key": "alice-1",
+        "timestamp_ms": 7,
+        "runtime_key": "runtime-a",
+        "identity": "alice",
+        "kind": "user_input",
+        "status": "completed",
+        "payload": { "text": "hello" },
+        "source": { "kind": "send" },
+    }))?;
+    store.append_if_absent(frame).await?;
+    for runtime_path in [false, true] {
+        let mut answers = Vec::new();
+        for mob in [None, Some("timeline-mob"), Some("another-mob")] {
+            let mut params = json!({ "identity": "alice" });
+            if let Some(mob) = mob {
+                params["mob_id"] = json!(mob);
+            }
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(json!(1)),
+                method: "meta/console/query_timeline".into(),
+                params,
+            };
+            let aggregator = MetaConsoleAggregator::new(store.clone());
+            let response = if runtime_path {
+                Box::pin(handle_console_runtime_rpc(
+                    &runtime,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(aggregator),
+                    None,
+                    None,
+                    None,
+                    request,
+                    true,
+                ))
+                .await
+            } else {
+                handle_console_aggregator_rpc(
+                    Some(aggregator),
+                    request,
+                    true,
+                    false,
+                    None,
+                    None,
+                    &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                    None,
+                )
+                .await
+            };
+            assert!(response["error"].is_null(), "{mob:?}: {response:#}");
+            let texts = response["result"]["frames"]
+                .as_array()
+                .map(|frames| {
+                    frames
+                        .iter()
+                        .map(|frame| frame["payload"]["text"].clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            answers.push((mob, texts));
+        }
+        for (mob, texts) in &answers {
+            assert_eq!(
+                texts,
+                &[json!("hello")],
+                "runtime path {runtime_path}, mob {mob:?}: {answers:?}"
+            );
+        }
+    }
+    runtime.handle().stop().await?;
     Ok(())
 }

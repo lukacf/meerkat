@@ -8,6 +8,7 @@ import {
   findSideChatAgent,
   inactiveInstructionNotice,
   parseSideChatForkResult,
+  resetOffered,
   restartOffered,
   sideChatAlias,
   sideChatForkBlockedReason,
@@ -169,10 +170,48 @@ test("a pane offers the fork only where the viewer may fork the agent", () => {
   assert.equal(sideChatForkOffered({ ...offered, agent: null }), false);
 });
 
+test("a pane offers no fork of an agent whose row says the gateway forks no side chat of it", () => {
+  const offered = { readOnly: false, offered: true, canSpawnMembers: true, accessEnforcing: false };
+  const nested = agent("research-team/archivist", {
+    label: "Archivist",
+    mob_id: "research-team",
+    affordances: { can_send_message: true, can_fork_side_chat: false },
+  });
+  assert.equal(
+    sideChatForkOffered({ ...offered, agent: nested }),
+    false,
+    "a member of a nested mob is forked by no gateway route",
+  );
+  assert.equal(sideChatForkOffered({ ...offered, accessEnforcing: true, agent: nested }), false);
+  assert.equal(
+    sideChatForkOffered({
+      ...offered,
+      agent: agent("alpha", { affordances: { can_send_message: true, can_fork_side_chat: true } }),
+    }),
+    true,
+  );
+});
+
 test("a side chat offers no respawn or reset", () => {
   assert.equal(restartOffered(agent("alpha")), true);
   assert.equal(restartOffered(agent("alpha-side-ab12", { side_chat_of: "alpha" })), false);
   assert.equal(restartOffered(null), true);
+});
+
+test("Reset is offered where a restart is, unless the agent's row says the gateway does not reset it", () => {
+  assert.equal(resetOffered(agent("alpha")), true, "a gateway that does not say leaves Reset offered");
+  assert.equal(resetOffered(agent("alpha", { affordances: { can_reset: true } })), true);
+  assert.equal(
+    resetOffered(agent("research-team/archivist", { mob_id: "research-team", affordances: { can_reset: false } })),
+    false,
+    "a member of a nested mob is reset by no gateway route",
+  );
+  assert.equal(
+    resetOffered(agent("alpha-side-ab12", { side_chat_of: "alpha", affordances: { can_reset: true } })),
+    false,
+    "a side chat is never reset",
+  );
+  assert.equal(resetOffered(null), true);
 });
 
 test("side chats are found by alias and listed under their source", () => {

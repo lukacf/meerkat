@@ -19,7 +19,7 @@
 //! sent, and reads the agent's durable transcript after each step.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,8 @@ use meerkat_mob::{MobDefinition, ProfileName};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -274,6 +276,8 @@ impl meerkat_client::LlmClient for RecordingClient {
 /// One booted gateway runtime and what its members' model was asked.
 struct Rig {
     runtime: meerkat_meta::UnifiedRuntime,
+    /// The state directory the runtime was booted on.
+    state: PathBuf,
     roster: Arc<MutableRosterProvider>,
     asked: mpsc::UnboundedReceiver<String>,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -315,6 +319,7 @@ async fn boot_with(
         .expect("build the gateway-shaped UnifiedRuntime");
     Rig {
         runtime,
+        state: state.to_path_buf(),
         roster,
         asked,
         requests,
@@ -709,9 +714,15 @@ impl Rig {
 
     /// Shut down before a reopen over the same state directory in this
     /// process: stand the durable child root down, bounded, until it is
-    /// released.
-    async fn shutdown_for_reopen(self) {
-        let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
+    /// released; then drop this lifetime's handles and wait, bounded, until
+    /// its execution custody is released (`support/custody_wait.rs`). The
+    /// shutdown's report must say the teardown settled: the mob's part
+    /// before the root is stood down again, the whole report, with the
+    /// root's last outcome, before the wait.
+    async fn shutdown_for_reopen(mut self) {
+        let mut report = self.runtime.shutdown().await;
+        custody_wait::mob_teardown_settled(&report);
+        let mut outcome = report.child_mob_stand_down.clone();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !child_root_released(&outcome) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -725,6 +736,11 @@ impl Rig {
             child_root_released(&outcome),
             "the durable child root is released before the reopen: {outcome:?}"
         );
+        report.child_mob_stand_down = outcome;
+        custody_wait::teardown_settled(&report);
+        let state = std::mem::take(&mut self.state);
+        drop(self);
+        custody_wait::predecessor_custody_released(&state).await;
     }
 }
 
@@ -734,6 +750,143 @@ fn child_root_released(outcome: &meerkat_meta::ChildMobStandDownOutcome) -> bool
         meerkat_meta::ChildMobStandDownOutcome::Released { .. }
             | meerkat_meta::ChildMobStandDownOutcome::NotConfigured
     )
+}
+
+/// The wait a reopen makes (`support/custody_wait.rs`) lasts until nothing
+/// holds the execution custody: a shared lock on the custody file, released
+/// a while later from another thread, keeps the wait until that release. With
+/// no holder the wait returns at once. Where the kernel's lock table cannot
+/// name the file (btrfs subvolumes, overlayfs) nothing can be read, and the
+/// wait returns at once while the lock is held too.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_waits_until_the_execution_custody_is_released() {
+    const HELD_FOR: Duration = Duration::from_millis(400);
+    let temp = tempfile::tempdir().unwrap();
+    let mut custody = temp
+        .path()
+        .join(meerkat_meta::storage_layout::RUNTIME_DB_FILE_NAME)
+        .into_os_string();
+    custody.push(".execution-custody");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&custody)
+        .expect("create the custody file");
+    held.lock_shared()
+        .expect("hold the custody as a hosted runtime does");
+    let readable = custody_wait::custody_holder_named(Path::new(&custody)) == Some(true);
+
+    let started = std::time::Instant::now();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(HELD_FOR);
+        drop(held);
+    });
+    custody_wait::predecessor_custody_released(temp.path()).await;
+    let waited = started.elapsed();
+    if readable {
+        assert!(
+            waited >= HELD_FOR,
+            "the wait ended after {waited:?}, before the holder released"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wait went on for {waited:?} after the holder released"
+        );
+    } else {
+        assert!(
+            waited < HELD_FOR,
+            "a lock the table cannot name was waited on for {waited:?}"
+        );
+    }
+    release.join().expect("the holder's thread");
+
+    let started = std::time::Instant::now();
+    custody_wait::predecessor_custody_released(temp.path()).await;
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(1),
+        "with no holder the wait took {waited:?}"
+    );
+}
+
+/// The check a reopen makes of its predecessor's shutdown report
+/// (`support/custody_wait.rs`) takes the report of a teardown that settled
+/// and fails the row on one that did not. The first report is the real one
+/// of an agent that ran a turn. Each refused report is that report with one
+/// outcome set to a value the product writes for such a teardown: durable
+/// child mobs held until the process exits, a member the terminal shutdown
+/// could not settle, and a mob that did not stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_refuses_a_shutdown_report_that_did_not_settle() {
+    fn refusal(check: impl FnOnce()) -> Option<String> {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).err()?;
+        Some(
+            caught
+                .downcast::<String>()
+                .map_or_else(|_| String::new(), |message| *message),
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let roster = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot(temp.path(), &fresh_mob_id(), roster).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    let mut report = rig.runtime.shutdown().await;
+    assert_eq!(
+        refusal(|| custody_wait::mob_teardown_settled(&report)),
+        None,
+        "the mob of a runtime whose agent ran a turn and is idle settles"
+    );
+
+    report.child_mob_stand_down =
+        meerkat_meta::ChildMobStandDownOutcome::HeldUntilProcessExit { child_mobs: 0 };
+    assert_eq!(
+        refusal(|| custody_wait::mob_teardown_settled(&report)),
+        None,
+        "the durable child mobs are not the mob's part"
+    );
+    let refused = refusal(|| custody_wait::teardown_settled(&report));
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("did not complete its cleanup")),
+        "a child root held until the process exits is no completed cleanup: {refused:?}"
+    );
+
+    let meerkat_meta::MobTerminalShutdownOutcome::Completed(mob) =
+        &mut report.mob_terminal_shutdown
+    else {
+        panic!("the terminal shutdown completed: {report:?}");
+    };
+    mob.members.insert(
+        meerkat_meta::member_comms_id::mob_member_id(CONFIGURED),
+        meerkat_mob::MemberShutdownOutcome::EffectCustodyRetained {
+            context: "set by this row",
+        },
+    );
+    let refused = refusal(|| custody_wait::teardown_settled(&report));
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("did not settle every member")),
+        "a member the terminal shutdown could not settle is refused: {refused:?}"
+    );
+
+    report.mob_stop = Err(meerkat_meta::MobRuntimeError::InvalidInput(
+        "set by this row",
+    ));
+    report.mob_terminal_shutdown = meerkat_meta::MobTerminalShutdownOutcome::SkippedMobStopFailed;
+    report.child_mob_stand_down = meerkat_meta::ChildMobStandDownOutcome::SkippedMobStopFailed;
+    let refused = refusal(|| custody_wait::teardown_settled(&report));
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("did not stop its mob")),
+        "a mob that did not stop is refused: {refused:?}"
+    );
 }
 
 /// A configured agent, live and idle: its configuration's instructions
@@ -1175,6 +1328,121 @@ async fn a_restart_with_no_change_writes_nothing() {
         entries(&rig.transcript(CONFIGURED).await).len(),
         1,
         "the entry is not appended again"
+    );
+    rig.shutdown().await;
+}
+
+/// An agent whose spec has no instructions: a restart writes no record and
+/// appends nothing, before and after a run, and a text it is given later
+/// is recorded as any first change is. (A start does not read such an
+/// agent's session to learn this: a session built with any sections was not
+/// built with other sections than none.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_of_an_agent_with_no_instructions_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let none = vec![configured_spec(&[])];
+    let mut rig = boot(temp.path(), &mob, none.clone()).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, none).await;
+    assert_eq!(
+        rig.record(CONFIGURED).await,
+        None,
+        "no record of an agent that never had instructions"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    assert!(
+        entries(&rig.transcript(CONFIGURED).await).is_empty(),
+        "nothing is appended after a restart"
+    );
+
+    rig.configure(&["Answer in ALPHA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "THIRD-TURN").await;
+    let request = entries(&rig.request_messages("THIRD-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
+        "a first text given later is recorded and carried: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A text given while the gateway was down to an agent that was built with
+/// none, and that the mob holds no record of: the start compares it with
+/// the sections the agent's session was built with (none), records it, and
+/// wakes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_text_given_while_the_gateway_was_down_to_an_agent_built_with_none_is_recorded_at_start()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let alpha = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot(temp.path(), &mob, alpha).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        record["revision"],
+        json!(1),
+        "the start recorded the first text: {record:#?}"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
+        "the next run carries the text: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A text withdrawn while the gateway was down, for an agent the mob holds
+/// a record of: the start writes the record's next revision with the fixed
+/// withdrawal, wakes nothing, and the agent's next run carries it. The
+/// record decides this, not the session: an agent whose current text has no
+/// section is still reconciled with the record the mob holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withdrawal_made_while_the_gateway_was_down_is_recorded_at_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(
+        temp.path(),
+        &mob,
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        record["revision"],
+        json!(2),
+        "the start wrote the withdrawal: {record:#?}"
+    );
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "THIRD-TURN").await;
+    let request = entries(&rig.request_messages("THIRD-TURN"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries_body(entry, WITHDRAWN_BODY)),
+        "the next run carries the withdrawal: {request:#?}"
     );
     rig.shutdown().await;
 }

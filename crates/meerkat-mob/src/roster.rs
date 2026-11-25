@@ -285,6 +285,15 @@ pub struct Roster {
     /// ([`Self::seat_is_as_adopted`]).
     #[serde(skip)]
     seats_as_adopted: BTreeSet<AgentIdentity>,
+    /// Who seated each identity's member, as its last seat row reads
+    /// ([`crate::MemberSeat`]), with that row's incarnation and session.
+    /// [`Self::seat`] answers it only for the roster's entry at that same
+    /// generation. Each seat row replaces it in the row's own step, live
+    /// and on replay; it is kept past a retirement only so that the
+    /// runtime's own successor of exactly that incarnation reads as the
+    /// seat it follows, and a mob reset forgets it.
+    #[serde(skip)]
+    seats: BTreeMap<AgentIdentity, crate::runtime::SeatReading>,
     /// The sessions whose member comms endpoint (and so its public key) a
     /// journal row of this mob recorded: a `MemberSpawned` or a
     /// `MemberSessionBindingRecovered` row naming the session with its
@@ -489,6 +498,10 @@ impl Roster {
                     if let Some(entry) = self.entries.get_mut(&recovered.agent_identity) {
                         entry.spawned_by = None;
                     }
+                    if let Some(reading) = self.seats.get_mut(&recovered.agent_identity) {
+                        reading.seat =
+                            crate::MemberSeat::from_older_row(crate::MemberSeatKind::Host, false);
+                    }
                     // The member's last seat row is the one this adoption
                     // found, until its next seat row.
                     self.seats_as_adopted
@@ -571,6 +584,7 @@ impl Roster {
                 self.seat_builds.clear();
                 self.seat_row_labels.clear();
                 self.seats_as_adopted.clear();
+                self.seats.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
             _ => {}
@@ -623,6 +637,7 @@ impl Roster {
             seat_builds: BTreeMap::new(),
             seat_row_labels: BTreeMap::new(),
             seats_as_adopted: BTreeSet::new(),
+            seats: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
                 .into_iter()
@@ -889,6 +904,20 @@ impl Roster {
         self.seats_as_adopted.contains(agent_identity)
     }
 
+    /// The seat record of the member seated under `agent_identity` now: who
+    /// seated its life, as its seat rows say ([`crate::MemberSeat`]). `None`
+    /// when no member is seated under the name.
+    pub(crate) fn seat(&self, agent_identity: &AgentIdentity) -> Option<&crate::MemberSeat> {
+        // Only the reading of the entry's own incarnation is answered: a
+        // name the roster does not hold, and an entry at another generation
+        // than the reading's row, read no seat.
+        let entry = self.entries.get(agent_identity)?;
+        self.seats
+            .get(agent_identity)
+            .filter(|reading| reading.generation == entry.generation)
+            .map(|reading| &reading.seat)
+    }
+
     /// Whether a journal row of this mob recorded the member comms endpoint
     /// of `session_id` (its public key): peers trusted that key, so a seat of
     /// the session whose key pair is missing is refused rather than given a
@@ -953,6 +982,29 @@ impl Roster {
         );
         // A new seat row: the seat is no longer the one an adoption found.
         self.seats_as_adopted.remove(identity);
+        // Who seated the member, as this row says.
+        let session = member_ref.bridge_session_id().cloned();
+        let snapshot = session
+            .as_ref()
+            .and_then(|session_id| self.creation_history.get(session_id).ok().flatten());
+        let seat = match member_spawned.seat_lineage() {
+            // The record the row stores, when it stores one.
+            Some(stored) => crate::MemberSeat::from_stored(stored),
+            None => crate::runtime::seat_of_older_row(
+                member_spawned,
+                snapshot.as_ref(),
+                event.cursor,
+                self.seats.get(identity),
+            ),
+        };
+        self.seats.insert(
+            identity.clone(),
+            crate::runtime::SeatReading {
+                generation: member_spawned.generation,
+                session,
+                seat,
+            },
+        );
         match member_spawned.kickoff_prompt() {
             Some(prompt) => {
                 self.owed_kickoff_prompts.insert(

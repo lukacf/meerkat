@@ -369,6 +369,98 @@ async fn r111_the_composition_publishes_a_held_member_and_releases_its_hold_once
     Ok(())
 }
 
+/// A build context the identity runtime issues carries that runtime's own
+/// services: the mob handle the runtime was built with is the one the host's
+/// customizer is given. The callback bridge names a member's mob from it, so
+/// an identity runtime built for a mob makes every build it issues name
+/// that mob.
+#[tokio::test]
+async fn a_build_context_carries_the_services_of_the_identity_runtime_that_issues_it() -> TestResult
+{
+    let dir = tempfile::tempdir()?;
+    let definition = meerkat_mob::MobDefinition::from_toml(
+        "[mob]\nid = \"build-context-services\"\n\n[profiles.personal]\nmodel = \"gpt-5.5\"\n",
+    )
+    .expect("mob definition");
+    let mob = crate::MobRuntime::bootstrap(
+        crate::MobBootstrapSpec::ephemeral(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            dir.path().to_path_buf(),
+            4,
+            None,
+        )
+        .expect("bootstrap spec"),
+    )
+    .await
+    .expect("bootstrap runtime");
+
+    let alice = identity("personal:alice");
+    let core = Arc::new(HoldingCore::default());
+    bind_live(
+        &core.core,
+        &alice,
+        &meerkat_mob::ProfileName::from("personal"),
+        1,
+        Some(SessionId::new()),
+    )?;
+    let customizer = Arc::new(CountingCustomizer::default());
+    let runtime = Arc::new(
+        IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "build-context-services".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core.clone()),
+            default_timeout: None,
+        })
+        .with_runtime_services(crate::identity_first::AgentRuntimeServices::new(
+            mob.handle(),
+        )),
+    );
+    runtime
+        .set_customizer_tool_registry(Some(CustomizerToolRegistry::new()))
+        .await;
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    let preparer = IdentityBuildPreparer::new(true);
+    preparer.bind(&runtime, None).await;
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::HoldUntilReleased));
+    core.stage_hold(&member_of(&alice));
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
+    runtime.compose_member_builds().await;
+
+    let contexts = customizer
+        .contexts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(contexts.len(), 1, "the composition built the held member");
+    let named = contexts[0]
+        .runtime_services
+        .mob_handle()
+        .map(|mob| mob.mob_id().to_string());
+    assert_eq!(
+        named.as_deref(),
+        Some("build-context-services"),
+        "the context carries the mob handle the identity runtime was built with"
+    );
+    Ok(())
+}
+
 /// R109: once the runtime is composed, a registered identity's build is
 /// prepared inline: the host builds once, its tools are published before
 /// Core's provision, and nothing is held or released.

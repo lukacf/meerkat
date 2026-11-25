@@ -1102,7 +1102,7 @@ async fn gate_with_origin(runtime: &UnifiedRuntime, identity: &str) {
                 "action": format!("release for {identity}"), "actor_id": "worker", "risk_tier": "r3",
             }))
             .expect("request"),
-            Some(meerkat_meta::GatingOrigin {
+            Some(meerkat_meta::GatingOrigin { mob_id: None,
                 identity: identity.to_string(),
                 conversation_id: None,
                 interaction_id: None,
@@ -1257,6 +1257,7 @@ async fn a_memory_conflicts_reason_text_in_the_gating_audit_is_for_an_administra
                 }))
                 .expect("request"),
                 Some(meerkat_meta::GatingOrigin {
+                    mob_id: None,
                     identity: "router".to_string(),
                     conversation_id: None,
                     interaction_id: None,
@@ -1390,6 +1391,7 @@ async fn a_memory_conflict_reaches_neither_the_pending_list_nor_the_gating_strea
             }))
             .expect("request"),
             Some(meerkat_meta::GatingOrigin {
+                mob_id: None,
                 identity: "router".to_string(),
                 conversation_id: None,
                 interaction_id: None,
@@ -1426,6 +1428,7 @@ async fn a_memory_conflict_reaches_neither_the_pending_list_nor_the_gating_strea
             }))
             .expect("request"),
             Some(meerkat_meta::GatingOrigin {
+                mob_id: None,
                 identity: "router".to_string(),
                 conversation_id: None,
                 interaction_id: None,
@@ -7117,6 +7120,7 @@ mod checked_v1_acceptance {
                 }))
                 .expect("gating request"),
                 Some(meerkat_meta::GatingOrigin {
+                    mob_id: None,
                     identity: "router".to_string(),
                     conversation_id: None,
                     interaction_id: None,

@@ -59,6 +59,30 @@ impl ConsoleScheduleDoor for NoSends {
         self.a_person_decides
     }
 
+    fn refuses_every_caller(&self) -> bool {
+        false
+    }
+
+    async fn send(&self, _send: &ConsoleScheduledSend, _delivery_key: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The send path of a Console that requires sign-in and trusts no signing
+/// key: it is one a person decides on, as the check that holds a set reads
+/// it, and it refuses every caller.
+struct AdmitsNobody;
+
+#[async_trait::async_trait]
+impl ConsoleScheduleDoor for AdmitsNobody {
+    fn takes_a_persons_decision(&self) -> bool {
+        true
+    }
+
+    fn refuses_every_caller(&self) -> bool {
+        true
+    }
+
     async fn send(&self, _send: &ConsoleScheduledSend, _delivery_key: &str) -> Result<(), String> {
         Ok(())
     }
@@ -1480,7 +1504,7 @@ async fn a_decision_of_another_kind_is_an_unknown_pending_id() {
         let mut stdio_params = params(&pending_id, &digest);
         stdio_params["approver_id"] = json!("person:bob");
         let names_one = crate::rpc::question_set_methods::gating_decide_names_question_set(
-            &console.runtime,
+            console.runtime.ask_user_slot(),
             &stdio_params,
         );
         rows.push((
@@ -1494,7 +1518,7 @@ async fn a_decision_of_another_kind_is_an_unknown_pending_id() {
     // A question set itself is one the stdio branch takes.
     let set = console.asked(ASKER, "call-1").await;
     let names_the_set = crate::rpc::question_set_methods::gating_decide_names_question_set(
-        &console.runtime,
+        console.runtime.ask_user_slot(),
         &json!({ "pending_id": set }),
     );
     console.stop().await;
@@ -1750,24 +1774,24 @@ async fn the_host_answers_a_set_on_stdio() {
         "answers": [choice("q1", "b"), choice("q2", "x")],
     });
     let unnamed = crate::rpc::question_set_methods::gating_decide_question_set(
-        &console.runtime,
+        console.runtime.ask_user_slot(),
         &params,
         json!(1),
     );
     let phase_after_unnamed = console.row(&pending_id).state.phase;
     params["approver_id"] = json!("person:dana");
     let decided = crate::rpc::question_set_methods::gating_decide_question_set(
-        &console.runtime,
+        console.runtime.ask_user_slot(),
         &params,
         json!(2),
     );
     let again = crate::rpc::question_set_methods::gating_decide_question_set(
-        &console.runtime,
+        console.runtime.ask_user_slot(),
         &params,
         json!(3),
     );
     let dismissed = crate::rpc::question_set_methods::gating_decide_question_set(
-        &console.runtime,
+        console.runtime.ask_user_slot(),
         &json!({
             "pending_id": dismissed_id,
             "approver_id": "person:dana",
@@ -1779,7 +1803,7 @@ async fn the_host_answers_a_set_on_stdio() {
     // The stdio decide reads its request as every gating decide does:
     // the words it takes are the ones it took before.
     let deny = crate::rpc::question_set_methods::gating_decide_question_set(
-        &console.runtime,
+        console.runtime.ask_user_slot(),
         &json!({
             "pending_id": pending_id,
             "approver_id": "person:dana",
@@ -2043,6 +2067,91 @@ async fn a_call_without_a_human_surface_holds_nothing() {
     assert_eq!(cleared, AskUserResult::no_human_surface());
     assert_eq!(emptied, AskUserResult::no_human_surface());
     assert_eq!(open.len(), 1, "only the whole surface held a set");
+}
+
+/// What a Console says of itself when it requires sign-in and trusts no
+/// signing key: it refuses every caller, and it is still one that
+/// identifies people, so a set asked there is held as before. A Console
+/// with a trusted key, and one that requires no sign-in, refuse nobody.
+#[test]
+fn a_console_that_trusts_no_signing_key_refuses_every_caller_and_still_holds_sets() {
+    let enforced = state().decisions;
+    let mut keyless = state().decisions;
+    keyless.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+    let mut open = state().decisions;
+    open.console.require_app_auth = false;
+
+    assert!(!crate::runtime::console_refuses_every_caller(&enforced));
+    assert!(crate::runtime::console_refuses_every_caller(&keyless));
+    assert!(!crate::runtime::console_refuses_every_caller(&open));
+    assert!(
+        crate::runtime::console_takes_a_persons_decision(&keyless, None),
+        "the check that holds a set still reads such a Console as one a person decides on"
+    );
+}
+
+/// The note the asking agent's model reads with `asked`. Where the Console
+/// refuses every caller the set is held as on any Console and the outcome is
+/// `asked`, but the note does not say that a person is being asked: it says
+/// that no person can answer in the Console as it is configured, that the
+/// program that embeds the gateway may still answer, and until when. On a
+/// Console a person can reach the note is the stock one, byte for byte.
+#[tokio::test]
+async fn the_asked_note_says_who_can_answer_where_the_console_admits_nobody() {
+    const STOCK_NOTE: &str = "A person is being asked. This call does not wait for them: the answers arrive \
+         later as an `ask_user_result` input with this `request_id`, by `answer_by` at the \
+         latest.";
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let name = "questions-console-admits-nobody";
+    let decisions = decisions_in(state_dir.path(), name, true);
+    let reachable = ConsoleScheduleDoorSlot::default();
+    reachable.install(Arc::new(NoSends {
+        a_person_decides: true,
+    }));
+    let closed = ConsoleScheduleDoorSlot::default();
+    closed.install(Arc::new(AdmitsNobody));
+    let host_over = |doors: &ConsoleScheduleDoorSlot| {
+        let slot = AskUserSlot::default();
+        slot.fill(AskUserSurface::new(decisions.clone(), doors.served(), name));
+        MemberAskUserHost::new(slot, name.to_string(), ASKER.to_string())
+    };
+
+    let on_a_reachable_console = ask(&host_over(&reachable), "call-1", 3600).await;
+    let where_nobody_is_admitted = ask(&host_over(&closed), "call-2", 3600).await;
+    let held = crate::ask_user::open_question_sets(&decisions)
+        .expect("read")
+        .len();
+
+    // Both sets are held, and both calls answer `asked` with a deadline.
+    assert_eq!(held, 2, "each call holds its set");
+    for result in [&on_a_reachable_console, &where_nobody_is_admitted] {
+        assert_eq!(result.outcome, AskUserOutcome::Asked, "{result:?}");
+        assert_eq!(result.outcome.as_str(), "asked");
+        assert!(result.request_id.is_some(), "{result:?}");
+        assert!(result.answer_by.is_some(), "{result:?}");
+    }
+    assert_eq!(on_a_reachable_console.note, STOCK_NOTE);
+    let note = where_nobody_is_admitted.note.as_str();
+    assert!(
+        note.contains("No person can answer them in this host's Console"),
+        "the note says the Console cannot: {note}"
+    );
+    assert!(
+        note.contains("program that embeds this gateway may still answer"),
+        "the note names who may answer: {note}"
+    );
+    assert!(
+        note.contains("`answer_by`"),
+        "the note names the deadline: {note}"
+    );
+    assert!(
+        !note.contains("A person is being asked"),
+        "the note does not say that a person is being asked: {note}"
+    );
+    let lowered = note.to_lowercase();
+    for never in ["nobody can answer", "no one can answer", "no_human_surface"] {
+        assert!(!lowered.contains(never), "the note says `{never}`: {note}");
+    }
 }
 
 /// The names of the decision store's files under `dir`: the store itself
@@ -2847,7 +2956,7 @@ async fn a_refusal_of_the_decision_is_typed() {
         let mut stdio_params = params;
         stdio_params["approver_id"] = json!("person:dana");
         let on_stdio = crate::rpc::question_set_methods::gating_decide_question_set(
-            &console.runtime,
+            console.runtime.ask_user_slot(),
             &stdio_params,
             json!(1),
         );
@@ -3547,6 +3656,88 @@ async fn a_hidden_set_between_two_its_reader_may_see_hides_neither() {
         "the set between them is named nowhere"
     );
     assert_eq!(empty_with_cursor, 0, "{read}");
+}
+
+/// A host serves any number of mobs with one question surface, built for
+/// its launch mob, and every member build of the host asks through the
+/// launch's one slot. The host a member build is given is of the mob the
+/// build's own binding names: a member of another mob the host serves is
+/// answered that no person can be asked, at once (an answer could not be
+/// routed back to a member of that mob), no question set is held, under
+/// that member's name or any other, and no decision store is written. A
+/// member of the launch mob with the same name, asked beside it, is asked,
+/// and the one set held is its own. The mount of a member build makes its
+/// host in that one place.
+#[tokio::test]
+async fn a_member_of_another_served_mob_is_answered_that_no_person_can_be_asked() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let launch = "questions-launch-mob";
+    let second = "questions-second-mob";
+    let served = ConsoleScheduleDoorSlot::default();
+    served.install(Arc::new(NoSends {
+        a_person_decides: true,
+    }));
+    let decisions = decisions_in(state_dir.path(), launch, true);
+    // The launch's one slot, filled as the runtime fills it: with the
+    // surface of the launch mob.
+    let slot = AskUserSlot::default();
+    slot.fill(AskUserSurface::new(
+        decisions.clone(),
+        served.served(),
+        launch,
+    ));
+    let bound_to = |mob_id: &str| meerkat_core::MobMemberBinding {
+        mob_id: mob_id.to_string(),
+        role: "worker".to_string(),
+        member: ASKER.to_string(),
+    };
+    let of_the_second_mob = slot.member_host(&bound_to(second));
+    let of_the_launch_mob = slot.member_host(&bound_to(launch));
+
+    let answered_the_second_mob = try_ask(&of_the_second_mob, "call-1", 3600).await;
+    let held_after_the_second_mob = crate::ask_user::open_question_sets(&decisions)
+        .expect("read")
+        .len();
+    let stored_after_the_second_mob = state_dir.path().join(DECISIONS_FILE).exists();
+    let answered_the_launch_mob = ask(&of_the_launch_mob, "call-1", 3600).await;
+    let held = crate::ask_user::open_question_sets(&decisions).expect("read");
+
+    assert_eq!(
+        answered_the_second_mob,
+        Ok(AskUserResult::no_human_surface()),
+        "a member of another served mob is answered that no person can be asked"
+    );
+    assert_eq!(
+        held_after_the_second_mob, 0,
+        "no question set is held for the member of the second mob"
+    );
+    assert!(
+        !stored_after_the_second_mob,
+        "the call of the member of the second mob writes no decision store"
+    );
+    assert_eq!(
+        answered_the_launch_mob.outcome,
+        AskUserOutcome::Asked,
+        "the member of the launch mob is asked: {answered_the_launch_mob:?}"
+    );
+    assert_eq!(held.len(), 1, "one set is held: the launch mob's member's");
+    assert_eq!(held[0].asker(), ASKER);
+
+    // The mount of a member build asks for that host, and no other place
+    // makes one.
+    let source = include_str!("ask_user.rs");
+    assert_eq!(
+        source
+            .matches("let host = self.member_host(binding);")
+            .count(),
+        1,
+        "the mount gives the tool the host of the build's own binding"
+    );
+    assert_eq!(
+        source.matches("MemberAskUserHost::new(").count(),
+        1,
+        "a member's host is made in one place"
+    );
 }
 
 /// The words the Console ends the rendering of an open question set with,

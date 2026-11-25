@@ -37,6 +37,11 @@ pub(crate) struct SessionMutationGate {
     /// The entry's durability health, whose degradation ends a live wait.
     /// `None` for a session without durable state, which never degrades.
     durability_health: Option<DurabilityHealthHandle>,
+    /// Durable steers admitted under this gate and acknowledged whose
+    /// boundary preparation has not registered with the actor yet. An
+    /// admission announces here while it holds the gate, before it answers
+    /// its caller; the actor's runner keeps its boundary open meanwhile.
+    pending_boundary_admissions: meerkat_core::PendingBoundaryAdmissions,
 }
 
 /// A copy of a [`SessionMutationGate`] that does not keep its entry
@@ -45,6 +50,7 @@ pub(crate) struct SessionMutationGate {
 pub(crate) struct WeakSessionMutationGate {
     mutex: Weak<Mutex<()>>,
     durability_health: Option<DurabilityHealthHandle>,
+    pending_boundary_admissions: meerkat_core::PendingBoundaryAdmissions,
 }
 
 /// How a helper that serves both kinds of waiter takes the gate. Only the
@@ -97,7 +103,14 @@ impl SessionMutationGate {
         Self {
             mutex: Arc::new(Mutex::new(())),
             durability_health,
+            pending_boundary_admissions: meerkat_core::PendingBoundaryAdmissions::new(),
         }
+    }
+
+    /// Where an admission under this gate announces an acknowledged durable
+    /// steer whose boundary preparation is still to register.
+    pub(crate) fn pending_boundary_admissions(&self) -> &meerkat_core::PendingBoundaryAdmissions {
+        &self.pending_boundary_admissions
     }
 
     /// Whether `other` is a copy of this gate: the same entry incarnation.
@@ -128,6 +141,7 @@ impl SessionMutationGate {
         WeakSessionMutationGate {
             mutex: Arc::downgrade(&self.mutex),
             durability_health: self.durability_health.clone(),
+            pending_boundary_admissions: self.pending_boundary_admissions.clone(),
         }
     }
 
@@ -189,6 +203,7 @@ impl WeakSessionMutationGate {
         Some(SessionMutationGate {
             mutex: self.mutex.upgrade()?,
             durability_health: self.durability_health.clone(),
+            pending_boundary_admissions: self.pending_boundary_admissions.clone(),
         })
     }
 }

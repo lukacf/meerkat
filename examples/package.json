@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check:sdk": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext 003-hello-meerkat-ts/main.ts 008-structured-output-ts/main.ts 023-rpc-ide-integration-ts/main.ts 027-skills-v21-invoke-ts/main.ts",
+    "check:sdk": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext 003-hello-meerkat-ts/main.ts 008-structured-output-ts/main.ts 023-rpc-ide-integration-ts/main.ts 027-skills-v21-invoke-ts/main.ts 039-mob-control-ts/main.ts",
     "test:sdk": "node --test tests/sdk-examples.test.mjs"
   },
   "dependencies": {

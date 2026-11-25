@@ -31,6 +31,18 @@
 //!   session its owner no longer binds; an owner that is asked about a
 //!   session it no longer owns answers [`SessionOwnerWakeOutcome::NotOwned`]
 //!   and wakes nothing.
+//! - Owners of sessions no entry names: an owner that does not run in this
+//!   process now has no entries (a mob that is not loaded has no machine to
+//!   publish them), so its members' sessions would read as nobody's. A host
+//!   of such owners (a mob set that loads a mob when something addresses
+//!   it) publishes itself with
+//!   [`SessionOwnerWakeRegistry::publish_owner_of_unnamed_sessions`]. A
+//!   wake asks it only when no entry names the session, or the entry's
+//!   owner answers that it no longer owns it; it decides from the session's
+//!   own stored record whether one of its owners holds the session, starts
+//!   that owner, and hands the wake to the entry the owner then published.
+//!   A read ([`SessionOwnerWakeRegistry::owned`]) never asks it, so a read
+//!   or a cancel starts no owner.
 //! - Boundary: process-local, keyed by session id, one entry per session.
 //!   The registry decides nothing: the owner's answer is the operation's.
 
@@ -77,6 +89,9 @@ pub trait SessionOwnerWaker: Send + Sync {
 #[derive(Default)]
 pub struct SessionOwnerWakeRegistry {
     entries: parking_lot::RwLock<HashMap<SessionId, Weak<dyn SessionOwnerWaker>>>,
+    /// The owners of sessions no entry names, in the order they were
+    /// published. See [`Self::publish_owner_of_unnamed_sessions`].
+    unnamed: parking_lot::RwLock<Vec<Weak<dyn SessionOwnerWaker>>>,
 }
 
 static GLOBAL_SESSION_OWNER_WAKE_REGISTRY: OnceLock<SessionOwnerWakeRegistry> = OnceLock::new();
@@ -110,20 +125,81 @@ impl SessionOwnerWakeRegistry {
         self.entries.read().get(session_id).and_then(Weak::upgrade)
     }
 
-    /// Whether a live owner holds `session_id`. A read: it wakes nothing.
+    /// Publish `owner` as an owner of sessions no entry names: a host of
+    /// owners that do not run in this process now (a mob set that loads a
+    /// mob when something addresses it). [`Self::wake`] asks it only for a
+    /// session whose entry is missing, gone, or answers
+    /// [`SessionOwnerWakeOutcome::NotOwned`]; [`Self::owned`] never asks
+    /// it. Publishing the same owner again changes nothing.
+    pub fn publish_owner_of_unnamed_sessions(&self, owner: Weak<dyn SessionOwnerWaker>) {
+        let mut unnamed = self.unnamed.write();
+        unnamed.retain(|current| current.strong_count() > 0);
+        if !unnamed.iter().any(|current| Weak::ptr_eq(current, &owner)) {
+            unnamed.push(owner);
+        }
+    }
+
+    /// Remove `owner` from the owners of sessions no entry names. Returns
+    /// whether it was one.
+    pub fn retract_owner_of_unnamed_sessions(&self, owner: &Weak<dyn SessionOwnerWaker>) -> bool {
+        let mut unnamed = self.unnamed.write();
+        let published = unnamed.iter().any(|current| Weak::ptr_eq(current, owner));
+        unnamed.retain(|current| current.strong_count() > 0 && !Weak::ptr_eq(current, owner));
+        published
+    }
+
+    /// Whether a live owner holds `session_id`. A read: it wakes nothing,
+    /// and it never asks an owner of sessions no entry names.
     pub fn owned(&self, session_id: &SessionId) -> bool {
         self.owner(session_id).is_some()
     }
 
-    /// Ask `session_id`'s owner to wake its member; the caller found no
-    /// live actor serving the session. `None` when no live owner holds the
-    /// session: the caller proceeds as it would without this registry.
-    pub async fn wake(
+    /// Ask the owner `session_id`'s entry names to wake its member; the
+    /// caller found no live actor serving the session. `None` when no live
+    /// owner's entry names the session. The owners of sessions no entry
+    /// names are not asked: one of them calls this once the owner it hosts
+    /// runs and has published its entries.
+    pub async fn wake_published(
         &self,
         session_id: &SessionId,
     ) -> Option<Result<SessionOwnerWakeOutcome, SessionError>> {
         let owner = self.owner(session_id)?;
         Some(owner.wake_session_owner(session_id).await)
+    }
+
+    /// Ask `session_id`'s owner to wake its member; the caller found no
+    /// live actor serving the session. `None` when no owner holds the
+    /// session: the caller proceeds as it would without this registry.
+    ///
+    /// The owner the session's entry names is asked first. When no entry
+    /// names the session, or its owner answers that it no longer owns it,
+    /// the owners of sessions no entry names are asked in the order they
+    /// were published, and the first answer other than
+    /// [`SessionOwnerWakeOutcome::NotOwned`] is the wake's.
+    pub async fn wake(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Result<SessionOwnerWakeOutcome, SessionError>> {
+        let published = self.wake_published(session_id).await;
+        if !matches!(
+            published,
+            None | Some(Ok(SessionOwnerWakeOutcome::NotOwned))
+        ) {
+            return published;
+        }
+        let unnamed = self
+            .unnamed
+            .read()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        for owner in unnamed {
+            match owner.wake_session_owner(session_id).await {
+                Ok(SessionOwnerWakeOutcome::NotOwned) => {}
+                answer => return Some(answer),
+            }
+        }
+        published
     }
 }
 
@@ -180,5 +256,125 @@ mod tests {
         drop(second);
         assert!(!registry.owned(&session));
         assert!(registry.wake(&session).await.is_none());
+    }
+
+    /// An owner of sessions no entry names, which counts how often it was
+    /// asked and answers what it was scripted with.
+    struct CountingOwner {
+        asked: std::sync::atomic::AtomicUsize,
+        answer: Result<SessionOwnerWakeOutcome, ()>,
+    }
+
+    impl CountingOwner {
+        fn answering(answer: Result<SessionOwnerWakeOutcome, ()>) -> Arc<Self> {
+            Arc::new(Self {
+                asked: std::sync::atomic::AtomicUsize::new(0),
+                answer,
+            })
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl SessionOwnerWaker for CountingOwner {
+        fn wake_session_owner(&self, session_id: &SessionId) -> SessionOwnerWakeFuture {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = self.answer.map_err(|()| SessionError::Busy {
+                id: session_id.clone(),
+            });
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn unnamed(owner: &Arc<CountingOwner>) -> Weak<dyn SessionOwnerWaker> {
+        let owner: Arc<dyn SessionOwnerWaker> = owner.clone();
+        Arc::downgrade(&owner)
+    }
+
+    #[tokio::test]
+    async fn an_owner_of_unnamed_sessions_is_asked_only_on_a_miss_and_never_by_a_read() {
+        let registry = SessionOwnerWakeRegistry::default();
+        let session = SessionId::new();
+        let host = CountingOwner::answering(Ok(SessionOwnerWakeOutcome::Ready));
+        registry.publish_owner_of_unnamed_sessions(unnamed(&host));
+        registry.publish_owner_of_unnamed_sessions(unnamed(&host));
+
+        assert!(
+            !registry.owned(&session),
+            "no entry names the session, and a read asks nobody"
+        );
+        assert_eq!(host.asked(), 0, "the read did not ask the host");
+        assert!(matches!(
+            registry.wake(&session).await,
+            Some(Ok(SessionOwnerWakeOutcome::Ready))
+        ));
+        assert_eq!(host.asked(), 1, "published twice, asked once");
+        assert!(
+            registry.wake_published(&session).await.is_none(),
+            "the entries alone still miss"
+        );
+        assert_eq!(host.asked(), 1);
+
+        // A live entry answers for its session; the host is not asked.
+        let owner: Arc<dyn SessionOwnerWaker> =
+            Arc::new(ScriptedOwner(SessionOwnerWakeOutcome::Ready));
+        registry.publish(session.clone(), weak(&owner));
+        assert!(matches!(
+            registry.wake(&session).await,
+            Some(Ok(SessionOwnerWakeOutcome::Ready))
+        ));
+        assert_eq!(host.asked(), 1);
+
+        assert!(registry.retract_owner_of_unnamed_sessions(&unnamed(&host)));
+        assert!(!registry.retract_owner_of_unnamed_sessions(&unnamed(&host)));
+        assert!(registry.retract(&session, &weak(&owner)));
+        assert!(registry.wake(&session).await.is_none());
+        assert_eq!(host.asked(), 1, "a retracted host is not asked");
+    }
+
+    #[tokio::test]
+    async fn an_entry_that_no_longer_owns_its_session_hands_the_wake_to_the_hosts() {
+        let registry = SessionOwnerWakeRegistry::default();
+        let session = SessionId::new();
+        let closed: Arc<dyn SessionOwnerWaker> =
+            Arc::new(ScriptedOwner(SessionOwnerWakeOutcome::NotOwned));
+        registry.publish(session.clone(), weak(&closed));
+        assert!(matches!(
+            registry.wake(&session).await,
+            Some(Ok(SessionOwnerWakeOutcome::NotOwned))
+        ));
+
+        // Hosts are asked in the order they were published; one that does
+        // not own the session passes it on, and the first other answer is
+        // the wake's: a refusal is an answer. A host published twice is
+        // one host: it is asked once.
+        let stranger = CountingOwner::answering(Ok(SessionOwnerWakeOutcome::NotOwned));
+        let refusing = CountingOwner::answering(Err(()));
+        let never = CountingOwner::answering(Ok(SessionOwnerWakeOutcome::Ready));
+        for host in [&stranger, &stranger, &refusing, &never] {
+            registry.publish_owner_of_unnamed_sessions(unnamed(host));
+        }
+        assert!(matches!(
+            registry.wake(&session).await,
+            Some(Err(SessionError::Busy { .. }))
+        ));
+        assert_eq!(
+            (stranger.asked(), refusing.asked(), never.asked()),
+            (1, 1, 0)
+        );
+
+        // With only hosts that do not own it, the entry's answer stands; a
+        // host that is gone is not asked.
+        assert!(registry.retract_owner_of_unnamed_sessions(&unnamed(&refusing)));
+        let gone = unnamed(&never);
+        drop(never);
+        assert_eq!(gone.strong_count(), 0);
+        assert!(matches!(
+            registry.wake(&session).await,
+            Some(Ok(SessionOwnerWakeOutcome::NotOwned))
+        ));
+        assert_eq!(stranger.asked(), 2);
     }
 }

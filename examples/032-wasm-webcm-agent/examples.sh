@@ -5,13 +5,12 @@
 # WebCM (https://github.com/edubart/webcm) by @edubart — Cartesi Machine
 # RISC-V emulator compiled to WebAssembly.
 #
-# Prerequisites: node, npm, curl (wasm-pack needed if sdks/web not pre-built)
+# Prerequisites: Node 22+, npm (wasm-pack needed if sdks/web not pre-built)
 # Usage: ./examples.sh [--clean]
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-WEBCM_BASE="https://edubart.github.io/webcm"
 WEB_DIR="web"
 PUBLIC_DIR="${WEB_DIR}/public"
 MEERKAT_PKG="${PUBLIC_DIR}/meerkat-pkg"
@@ -28,8 +27,7 @@ fi
 
 # ── Download WebCM WASM bundle ──────────────────────────────────────────────
 
-source ./download-webcm.sh
-download_webcm "$WEBCM_BASE" "$PUBLIC_DIR"
+node ./webcm-cache.mjs "$PUBLIC_DIR"
 
 # ── Build and sync current meerkat WASM runtime (for mob mode) ───────────────
 

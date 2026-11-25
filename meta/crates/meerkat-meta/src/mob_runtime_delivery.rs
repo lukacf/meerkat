@@ -884,7 +884,11 @@ mod tests {
             .await
             .expect("prepare with the host's job source");
         assert!(pending.is_none());
-        let state = runtime.agent_mob_mcp_state.as_ref().expect("bound state");
+        let state = runtime
+            .process
+            .agent_mob_mcp_state
+            .as_ref()
+            .expect("bound state");
         assert_ne!(
             state.continuation_binding_generation(),
             Some(bound_before),
@@ -971,7 +975,11 @@ mod tests {
             .await
             .expect("prepare after policy replacement");
         assert!(pending.is_none());
-        let current = runtime.agent_mob_mcp_state.as_ref().expect("new state");
+        let current = runtime
+            .process
+            .agent_mob_mcp_state
+            .as_ref()
+            .expect("new state");
         assert!(!Arc::ptr_eq(&old, current));
         assert_ne!(current.continuation_binding_generation(), Some(previous));
         assert_eq!(current.detached_delivery_blocked_because(), None);
@@ -1082,7 +1090,11 @@ mod tests {
             .block_on(MobRuntime::bootstrap(fixture.spec))
             .expect("first boot");
         owner_runtime.block_on(first_pass(&fixture.delivery));
-        let running = runtime.runtime_delivery.as_ref().expect("armed delivery");
+        let running = runtime
+            .process
+            .runtime_delivery
+            .as_ref()
+            .expect("armed delivery");
 
         let first = waiter_runtime.block_on(running.retire(std::time::Duration::ZERO));
         assert_eq!(
@@ -1162,6 +1174,7 @@ mod tests {
             let (runtime, pending) = MobRuntime::prepare(spec).await.expect("prepare restore");
             assert!(fixture.delivery.is_running(), "owner is armed on return");
             let state = runtime
+                .process
                 .agent_mob_mcp_state
                 .as_ref()
                 .expect("resolver state");

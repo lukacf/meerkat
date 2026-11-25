@@ -36,7 +36,7 @@ This pack uses:
 
 Complete the [shared prerequisites](../README.md#prerequisites), including
 the console dependencies and Playwright Chromium for both browser lanes.
-Run these commands from the repository root. The live pack requires an
+Run these commands from `meta/` in the repository. The live pack requires an
 OpenAI API key:
 
 ```bash
@@ -52,8 +52,9 @@ Meta's test client and never performs a model call:
 ./examples/001-incident-command-center-pack/topology_examples.sh
 ```
 
-The topology path uses `./scripts/repo-cargo` for the Rust build and server,
-and writes inspectable prepare/resume browser screenshots to
+Both paths use the wrapper at the repository root (`scripts/repo-cargo`) for
+the Rust build and server. The topology path writes inspectable
+prepare/resume browser screenshots to
 `output/playwright/` by default. Set
 `INCIDENT_TOPOLOGY_ARTIFACT_DIR` to choose another artifact directory.
 Its offline module-readiness window is deliberately longer so a clean CI

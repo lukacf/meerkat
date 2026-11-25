@@ -454,11 +454,11 @@ async fn only_the_kept_apart_rules_read_what_a_view_says_of_its_console() -> Tes
         let held = controller.decision_fence(None, None);
         assert_eq!(held.enforced(), unstated.enforced(), "{rules}");
         assert_eq!(
-            held.can_view_agent("alpha"),
+            held.can_view_agent_in(None, "alpha"),
             unstated.can_view_agent("alpha"),
             "{rules}"
         );
-        assert!(!held.can_view_agent("side"), "{rules}");
+        assert!(!held.can_view_agent_in(None, "side"), "{rules}");
     }
 
     // The stock send gate for a host's viewer the console did not identify,
@@ -483,6 +483,7 @@ async fn only_the_kept_apart_rules_read_what_a_view_says_of_its_console() -> Tes
 /// member witness.
 fn no_witness_frame(identity: &str, canary: &str) -> NewConsoleFrame {
     NewConsoleFrame {
+        mob_id: None,
         id: None,
         dedupe_key: format!("kept-apart-row:{identity}:{canary}"),
         timestamp_ms: 2_000,
@@ -938,8 +939,11 @@ async fn an_ended_members_console_schedules_wait_for_the_first_read_of_who_membe
         crate::schedule_wiring::ScheduleFiringHostBinding::external_driver(),
     );
     let mut schedule_of = BTreeMap::new();
+    let default_mob = crate::member_key::DefaultMob::new(runtime.handle().mob_id().clone());
     for member in ["alpha", "alpha-side", "beta"] {
         let send = crate::console_schedules::ConsoleScheduledSend::new(
+            &default_mob,
+            default_mob.mob_id(),
             member.to_string(),
             format!("scheduled-for-{member}"),
             crate::console_schedules::ConsoleScheduleSender::Human {

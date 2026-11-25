@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, ClassVar, Mapping, Sequence, Union
+from typing import Any, ClassVar, Literal, Mapping, Sequence, Union
 
 from .errors import ContractMismatchError, IdentityRefusal
 
@@ -622,7 +622,7 @@ class IdentityDone:
     operation_id: str
     agents: tuple[AgentOutcome, ...] = ()
 
-    outcome: ClassVar[str] = "done"
+    outcome: ClassVar[Literal["done"]] = "done"
 
 
 @dataclass(frozen=True)
@@ -639,7 +639,7 @@ class IdentityPendingDecision:
     decision_id: str
     deadline_ms: int
 
-    outcome: ClassVar[str] = "pending_decision"
+    outcome: ClassVar[Literal["pending_decision"]] = "pending_decision"
 
 
 @dataclass(frozen=True)
@@ -659,7 +659,7 @@ class IdentityPendingPreparation:
     operation_id: str
     agents: tuple[AgentOutcome, ...] = ()
 
-    outcome: ClassVar[str] = "pending_preparation"
+    outcome: ClassVar[Literal["pending_preparation"]] = "pending_preparation"
 
 
 @dataclass(frozen=True)
@@ -670,7 +670,7 @@ class IdentityRefused:
 
     refusal: IdentityRefusal
 
-    outcome: ClassVar[str] = "refused"
+    outcome: ClassVar[Literal["refused"]] = "refused"
 
 
 @dataclass(frozen=True)
@@ -681,7 +681,7 @@ class IdentityOperationUnknown:
 
     operation_id: str
 
-    outcome: ClassVar[str] = "unknown"
+    outcome: ClassVar[Literal["unknown"]] = "unknown"
 
 
 #: The typed outcome of a change.

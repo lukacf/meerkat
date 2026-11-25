@@ -50,6 +50,8 @@ fn save(controller: &AccessController, method: &str, mut payload: Value) -> Valu
             method: method.to_string(),
             params: json!({ "checked_v1": payload }),
         },
+        // A save names no member by a row key.
+        None,
     )
     .expect("an access method")
 }
@@ -229,6 +231,8 @@ fn requests_that_carry_no_table_are_answered_as_before() {
             method: "meta/access/rules/upsert".to_string(),
             params: json!({ "rule": { "id": "x", "actions": ["agent.view"], "agent": ["y"] } }),
         },
+        // A save names no member by a row key.
+        None,
     )
     .expect("an access method");
     assert_eq!(

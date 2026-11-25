@@ -6132,6 +6132,13 @@ impl IdentityRuntime {
         *self.agent_memory.write().await = injector;
     }
 
+    /// Test builds only: the agent memory this runtime delivers at a turn,
+    /// as [`Self::set_agent_memory`] gave it.
+    #[cfg(test)]
+    pub(crate) async fn agent_memory_in_tests(&self) -> Option<AgentMemoryRuntimeInjector> {
+        self.agent_memory.read().await.clone()
+    }
+
     pub async fn agent_memory_supports_recall(&self) -> bool {
         self.agent_memory.read().await.is_some()
     }
@@ -6185,6 +6192,17 @@ impl IdentityRuntime {
             .ok_or_else(|| {
                 AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
             })
+    }
+
+    /// The memory realm this runtime's own agent memory owners key an
+    /// agent's memory by: the realm of the agent memory configuration it
+    /// was given. `None` when it has no agent memory.
+    pub(crate) async fn agent_memory_realm(&self) -> Option<String> {
+        self.agent_memory
+            .read()
+            .await
+            .as_ref()
+            .map(|injector| injector.config().realm)
     }
 
     pub async fn remember_agent_memory(
@@ -6568,6 +6586,15 @@ impl IdentityRuntime {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Test builds only: the topology controller whose operator intent this
+    /// runtime composes, when it was given one.
+    #[cfg(test)]
+    pub(crate) fn topology_controller_in_tests(
+        &self,
+    ) -> Option<crate::topology_control::TopologyController> {
+        self.topology_controller()
     }
 
     pub async fn desired_peer_edges(&self) -> Vec<ManagedPeerEdge> {

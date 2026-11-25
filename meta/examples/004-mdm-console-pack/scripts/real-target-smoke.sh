@@ -3,7 +3,7 @@ set -euo pipefail
 
 pack_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 examples_dir="$(cd "${pack_dir}/.." && pwd)"
-repo_root="$(cd "${examples_dir}/.." && pwd)"
+repo_root="$(cd "${examples_dir}/../.." && pwd)"
 
 # Meerkat 0.7's machine-authority code allocates huge debug-build stack
 # frames. The mdm_mob_target binary sizes its own threads; this export is
@@ -62,7 +62,7 @@ for target_index in $(seq 1 "$target_count"); do
     --listen "$target_listen" \
     --data-dir "$target_data_dir" \
     --binding-out "$binding_file" \
-    --model "${MDM_TARGET_MODEL:-gpt-6-astra}" \
+    --model "${MDM_TARGET_MODEL:-gpt-6.2-astra}" \
     --provider "${MDM_TARGET_PROVIDER:-openai}" \
     >"$target_log" 2>&1 &
   target_pids+=("$!")

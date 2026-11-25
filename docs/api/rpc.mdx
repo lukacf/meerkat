@@ -667,9 +667,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.17"
+      "version": "0.9.18"
     },
-    "contract_version": "0.9.17",
+    "contract_version": "0.9.18",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -999,7 +999,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.17",
+    "agent_version": "0.9.18",
     "model_name": "claude-opus-5"
   }
 }
@@ -4167,7 +4167,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 17},
+    "contract_version": {"major": 0, "minor": 9, "patch": 18},
     "providers": [
       {
         "provider": "anthropic",
@@ -4231,7 +4231,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 17},
+    "contract_version": {"major": 0, "minor": 9, "patch": 18},
     "capabilities": [
       {
         "id": "sessions",
@@ -4897,6 +4897,21 @@ route accepts, or the source cannot be read now. A conflict also names
 `retryable` is `true` only for `supported_levels_unavailable` (the account's
 model list is not loaded): the same request can succeed later with no change.
 Meerkat does not retry a refused level for the caller.
+
+For an automated caller, retry the unchanged request later only if `error.data`
+has `kind: "reasoning_effort_refused"`, `reasoning_effort_refusal.reason` is
+`"supported_levels_unavailable"`, and `retryable` is the boolean `true`.
+If the reason is unrecognized or any of these fields is missing or malformed,
+surface the original error instead of retrying.
+
+`retryable` says the level may be accepted later, not that the refused request
+left nothing: a `session/create` refused inside its first turn, after its
+session was built, keeps that session and its transcript, and the answer
+names no session, so the same create sent again makes a second session.
+
+Do not infer the decision
+from the message or from `supported`: both unreadable and unstated levels
+give `null`, while an empty list means the model or route accepts no level.
 
 The answer is the same wherever the level is refused, with two exceptions:
 a schedule's `create` spec and its prompt action refuse the key itself, with

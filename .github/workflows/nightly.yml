@@ -41,6 +41,12 @@ name: Nightly
 #   meta-docs-lag     - docs/meta mirror vs main: fails while a main commit
 #                       that changed meta/docs after the mirrored one is not
 #                       mirrored (publication has stalled silently)
+#   example-standalone - the standalone example workspaces 034 and 035
+#                       (their tests, then 035's script fixtures); no
+#                       other workflow builds them. It measures: each
+#                       target's seconds go to the job summary
+#   meta-example-006  - Meta example pack 006's keyless script, which
+#                       no other workflow runs
 
 # Hosted-runner slots. The account runs at most 40 hosted jobs at once,
 # shared with every pull request and main push, and nightly once held 22 of
@@ -51,7 +57,9 @@ name: Nightly
 #      in parallel);
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
-#        release-packaging (143-304 min) > meta-docs-lag (2)
+#        release-packaging (143-304 min) > meta-docs-lag (2) >
+#          example-standalone (not measured yet) > meta-example-006
+#          (not measured yet)
 #        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
 #          machine-verify-deep (3-8, and about 40 for its whole-domain
 #          audit)
@@ -346,6 +354,14 @@ jobs:
           }
           show_resources
           vmstat -t 30 >"${RUNNER_TEMP}/workspace-int-vmstat.log" 2>&1 </dev/null &
+          # Every two minutes, the root file system's free space, for the
+          # step after the tests to print (a logger like vmstat's above).
+          (
+            while :; do
+              echo "space reading [periodic $(date -u +%H:%M:%SZ)]: filesystem of /: $(df -Pk / | awk 'NR == 2 { printf "%d MiB free of %d MiB", $(NF - 2) / 1024, $(NF - 4) / 1024 }')" || true
+              sleep 120 || true
+            done
+          ) >"${RUNNER_TEMP}/workspace-int-disk.log" 2>&1 </dev/null &
           swapfile=/workspace-int-swapfile
           need_gib=40
           if mountpoint -q /mnt; then
@@ -367,6 +383,49 @@ jobs:
           sudo swapon "${swapfile}"
           show_resources
 
+      # Space readings before and after `make test-int`: when the root disk
+      # fills during its build they name the directories that hold the space.
+      # They remove nothing, and nothing here fails the job. Each directory
+      # total is one `du` of a named directory, ended after 60 seconds.
+      - name: Show disk use before the workspace integration-fast tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          space_reading() {
+            local boundary="$1" path="" size="" status=0
+            for path in / "${GITHUB_WORKSPACE:-.}"; do
+              timeout 60 df -Pk -- "${path}" 2>/dev/null |
+                awk -v boundary="${boundary}" -v path="${path}" '
+                  NR == 2 { printf "space reading [%s]: filesystem of %s: %d MiB free of %d MiB\n", boundary, path, $(NF - 2) / 1024, $(NF - 4) / 1024 }
+                  END { if (NR < 2) printf "space reading [%s]: filesystem of %s: unavailable\n", boundary, path }' || true
+            done
+            for path in \
+              "${CARGO_TARGET_DIR:-target}" \
+              "${CARGO_TARGET_DIR:-target}/debug/deps" \
+              "${CARGO_TARGET_DIR:-target}/debug/build" \
+              "${CARGO_HOME:-${HOME}/.cargo}/registry" \
+              "${CARGO_HOME:-${HOME}/.cargo}/git" \
+              "${SCCACHE_DIR:-${HOME}/.cache/sccache}" \
+              "${RUNNER_TEMP:-/tmp}" \
+              /tmp; do
+              if [[ -L "${path}" || ! -d "${path}" ]]; then
+                echo "space reading [${boundary}]: ${path}: no such directory"
+                continue
+              fi
+              status=0
+              size="$(timeout 60 du -skP -- "${path}" 2>/dev/null)" || status=$?
+              size="${size%%$'\t'*}"
+              if [[ "${status}" -eq 124 ]]; then
+                echo "space reading [${boundary}]: ${path}: timed out after 60 s"
+              elif [[ "${size}" =~ ^[0-9]+$ ]]; then
+                echo "space reading [${boundary}]: ${path}: $((size / 1024)) MiB as reported by du (unverified)"
+              else
+                echo "space reading [${boundary}]: ${path}: unavailable"
+              fi
+            done
+          }
+          space_reading "before make test-int" || true
+
       - name: Workspace integration-fast tests
         run: make test-int
 
@@ -382,6 +441,41 @@ jobs:
           grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
           cat "${RUNNER_TEMP}/workspace-int-vmstat.log" || true
           df -h /
+          cat "${RUNNER_TEMP}/workspace-int-disk.log" || true
+          space_reading() {
+            local boundary="$1" path="" size="" status=0
+            for path in / "${GITHUB_WORKSPACE:-.}"; do
+              timeout 60 df -Pk -- "${path}" 2>/dev/null |
+                awk -v boundary="${boundary}" -v path="${path}" '
+                  NR == 2 { printf "space reading [%s]: filesystem of %s: %d MiB free of %d MiB\n", boundary, path, $(NF - 2) / 1024, $(NF - 4) / 1024 }
+                  END { if (NR < 2) printf "space reading [%s]: filesystem of %s: unavailable\n", boundary, path }' || true
+            done
+            for path in \
+              "${CARGO_TARGET_DIR:-target}" \
+              "${CARGO_TARGET_DIR:-target}/debug/deps" \
+              "${CARGO_TARGET_DIR:-target}/debug/build" \
+              "${CARGO_HOME:-${HOME}/.cargo}/registry" \
+              "${CARGO_HOME:-${HOME}/.cargo}/git" \
+              "${SCCACHE_DIR:-${HOME}/.cache/sccache}" \
+              "${RUNNER_TEMP:-/tmp}" \
+              /tmp; do
+              if [[ -L "${path}" || ! -d "${path}" ]]; then
+                echo "space reading [${boundary}]: ${path}: no such directory"
+                continue
+              fi
+              status=0
+              size="$(timeout 60 du -skP -- "${path}" 2>/dev/null)" || status=$?
+              size="${size%%$'\t'*}"
+              if [[ "${status}" -eq 124 ]]; then
+                echo "space reading [${boundary}]: ${path}: timed out after 60 s"
+              elif [[ "${size}" =~ ^[0-9]+$ ]]; then
+                echo "space reading [${boundary}]: ${path}: $((size / 1024)) MiB as reported by du (unverified)"
+              else
+                echo "space reading [${boundary}]: ${path}: unavailable"
+              fi
+            done
+          }
+          space_reading "after make test-int" || true
 
   e2e-fast:
     name: Deterministic e2e lane
@@ -517,7 +611,7 @@ jobs:
       # the bounded adaptive witness, then `machine-verify --all`: 40 minutes
       # with setup and the xtask build on 2026-11-16, and about 50 on the
       # slower kind of runner (see TLC_RUN_CAP_SECS above). The lane's
-      # twenty-four audit shards run in ci.yml's tlc-audits job on every
+      # twenty-seven audit shards run in ci.yml's tlc-audits job on every
       # change scripts/machine-authority-changed matches. The whole lane in
       # one 4-vCPU job needs an estimated 218-260 minutes, and it hit this
       # job's 90-minute limit every night from 2026-11-04.
@@ -1196,3 +1290,358 @@ jobs:
           python3 scripts/check-meta-docs-lag.py \
             --manifest docs/meta/_source.json \
             --max-lag 0
+
+  # Examples 034 and 035 are Cargo workspaces of their own: no workspace lane
+  # compiles them, and ci.yml only checks their lock files. This job builds
+  # both against the checkout's crates with their committed locks and runs
+  # their tests (the examples Makefile's `standalone` target is exactly
+  # these two targets), then example 035's script fixtures.
+  #
+  # It is here and not in ci.yml, and no gate reads it: it cannot hold a
+  # pull request, a push or a release, and a pull request that changes one
+  # of these examples gets no result of these tests before it merges. Its
+  # contracts (scripts/ci-nightly-examples-selftest.mjs) run here too, as
+  # the first step, and in no push or pull-request lane: a change of an
+  # example cannot fail the CI gate through them.
+  #
+  # Its first purpose is to MEASURE: no hosted run of these builds exists
+  # (one job once ran example 035's tests alone in 1909 s). The timed step
+  # writes into the job summary when it started and ended and, for each
+  # target, its seconds, its build seconds and its test seconds apart: the
+  # split is at Cargo's own "Finished" lines, which are copied, and "tests"
+  # is whatever runs after such a line (the lock test of `mdm` included).
+  # Then the fixtures' seconds. Beside each build it says cold, warm or
+  # partly warm, from sccache's own hit and miss counters before and after
+  # that target: cold is no hit, warm is no miss, and "unknown" when
+  # sccache reports no counters or they did not move. No target directory
+  # is cached, so nothing else makes a build warm. Queue seconds are not
+  # printed: these jobs read no API; a first night's evaluation reads them
+  # from the job record, created to started. All three parts run even when
+  # one fails; the step then fails.
+  #
+  # When it fails: nightly-failure-issue.yml writes one line into the
+  # "Nightly failures" issue, the run's address and the failed jobs' names,
+  # and for these two jobs the route in words. The CI owner reads the
+  # nightly run's result and that issue. An infrastructure fault (the
+  # runner, the workflow, the environment) stays with the CI owner. A
+  # content failure (a failing test or assertion of example 034, 035 or
+  # the Meta example pack 006) the CI owner reports to the maintainers with
+  # the run, the job, the revision and the failing command or assertion;
+  # they route it to the Examples owner, who returns a fix or a blocker and
+  # reads the issue in their regular review as a backstop. Nothing mentions
+  # or assigns anyone.
+  #
+  # Not run here: any lint of examples 034 and 035 (no lint target exists,
+  # and example 035's own `make check`, an all-target cargo check, is not
+  # run either); any feature set but the default; example 035's container
+  # suites (its docker-* targets); the examples Makefile's other targets.
+  example-standalone:
+    name: Standalone examples
+    needs: meta-docs-lag
+    if: ${{ !cancelled() && !inputs.graph_only }}
+    runs-on: ubuntu-24.04
+    # Not measured on a hosted runner yet: the limit is generous on purpose
+    # and is to be set from the first nights' summaries.
+    timeout-minutes: 150
+    # The checkout and nothing else: not the workflow's identity token,
+    # which only the graph job uses.
+    permissions:
+      contents: read
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Contracts of the nightly example jobs
+        run: node scripts/ci-nightly-examples-selftest.mjs
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Compile without sccache when its install failed
+        if: ${{ steps.sccache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::warning::sccache-action did not install sccache (see its Setup sccache step); this job compiles without sccache"
+          echo "RUSTC_WRAPPER=" >> "${GITHUB_ENV}"
+
+      - name: Setup mold linker
+        uses: ./.github/actions/setup-mold-ci
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-example-standalone
+          # Registry only, as in the other nightly jobs.
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Standalone example tests (034 and 035) and 035's script fixtures, timed
+        shell: bash
+        run: |
+          codemob() {
+            make -C examples codemob
+          }
+          mdm() {
+            make -C examples mdm
+          }
+          fixtures() {
+            (cd examples/035-mdm-tux-rs && python3 scripts/test-scripts.py)
+          }
+          plain() {
+            printf '%s' "$1" | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^ *//'
+          }
+          # sccache's own counters, "hits misses"; nothing when it reports none.
+          counters() {
+            local line hits="" misses=""
+            while IFS= read -r line; do
+              if [[ "${line}" =~ ^Cache\ hits\ +([0-9]+)$ ]]; then hits="${BASH_REMATCH[1]}"; fi
+              if [[ "${line}" =~ ^Cache\ misses\ +([0-9]+)$ ]]; then misses="${BASH_REMATCH[1]}"; fi
+            done < <(sccache --show-stats 2>/dev/null || true)
+            if [[ -n "${hits}" && -n "${misses}" ]]; then printf '%s %s' "${hits}" "${misses}"; fi
+          }
+          # Cold, warm or partly warm, from the counters before and after a build.
+          warmth() {
+            local before="$1" after="$2" hits misses
+            if [[ -z "${before}" || -z "${after}" ]]; then
+              printf 'unknown'
+              return
+            fi
+            hits=$((${after% *} - ${before% *}))
+            misses=$((${after#* } - ${before#* }))
+            if ((hits < 0 || misses < 0 || hits + misses == 0)); then
+              printf 'unknown'
+            elif ((hits == 0)); then
+              printf 'cold (hits 0, misses %s)' "${misses}"
+            elif ((misses == 0)); then
+              printf 'warm (hits %s, misses 0)' "${hits}"
+            else
+              printf 'partly warm (hits %s, misses %s)' "${hits}" "${misses}"
+            fi
+          }
+          status=0
+          timed() {
+            local name="$1" begun="${SECONDS}" mark="${SECONDS}" phase=build build=0 tests=0 result=passed cargo="" line before
+            before="$(counters)"
+            while IFS= read -r line; do
+              printf '%s\n' "${line}"
+              if [[ "${line}" == *"Finished"*" target(s) in "* ]]; then
+                # The seconds before this line are build only when a "Compiling"
+                # line opened them: a Cargo call with nothing to build prints
+                # "Finished" straight after the tests that ran before it.
+                if [[ "${phase}" == build ]]; then build=$((build + SECONDS - mark)); else tests=$((tests + SECONDS - mark)); fi
+                mark="${SECONDS}"
+                phase=tests
+                cargo+="| Cargo, in ${name}: $(plain "${line}") | | | |"$'\n'
+              elif [[ "${phase}" == tests && "${line}" == *"Compiling"* ]]; then
+                tests=$((tests + SECONDS - mark))
+                mark="${SECONDS}"
+                phase=build
+              fi
+            done < <("${name}" 2>&1)
+            wait "$!" || { result=failed; status=1; }
+            if [[ "${phase}" == build ]]; then build=$((build + SECONDS - mark)); else tests=$((tests + SECONDS - mark)); fi
+            {
+              printf '| make -C examples %s | %s | %s | |\n' "${name}" "$((SECONDS - begun))" "${result}"
+              printf '| make -C examples %s: build | %s | | %s |\n' "${name}" "${build}" "$(warmth "${before}" "$(counters)")"
+              printf '| make -C examples %s: tests | %s | | |\n' "${name}" "${tests}"
+              printf '%s' "${cargo}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          {
+            printf '%s\n' '### Standalone examples' ''
+            printf 'started %s (UTC); queue time is not printed here: read it from the job record (created to started)\n\n' "$(date -u +%H:%M:%SZ)"
+            printf '%s\n' '| part | seconds | result | compiler cache |' '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          timed codemob
+          timed mdm
+          begun="${SECONDS}"
+          checked=passed
+          fixtures || { checked=failed; status=1; }
+          {
+            printf '| example 035 script fixtures | %s | %s | |\n' "$((SECONDS - begun))" "${checked}"
+            printf '| all three parts | %s | | |\n\n' "${SECONDS}"
+            printf 'ended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
+
+  # Meta's example pack 006 (long-term agents): its keyless script runs the
+  # pack's Python program and its TypeScript program, twice each on one
+  # state directory, against rpc_gateway, and checks what each run prints
+  # and that the two languages print the same lines. No workflow ran it.
+  # Here and not in Meta CI, read by no gate, for the reasons of the job
+  # above, and with its route when it fails: an infrastructure fault stays
+  # with the CI owner; a content failure goes through the maintainers to
+  # the Examples owner.
+  #
+  # Three times apart in the summary. The gateway's build, through the
+  # root wrapper, with cold or warm from sccache's counters as above; the
+  # script then takes that binary and builds nothing. The script's package
+  # installs (the Python environment, pip, npm). Its four program runs.
+  # The script is not changed for this: it runs under the shell's own
+  # command trace, one line per command with the second it began, written
+  # to a file that is never printed; the step sums the seconds of the
+  # install commands and of the program runs, and prints "unknown" when the
+  # trace holds no such line. Queue time: as above.
+  #
+  # Not run here: every other Meta example pack.
+  meta-example-006:
+    name: Meta long-term agents example (keyless)
+    needs: example-standalone
+    if: ${{ !cancelled() && !inputs.graph_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # The checkout and nothing else: the script installs packages from the
+    # public registries.
+    permissions:
+      contents: read
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Contracts of the nightly example jobs
+        run: node scripts/ci-nightly-examples-selftest.mjs
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Compile without sccache when its install failed
+        if: ${{ steps.sccache.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::warning::sccache-action did not install sccache (see its Setup sccache step); this job compiles without sccache"
+          echo "RUSTC_WRAPPER=" >> "${GITHUB_ENV}"
+
+      - name: Setup mold linker
+        uses: ./.github/actions/setup-mold-ci
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-meta-example-006
+          # Registry only, as in the other nightly jobs.
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+
+      - name: Long-term agents example (keyless), timed
+        shell: bash
+        run: |
+          gateway() {
+            ./scripts/repo-cargo build --locked -p meerkat-meta --bin rpc_gateway
+          }
+          # The script, with the gateway built above and under the shell's
+          # command trace: one line per command, with the second it began.
+          example() {
+            # shellcheck disable=SC2016
+            META_GATEWAY_BIN="${binary}" BASH_XTRACEFD=9 PS4='+ ${SECONDS} ' \
+              bash -x meta/examples/006-long-term-agents/examples.sh 9> "${trace}"
+          }
+          # sccache's own counters, "hits misses"; nothing when it reports none.
+          counters() {
+            local line hits="" misses=""
+            while IFS= read -r line; do
+              if [[ "${line}" =~ ^Cache\ hits\ +([0-9]+)$ ]]; then hits="${BASH_REMATCH[1]}"; fi
+              if [[ "${line}" =~ ^Cache\ misses\ +([0-9]+)$ ]]; then misses="${BASH_REMATCH[1]}"; fi
+            done < <(sccache --show-stats 2>/dev/null || true)
+            if [[ -n "${hits}" && -n "${misses}" ]]; then printf '%s %s' "${hits}" "${misses}"; fi
+          }
+          # Cold, warm or partly warm, from the counters before and after a build.
+          warmth() {
+            local before="$1" after="$2" hits misses
+            if [[ -z "${before}" || -z "${after}" ]]; then
+              printf 'unknown'
+              return
+            fi
+            hits=$((${after% *} - ${before% *}))
+            misses=$((${after#* } - ${before#* }))
+            if ((hits < 0 || misses < 0 || hits + misses == 0)); then
+              printf 'unknown'
+            elif ((hits == 0)); then
+              printf 'cold (hits 0, misses %s)' "${misses}"
+            elif ((misses == 0)); then
+              printf 'warm (hits %s, misses 0)' "${hits}"
+            else
+              printf 'partly warm (hits %s, misses %s)' "${hits}" "${misses}"
+            fi
+          }
+          status=0
+          trace="${RUNNER_TEMP}/pack-006-trace"
+          started="$(date -u +%H:%M:%SZ)"
+          before="$(counters)"
+          built=passed
+          gateway || { built=failed; status=1; }
+          build="${SECONDS}"
+          cache="$(warmth "${before}" "$(counters)")"
+          ran="not run" whole=0 stamped="" installs=0 runs=0 other=0 seen=0
+          if [[ "${status}" == 0 ]]; then
+            binary="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rpc_gateway" || true
+            ran=passed
+            example || { ran=failed; status=1; }
+            whole=$((SECONDS - build))
+            kind="" at=0
+            while IFS= read -r line; do
+              if [[ ! "${line}" =~ ^\++\ ([0-9]+)\ (.*)$ ]]; then continue; fi
+              now="${BASH_REMATCH[1]}" words="${BASH_REMATCH[2]}" stamped=yes
+              case "${kind}" in
+                installs) installs=$((installs + now - at)) ;;
+                runs) runs=$((runs + now - at)) ;;
+                other) other=$((other + now - at)) ;;
+              esac
+              at="${now}"
+              case "${words}" in
+                *" -m venv "* | *" -m pip install "* | "npm install "* | "npm run build "* | "npm ci "*)
+                  kind=installs
+                  ;;
+                *"/main.py" | "npx tsx "* | *" npx tsx "*)
+                  kind=runs
+                  seen=$((seen + 1))
+                  ;;
+                *)
+                  kind=other
+                  ;;
+              esac
+            done < "${trace}"
+          fi
+          {
+            printf '%s\n' '### Meta long-term agents example' ''
+            printf 'started %s (UTC); queue time is not printed here: read it from the job record (created to started)\n\n' "${started}"
+            printf '%s\n' '| part | seconds | result | compiler cache |' '| --- | --- | --- | --- |'
+            printf '| gateway build | %s | %s | %s |\n' "${build}" "${built}" "${cache}"
+            printf '| the script: Python and TypeScript, twice each | %s | %s | |\n' "${whole}" "${ran}"
+            if [[ -n "${stamped}" ]]; then
+              printf '| the script: package installs (the Python environment, pip, npm) | %s | | |\n' "${installs}"
+              printf '| the script: the program runs (%s of 4 seen) | %s | | |\n' "${seen}" "${runs}"
+              printf '| the script: its other commands | %s | | |\n' "${other}"
+            elif [[ "${ran}" != "not run" ]]; then
+              printf '| the script: package installs and program runs apart | unknown | | |\n'
+            fi
+            printf '\nended %s (UTC)\n' "$(date -u +%H:%M:%SZ)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"

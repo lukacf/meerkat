@@ -1,4 +1,14 @@
 import { subscribeTimelineWithRecovery } from "./timeline-recovery";
+import {
+  answerUnderRowKeys,
+  ConsoleMobNotLoadedError,
+  ConsoleMemberDoorUnknownError,
+  createConsoleMobAddressing,
+  listedMobsOf,
+  memberMobId,
+  type ConsoleMobAddressing,
+  type MemberDoor,
+} from "./mob-door";
 import type { ConsoleTimelineSubscriptionOptions, ConsoleTransportState } from "./timeline-subscription";
 import {
   type ConsoleWorkbenchTarget,
@@ -6,6 +16,12 @@ import {
 } from "./targets";
 import {
   CONSOLE_BLOB_PATH_PREFIX,
+  CONSOLE_HOST_SCOPED_RPC_METHODS,
+  CONSOLE_MEMBER_PARAMS_BY_METHOD,
+  CONSOLE_MOB_OPEN_METHOD,
+  CONSOLE_MOBS_SELECTOR_EVERY,
+  CONSOLE_MOBS_SELECTOR_HOST_LIST_METHODS,
+  CONSOLE_MOBS_SELECTOR_PARAM,
   CONSOLE_REST_PATHS,
   CONSOLE_RPC_METHODS,
 } from "./contract";
@@ -14,6 +30,7 @@ import {
   callerScopeParam,
   consoleCallerUnknownFailure,
   fetchJson,
+  mobIdParam,
   queryTimeline,
   sendConsole,
   sendConsoleMultipart,
@@ -51,6 +68,8 @@ export interface ConsoleFact<T> {
 
 export interface ConsoleCapabilities {
   methods: string[];
+  /** The feature names the gateway lists (`feature_capabilities`), when it lists any. */
+  featureCapabilities?: string[];
   version?: string;
   readOnly?: boolean;
   runtime_capabilities?: unknown;
@@ -71,6 +90,12 @@ export interface ConsoleWhoami {
 
 export interface ConsoleTimelineQueryInput {
   signal?: AbortSignal;
+  /** A read the console makes on its own (a refresh, a repair after a gap
+   * in the stream, a refresh after a frame), not a person's act. The stock
+   * transport holds it back for a member whose mob is listed as not loaded
+   * (`ConsoleMobNotLoadedError`): nothing is sent, so the mob stays not
+   * loaded until someone asks for it. */
+  automatic?: boolean;
   identity?: string;
   conversationId?: string;
   after?: string;
@@ -201,6 +226,9 @@ type ConsoleCommandSpec = {
 };
 
 const LEGACY_INSPECT_IDENTITY_METHOD = "meta/inspect_identity";
+
+/** What the name of every work graph method begins with. */
+const WORKGRAPH_METHOD_PREFIX = "meta/workgraph/";
 
 // The panes an agent's record is changed and read from: the roster and the
 // agent's own chat and details.
@@ -528,6 +556,23 @@ export interface ConsoleCommandRequest {
   params?: Record<string, unknown>;
   /** As for a send: the caller the command is made for. */
   expectedCallerScope?: string | null;
+  /** As for a timeline read: a command the console makes on its own is held
+   * back for a member whose mob is listed as not loaded. */
+  automatic?: boolean;
+  /**
+   * The row the person acted on, by the console's key for it, where the
+   * caller knows it. Its door is the command's door, whatever name the
+   * params carry: a name taken from an answer is never read as a member
+   * of the launch mob, and a command that names no member (a held change
+   * by its request id, an agent's directory) still reaches that door.
+   */
+  about?: string;
+  /**
+   * The command acts on a value of the launch mob's door that names no
+   * row (the docked work graph): it goes to that door, and is not sent
+   * when its params name a member behind another door.
+   */
+  launchDoor?: boolean;
 }
 
 export interface ConsoleCommandResult {
@@ -552,6 +597,10 @@ export interface MetaConsoleTransport {
   send(input: ConsoleSendInput): Promise<ConsoleTimelineAccepted>;
   executeCommand?(input: ConsoleCommandRequest): Promise<ConsoleCommandResult>;
   upload?(input: ConsoleUploadInput): Promise<ConsoleUploadResult>;
+  /// A person opened a mob the gateway lists as asleep: one ordinary request
+  /// names it, and the mob wakes for it. Nothing is sent for a mob that has
+  /// no door of its own.
+  openMob?(mobId: string): Promise<void>;
   /// Reads a stored blob's bytes with this transport's own request
   /// authority, the credentials the host gives every Console request.
   /// The Console shows stored images from these bytes; a bare
@@ -559,6 +608,12 @@ export interface MetaConsoleTransport {
   /// with its image media type. `blobUrl` stays a projection-only resolver.
   readBlob?(input: ConsoleBlobReadInput): Promise<Blob>;
   blobUrl?(blobId: string): string;
+  /// What this connection knows of the gateway's mobs: whether a request may
+  /// name a mob, and the door of each member. The stock transport keeps it
+  /// and addresses every member through it; a request path that does not go
+  /// through the transport reads the member's door here. A transport without
+  /// it names no mob.
+  mobAddressing?: ConsoleMobAddressing;
 }
 
 export interface MetaConsoleController {
@@ -632,24 +687,108 @@ export function createHttpConsoleTransport({
     if (unsupported) return undefined;
     throw consoleCallerUnknownFailure();
   };
+  // What this connection knows of the gateway's mobs. It learns whether the
+  // gateway judges a request's mob from the answers of the capability reads
+  // the console makes anyway, and the door of each listed mob from the
+  // experience. Until an answer lists the capability no request names a mob:
+  // a gateway that hosts one mob is sent what it was always sent. From then
+  // on a member is addressed by its door (the mob and the member as that
+  // door knows it), the reads over the host's values ask for every mob the
+  // caller may address, and every frame and acceptance is handed on under
+  // the console's own key for its member.
+  const mobs = createConsoleMobAddressing();
+  const doorOf = (identity: string | undefined): MemberDoor | null => {
+    const named = identity?.trim();
+    return named ? mobs.door(named) : null;
+  };
   return {
-    loadExperience: () => fetchJson<ConsoleExperience>(baseUrl, CONSOLE_REST_PATHS.experience, timeout()),
+    loadExperience: async () => {
+      const asked = mobs.enabled;
+      const experience = await fetchJson<ConsoleExperience>(
+        baseUrl,
+        `${CONSOLE_REST_PATHS.experience}${asked ? `?${CONSOLE_MOBS_SELECTOR_PARAM}=${CONSOLE_MOBS_SELECTOR_EVERY}` : ""}`,
+        timeout(),
+      );
+      // An answer to a read made before the capability was known lists the
+      // launch mob alone: it never replaces the doors of a later answer.
+      if (asked === mobs.enabled) {
+        const listed = listedMobsOf(experience);
+        mobs.noteMobs(listed.mobs, listed.primaryMobId, experience);
+      }
+      return experience;
+    },
     loadModules: () => fetchJson<ConsoleModulesResponse>(baseUrl, CONSOLE_REST_PATHS.modules, timeout()),
-    capabilities: async () => normalizeCapabilities(
-      await callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.capabilities, {}, timeout()),
-    ),
+    capabilities: async () => {
+      let answer: unknown;
+      try {
+        answer = await callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.capabilities, {}, timeout());
+      } catch (error) {
+        // A gateway that has no such method has answered: it hosts one mob.
+        // Any other failure says nothing of what the gateway hosts.
+        if (isJsonRpcMethodNotFoundError(error)) mobs.noteFeatures(null);
+        throw error;
+      }
+      const capabilities = normalizeCapabilities(answer);
+      mobs.noteFeatures(capabilities.featureCapabilities);
+      return capabilities;
+    },
     whoami,
-    queryTimeline: (input) => queryTimeline(baseUrl, input, input.limit, timeout(), input.signal),
-    subscribeTimeline: (input, onFrame, options) => subscribeTimelineEvents(baseUrl, input, onFrame, {
-      signal: input.signal, onTransportState: input.onTransportState, ...options,
-    }),
+    mobAddressing: mobs,
+    openMob: async (mobId) => {
+      const door = mobs.table.doors.get(mobId.trim());
+      if (!door) return;
+      await callConsoleRpc<unknown>(baseUrl, CONSOLE_MOB_OPEN_METHOD, mobIdParam(door), timeout());
+    },
+    queryTimeline: async (input) => {
+      if (input.automatic && input.identity?.trim() && mobs.heldBack(input.identity.trim())) {
+        throw new ConsoleMobNotLoadedError(input.identity.trim());
+      }
+      if (input.identity?.trim() && mobs.sharedKey(input.identity.trim())) {
+        throw new ConsoleMemberDoorUnknownError(input.identity.trim(), CONSOLE_RPC_METHODS.queryTimeline);
+      }
+      const door = doorOf(input.identity);
+      const page = await queryTimeline(
+        baseUrl,
+        door?.mobId ? { ...input, identity: door.identity, mobId: door.mobId } : { ...input, everyMob: !door && mobs.enabled },
+        input.limit,
+        timeout(),
+        input.signal,
+      );
+      // A frame of a mob the list does not hold is not handed on.
+      return mobs.enabled
+        ? { ...page, frames: page.frames.flatMap((frame) => { const keyed = mobs.frame(frame, door?.mobId); return keyed ? [keyed] : []; }) }
+        : page;
+    },
+    subscribeTimeline: (input, onFrame, options) => {
+      const door = doorOf(input.identity);
+      // A member's own stream is served for the launch mob's door only: the
+      // host has one stream, whose frames name their mob. For a member
+      // behind another door the one stream of every mob is opened (no mob
+      // and no member in the request) and that member's frames are handed
+      // on, under the console's key.
+      const own = door?.mobId ? input.identity?.trim() : undefined;
+      return subscribeTimelineEvents(
+        baseUrl,
+        own ? { ...input, identity: undefined, everyMob: () => mobs.enabled } : { ...input, everyMob: door ? false : () => mobs.enabled },
+        (frame) => {
+          const keyed = mobs.frame(frame);
+          if (keyed && (!own || keyed.identity === own)) onFrame(keyed);
+        },
+        { signal: input.signal, onTransportState: input.onTransportState, ...options },
+      );
+    },
     send: async (input) => {
       const handlingMode = input.handlingMode ?? "queue";
+      if (mobs.sharedKey(input.identity)) {
+        throw new ConsoleMemberDoorUnknownError(input.identity, CONSOLE_RPC_METHODS.send);
+      }
       const scope = await callerScope(input.expectedCallerScope);
-      if (input.attachments?.length) {
-        return sendConsoleMultipart(
+      const door = mobs.door(input.identity);
+      const mobId = door.mobId ?? undefined;
+      const accepted = input.attachments?.length
+        ? await sendConsoleMultipart(
           baseUrl,
-          input.identity,
+          door.identity,
           input.content,
           input.attachments,
           input.origin,
@@ -657,28 +796,115 @@ export function createHttpConsoleTransport({
           handlingMode,
           timeout(),
           scope,
+          mobId,
+        )
+        : await sendConsole(
+          baseUrl,
+          door.identity,
+          input.content,
+          input.origin,
+          input.idempotencyKey,
+          handlingMode,
+          timeout(),
+          scope,
+          mobId,
         );
-      }
-      return sendConsole(
-        baseUrl,
-        input.identity,
-        input.content,
-        input.origin,
-        input.idempotencyKey,
-        handlingMode,
-        timeout(),
-        scope,
-      );
+      // The door answers with the member as it knows it: the console keeps
+      // the acceptance under its own key for that member.
+      return mobId
+        ? { ...accepted, identity: mobs.rowKey({ mob_id: mobId, identity: accepted.identity }) ?? accepted.identity }
+        : accepted;
     },
     executeCommand: async (input) => {
       const spec = commandSpec(input.command);
-      const params = { ...(input.params || {}) };
+      let params: Record<string, unknown> = { ...(input.params || {}) };
       if (identityCommandMethods.has(spec.method)) {
         const identity = stringValue(params.identity) || identityForCommandTarget(input.target);
         if (!identity) {
           throw new Error(`${input.command} requires an identity-addressed target`);
         }
         params.identity = identity;
+      }
+      // A command about a member goes to the member's door: the mob, and the
+      // member as that door knows it, wherever the contract says the
+      // command's method names a member. A method of the host answers from
+      // the host's values: it is sent no mob. A command the console makes on
+      // its own is not made for a member whose mob is listed as not loaded.
+      const hostMethod = hostScopedMethods.has(spec.method);
+      const memberPaths = hostMethod ? [] : memberPathsByMethod.get(spec.method) ?? [];
+      const members = memberPaths
+        .flatMap((path) => valuesAtPath(params, path))
+        .filter((name): name is string => typeof name === "string" && name.trim() !== "");
+      // The word that names the member at the top of the params: the answer
+      // names it by the same word.
+      const memberParam = memberPaths.find((path) => path.length === 1 && typeof params[path[0]] === "string")?.[0] ?? null;
+      // The row the person acted on, where the caller names it: its door is
+      // the command's door.
+      const about = !hostMethod && params.mob_id === undefined && typeof input.about === "string" && input.about ? input.about : null;
+      // A command on a value of the launch mob's door that names no row is
+      // that door's, as one sent for a row behind it is.
+      // So is a work graph command that names no row: the graph read with
+      // no row is that door's, and a work item is reassigned within the mob
+      // whose graph holds it.
+      const ofTheLaunchDoor = !hostMethod && params.mob_id === undefined
+        && (input.launchDoor === true || (!about && spec.method.startsWith(WORKGRAPH_METHOD_PREFIX)));
+      const aboutDoor: MemberDoor | null = about ? mobs.door(about) : ofTheLaunchDoor ? { mobId: null, identity: "" } : null;
+      // The doors the command's members are behind. One request reaches one
+      // door, and the launch mob's door is a door: a command whose members
+      // are behind two is not sent. A member is behind the launch mob's
+      // door when its row was read there, or its key names a listed mob
+      // served through that door. Where the command is sent for a row of a
+      // hosted mob's door, a bare name is the name that door's own answer
+      // gave and stays that door's: only a key of a listed mob's member
+      // counts as a member behind another door. A key two rows spell for
+      // two members is addressed nowhere.
+      const shared = [about, ...members].find((name) => name && mobs.sharedKey(name));
+      if (params.mob_id === undefined && shared) {
+        throw new ConsoleMemberDoorUnknownError(shared, spec.method);
+      }
+      const doors = new Set<string>();
+      if (aboutDoor?.mobId) doors.add(aboutDoor.mobId);
+      let behindTheLaunchDoor = aboutDoor !== null && aboutDoor.mobId === null;
+      for (const member of members) {
+        const own = mobs.door(member).mobId;
+        if (own) doors.add(own);
+        else if (aboutDoor?.mobId ? memberMobId(member, mobs.table) !== null : mobs.behindTheLaunchDoor(member)) behindTheLaunchDoor = true;
+      }
+      if (params.mob_id === undefined && (doors.size > 1 || (doors.size === 1 && behindTheLaunchDoor))) {
+        throw new ConsoleMemberDoorUnknownError(about ?? members[0] ?? "", spec.method);
+      }
+      // Any other command that names a member of a mob with a door of its
+      // own is not sent: the contract names no member for its method (or
+      // the command carries none of the method's member words), and sent as
+      // it is it would be answered for a launch member of the same name.
+      if (!hostMethod && members.length === 0 && !aboutDoor?.mobId && params.mob_id === undefined && typeof params.identity === "string" && mobs.door(params.identity).mobId) {
+        throw new ConsoleMemberDoorUnknownError(params.identity, spec.method);
+      }
+      if (input.automatic) {
+        const held = members.find((member) => mobs.heldBack(member)) ?? (about && mobs.heldBack(about) ? about : undefined);
+        if (held) throw new ConsoleMobNotLoadedError(held);
+      }
+      let doorMobId: string | null = null;
+      const doorMob = params.mob_id === undefined ? aboutDoor?.mobId ?? [...doors][0] ?? null : null;
+      if (doorMob) {
+        // Each member the command names is written as that door knows it:
+        // the console's key of a member behind this door is rewritten, a
+        // bare name (as the door's own answer gives it) is left as the
+        // door's.
+        const asTheDoorKnowsIt = (name: string): string => {
+          const own = mobs.door(name);
+          return own.mobId === doorMob ? own.identity : name;
+        };
+        for (const path of memberPaths) params = mapAtPath(params, path, asTheDoorKnowsIt) as Record<string, unknown>;
+        params = { ...params, ...mobIdParam(doorMob) };
+        doorMobId = doorMob;
+      }
+      // A list of the host that names agents answers, of the entries agents
+      // made, those of the launch mob's agents alone unless it is asked for
+      // every mob. It is asked so wherever the gateway judges a request's
+      // mob; elsewhere the request is the one it always was.
+      if (everyMobHostLists.has(spec.method) && params[CONSOLE_MOBS_SELECTOR_PARAM] === undefined) {
+        Object.assign(params, mobs.everyMob());
       }
       Object.assign(params, callerScopeParam(await callerScope(input.expectedCallerScope)));
       input.signal?.throwIfAborted();
@@ -697,7 +923,8 @@ export function createHttpConsoleTransport({
       return {
         command: input.command,
         accepted: true,
-        result,
+        // The door answered with its members as it knows them.
+        result: doorMobId ? answerUnderRowKeys(result, doorMobId, mobs.table, memberParam) : result,
       };
     },
     upload: async (input) => uploadConsoleBlobMultipart(baseUrl, input, timeout(), await callerScope(input.expectedCallerScope)),
@@ -854,8 +1081,12 @@ function normalizeCapabilities(value: unknown): ConsoleCapabilities {
   const methods = Array.isArray(record.methods)
     ? Array.from(new Set(record.methods.filter((method): method is string => typeof method === "string" && method.trim().length > 0)))
     : [];
+  const features = Array.isArray(record.feature_capabilities)
+    ? record.feature_capabilities.filter((name): name is string => typeof name === "string" && name.length > 0)
+    : null;
   return {
     methods,
+    ...(features ? { featureCapabilities: features } : {}),
     version: typeof record.version === "string" ? record.version : undefined,
     ...(typeof record.read_only === "boolean" ? { readOnly: record.read_only } : {}),
     runtime_capabilities: record.runtime_capabilities,
@@ -918,6 +1149,44 @@ function isConsoleCommandName(command: unknown): command is ConsoleCommandName {
 
 function identityForSendTarget(target: ConsoleWorkbenchTarget): string | null {
   return target.kind === "meta/identity-chat" && "identity" in target ? target.identity : null;
+}
+
+/** The methods of the host (contract v0.6.0): they take no mob as a selector of what they answer. */
+const hostScopedMethods = new Set<string>(CONSOLE_HOST_SCOPED_RPC_METHODS);
+
+/** The lists of the host that name agents (contract v0.6.0): each takes the word for every mob. */
+const everyMobHostLists = new Set<string>(CONSOLE_MOBS_SELECTOR_HOST_LIST_METHODS);
+
+/**
+ * Where each method names a member of the mob its request is for (contract
+ * v0.6.0, CONSOLE_MEMBER_PARAMS_BY_METHOD): a path into the params, `*` for
+ * every entry of a list. Only these are written as a member's door knows
+ * them. A method that is not here names no member: it takes the mob alone
+ * (a held change by its request id, the directory of an agent's mob). The
+ * console's own "New agent" names its agents in `agents[]` by plain names,
+ * which no door is found for: it creates in the launch mob.
+ */
+const memberPathsByMethod = new Map<string, readonly string[][]>(
+  Object.entries(CONSOLE_MEMBER_PARAMS_BY_METHOD).map(([method, paths]) => [method, paths.map((path) => path.split("."))]),
+);
+
+/** The values at a path of `value`; `*` stands for every entry of a list. */
+function valuesAtPath(value: unknown, path: readonly string[]): unknown[] {
+  if (path.length === 0) return [value];
+  const [head, ...rest] = path;
+  if (head === "*") return Array.isArray(value) ? value.flatMap((entry) => valuesAtPath(entry, rest)) : [];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return valuesAtPath((value as Record<string, unknown>)[head], rest);
+}
+
+/** `value` with every string at a path replaced by `map` of it. What is on the way is copied; the caller's objects are left as they are. */
+function mapAtPath(value: unknown, path: readonly string[], map: (name: string) => string): unknown {
+  if (path.length === 0) return typeof value === "string" ? map(value) : value;
+  const [head, ...rest] = path;
+  if (head === "*") return Array.isArray(value) ? value.map((entry) => mapAtPath(entry, rest, map)) : value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const fields = value as Record<string, unknown>;
+  return head in fields ? { ...fields, [head]: mapAtPath(fields[head], rest, map) } : value;
 }
 
 const identityCommandMethods = new Set<string>([

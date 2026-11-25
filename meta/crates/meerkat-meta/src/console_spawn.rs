@@ -77,16 +77,26 @@ pub(crate) const CONSOLE_ROW_LABELS: [&str; 10] = [
     "singleton",
 ];
 
-/// The label a spawn call carries into its member's row for display, and
-/// which the row's builders therefore read from a label. The census row
-/// holds the builders' label keys against this list and the one above.
+/// The labels a spawn call carries into its member's row, and which the
+/// row's builders therefore read from a label: `display_name`, for display,
+/// and `agent_identity`, which a spawn can carry and which the row builder
+/// drops for a member of a nested mob (such a member is named by its mob
+/// and its name, whatever its labels say). The census row holds the
+/// builders' label keys against this list and the one above.
 #[cfg(test)]
-pub(crate) const CARRIED_ROW_LABELS: [&str; 1] = ["display_name"];
+pub(crate) const CARRIED_ROW_LABELS: [&str; 2] = ["display_name", "agent_identity"];
 
 /// Whether `key` is one of the [`CONSOLE_ROW_LABELS`].
 pub(crate) fn is_console_row_label(key: &str) -> bool {
     CONSOLE_ROW_LABELS.contains(&key)
 }
+
+/// The two of the [`CONSOLE_ROW_LABELS`] that say which mob a member sits in
+/// (`source_mob_id`) and which member created that mob
+/// (`delegate_host_identity`). Only the console's walk of the mobs writes
+/// them, on a nested mob's member: a declaration and an agent with no live
+/// member carry neither.
+pub(crate) const CONSOLE_MOB_LABELS: [&str; 2] = ["source_mob_id", "delegate_host_identity"];
 
 /// The refusal of a spawn call's [`CONSOLE_ROW_LABELS`] entry, naming it.
 pub(crate) fn console_row_label_refusal(key: &str) -> String {
@@ -174,6 +184,29 @@ impl SpawnRegistry {
             .keys()
             .map(|(mob_id, _)| mob_id.clone())
             .collect()
+    }
+
+    /// Keep the entries of the mobs `keep` says yes to and drop every other
+    /// entry, in this copy of the registry: for a reader to whom a mob's
+    /// members have no console identity. Which mob an entry is of is the
+    /// entry's key, never read from the identity's text.
+    pub(crate) fn retain_mobs(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.entries.retain(|(mob_id, _), _| keep(mob_id));
+    }
+
+    /// The entries registered for a member of a nested mob: each as the mob
+    /// the registry keeps it under, the member's name in that mob and its
+    /// console identity (`<mob id>/<name>`,
+    /// [`crate::console_member_ref::nested_member_identity`]). Whether an
+    /// entry is a nested mob's member's is its key's answer: its identity
+    /// is the nested name of the entry's own mob. An identity that merely
+    /// holds a `/` is no nested member's: an entry of another mob (a member
+    /// of the console's own mob can be named so) is not among these.
+    pub(crate) fn nested_rows(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.entries.keys().filter_map(|(mob_id, identity)| {
+            let (mob, name) = crate::console_member_ref::parse_nested_member_identity(identity)?;
+            (mob == mob_id).then_some((mob_id.as_str(), name, identity.as_str()))
+        })
     }
 
     /// End every entry of `mob_id` that was registered for one of the roster
@@ -397,11 +430,68 @@ pub(crate) struct ConsoleSpawnSeed {
 #[derive(Clone)]
 pub(crate) struct ConsoleSpawnSink {
     console_events: ConsoleEventStore,
+    /// The id of the runtime's own mob, when the sink knows it: a member
+    /// spawned into any other mob is registered under its mob and name
+    /// ([`crate::console_member_ref`]), as the console names it.
+    primary_mob_id: Option<String>,
 }
 
 impl ConsoleSpawnSink {
+    /// A sink that does not know its runtime's own mob: every member is
+    /// registered under the identity its seed carries.
     pub(crate) fn new(console_events: ConsoleEventStore) -> Self {
-        Self { console_events }
+        Self {
+            console_events,
+            primary_mob_id: None,
+        }
+    }
+
+    /// The sink of a runtime whose own mob is `primary_mob_id`.
+    pub(crate) fn for_mob(console_events: ConsoleEventStore, primary_mob_id: &str) -> Self {
+        Self {
+            console_events,
+            primary_mob_id: Some(primary_mob_id.to_string()),
+        }
+    }
+
+    /// `mob_id` when it names a mob other than the runtime's own.
+    fn nested_mob<'a>(&self, mob_id: Option<&'a str>) -> Option<&'a str> {
+        let mob_id = mob_id.map(str::trim).filter(|mob_id| !mob_id.is_empty())?;
+        let primary = self.primary_mob_id.as_deref()?;
+        (mob_id != primary).then_some(mob_id)
+    }
+
+    /// The console name of the member whose comms name is `comms_name`
+    /// (the agent performing a spawn): its identity in the runtime's own
+    /// mob, its mob and name in any other. `None` for a name of unknown
+    /// shape, which yields no lineage.
+    pub(crate) fn spawner_console_name(&self, comms_name: &str) -> Option<String> {
+        let identity = spawned_by_from_comms_name(comms_name)?;
+        let spawner_mob = spawner_mob_from_comms_name(comms_name);
+        match self.nested_mob(spawner_mob.as_deref()) {
+            Some(mob_id) => crate::console_member_ref::nested_member_identity(mob_id, &identity),
+            None => Some(identity),
+        }
+    }
+
+    /// This sink for one mob of the host: the launch mob for `None`, and
+    /// for a mob the host serves beside it, a sink over that mob's own
+    /// console events ([`ConsoleEventStore::of_mob`]). What a spawn
+    /// registers through it (the member's runtime ids, its registry entry,
+    /// its kickoff) is written for that mob and for no other, and what is
+    /// read through it is what was registered for that mob: a name is a
+    /// name inside a mob. The sink of a mob the host serves beside the launch
+    /// mob has that mob as its own, so a member of that mob keeps its bare
+    /// name there and a member of a mob below it is named by its mob and
+    /// name; the launch mob's sink keeps the mob it was built for.
+    pub(crate) fn of_mob(&self, mob: Option<&meerkat_mob::MobId>) -> Self {
+        Self {
+            console_events: self.console_events.of_mob(mob),
+            primary_mob_id: match mob {
+                Some(mob) => Some(mob.to_string()),
+                None => self.primary_mob_id.clone(),
+            },
+        }
     }
 
     /// All console identity metadata registered through this sink: the
@@ -647,8 +737,21 @@ impl ConsoleSpawnSink {
     /// the member's session, append its kickoff event.
     /// Idempotent per `(mob_id, member_id, initial_message)`.
     pub(crate) async fn project_spawned_member(&self, seed: &ConsoleSpawnSeed) {
-        let identity = seed.identity.trim();
         let member_id = seed.member_id.trim();
+        // A member spawned into a mob other than the runtime's own is named
+        // by its mob and name, whatever identity its labels claim: its bare
+        // name names a member of the runtime's own mob only.
+        let nested_mob = self.nested_mob(seed.mob_id.as_deref());
+        let nested_identity = nested_mob.and_then(|mob_id| {
+            crate::console_member_ref::nested_member_identity(
+                mob_id,
+                &crate::member_comms_id::runtime_alias_str(member_id),
+            )
+        });
+        if nested_mob.is_some() && nested_identity.is_none() {
+            return;
+        }
+        let identity = nested_identity.as_deref().unwrap_or(seed.identity.trim());
         if identity.is_empty() || member_id.is_empty() {
             return;
         }
@@ -670,12 +773,16 @@ impl ConsoleSpawnSink {
         // Live runtime events arrive keyed by runtime ids — `{member}:{gen}`
         // (and `rt:{member}:{gen}` in identity-first packs). Register both
         // prefixes so every event form resolves to the kickoff's identity.
-        self.console_events
-            .register_runtime_identity(member_id, identity)
-            .await;
-        self.console_events
-            .register_runtime_identity(format!("rt:{member_id}"), identity)
-            .await;
+        // A nested member's runtime ids are not registered: they are its
+        // bare name's, which a member of the runtime's own mob may hold.
+        if nested_mob.is_none() {
+            self.console_events
+                .register_runtime_identity(member_id, identity)
+                .await;
+            self.console_events
+                .register_runtime_identity(format!("rt:{member_id}"), identity)
+                .await;
+        }
 
         // The registry's entry is its mob's: a spawn whose mob is not known
         // registers none, and the member's row alone decides it.

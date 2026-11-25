@@ -7,6 +7,9 @@ export interface ApprovalOrigin {
   identity: string;
   conversationId?: string;
   interactionId?: string;
+  /** The mob the entry carries beside the agent's name (the pair of a
+   * frame); absent for an entry that carries none. */
+  mobId?: string;
 }
 export interface PendingApproval {
   pendingId: string;
@@ -130,7 +133,10 @@ export function normalizePendingApproval(value: unknown): PendingApproval | null
     approvalDeliveryId: text(raw.approval_delivery_id),
     status: raw.status === "expired" ? "expired" : raw.status === "settled" ? "settled" : "pending",
     actions, createdAtMs: millis(raw.created_at_ms), deadlineAtMs: millis(raw.deadline_at_ms),
-    ...(identity ? { origin: { identity, conversationId: text(record?.conversation_id), interactionId: text(record?.interaction_id) } } : {}),
+    ...(identity ? { origin: {
+      identity, conversationId: text(record?.conversation_id), interactionId: text(record?.interaction_id),
+      ...(text(record?.mob_id) ? { mobId: text(record?.mob_id) } : {}),
+    } } : {}),
     raw,
   };
 }

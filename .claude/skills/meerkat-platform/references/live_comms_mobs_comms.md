@@ -100,9 +100,16 @@ require_peer_auth = true                     # default true
 - Since 0.9.4 a steer is durable: its notice is written into the running
   turn's transcript at the next model boundary, every later model request of
   the run sees it, it commits with the run, and one `peer_content_ingested`
-  event is published for it. Steers join one per boundary in arrival order; a
+  event is published for it. Since 0.9.18: at a boundary where
+  a steer has registered its claim, the eligible waiting steers join it, in
+  admission order, each with its own row and event (0.9.17: one per
+  boundary); an acknowledged send is not inclusion in the next request. A
   steer that finds no boundary before the run ends, and a directed delivery,
-  are taken by exactly one follow-up turn. Prompts, lifecycle notices,
+  are taken by exactly one follow-up turn. A steer that still waits when its
+  session is loaded again from the store joins the resumed run's next
+  request when that run resumes, and a steer admitted after the load and
+  before the waiting steer's work has begun joins that request behind it.
+  Prompts, lifecycle notices,
   external events and flow steps steered into a run behave the same. 0.9.3
   and earlier showed a peer or text-only steer to one model request, then
   lost it (no transcript row, no event).

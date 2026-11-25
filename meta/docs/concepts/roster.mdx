@@ -95,29 +95,40 @@ default.
 
 ### When to call `reconcile_edges`
 
-Declared definition wiring (`[wiring] auto_wire_orchestrator = true` or
-`role_wiring` rules) is applied by meerkat only at spawn time and, for the
-orchestrator rule, only from the non-orchestrator side, so the result depends on
-bring-up order. Meta installs the definition's wiring as a reconcilable edge
-policy and converges it with `meta/reconcile_edges` (Python
-`handle.reconcile_edges()`, TypeScript `handle.reconcileEdges()`).
+Use `meta/reconcile_edges` (Python `handle.reconcile_edges()`, TypeScript
+`handle.reconcileEdges()`) to reconcile the selected mob’s dynamic peer wiring.
+The report’s `desired_edges` lists the pairs this call is trying to connect,
+not every pair that can already communicate.
 
-- `meta/ensure_member` already runs that reconcile after every successful
-  ensure, on both the worker plane and the console identity plane. Calling
-  `reconcile_edges` after `ensure_member` is redundant.
-- `meta/reconcile_identity` (Python `runtime.reconcile()`) and the
-  identity-first gateway boot do not: the gateway reconciles definition edges
-  before the roster is materialized. When the definition declares wiring, call
-  `reconcile_edges` once after boot and after each `runtime.reconcile()`.
-- Without declared wiring there is no definition edge policy; the call returns
-  an empty report. Edges from a host `TopologyProvider` converge on every
-  identity restore and reconcile on their own.
-- With a `TopologyProvider`, the provider (plus operator topology intent) owns
-  the identities' edges: reconcile unwires every live edge between two
-  identities that neither the provider nor the definition's wiring declares,
-  including one wired before a restart. Declare an edge in your provider to
-  keep it. Without a provider, reconcile unwires only the edges it wired
-  itself.
+- **Classic gateway:** the default discovery policy matches the definition’s
+  `auto_wire_orchestrator` and `role_wiring` rules against eligible roster
+  members. Each successful worker-plane `meta/ensure_member` runs this
+  reconciliation, so a declared pair can be wired even when the orchestrator
+  is ensured after its workers. No extra call is needed after the ensure.
+  If the host or the spawn already wired a desired pair, it appears in
+  `preexisting_edges`; this policy does not claim that edge. It unwires
+  only edges it wired itself.
+- **Identity-first gateway:** this call uses the host topology provider’s
+  edges, or the identity runtime’s current desired edges if there is no
+  provider, together with operator topology changes. A `role_wiring` rule can
+  connect members at spawn without adding that pair to this dynamic set. An
+  empty `desired_edges` does not mean that the members have no peers. Do not
+  call it after boot or `runtime.reconcile()` just to enumerate spawn-time
+  wiring.
+
+On the identity-first path with a host `TopologyProvider`, an identity edge outside the desired set can
+be removed even if it predates this launch. An edge declared by the definition
+or owned by an identity’s stored declaration is not removed just because the
+provider omits it. Without a provider, identity reconciliation prunes only
+edges it manages.
+
+For the peers recorded on the roster, read `wired_to` from `meta/get_member`
+or `meta/list_members`. For live connectivity, `meta/member_status` instead
+returns `peer_connectivity` when available; it does not return `wired_to`. See [Lightweight roster entries](#lightweight-roster-entries).
+
+The `managed_edges` count belongs to `meta/reconcile_identity`, not to the
+`meta/reconcile_edges` report. See the [RPC reference](/api/rpc#meta/reconcile_edges)
+for the fields returned by edge reconciliation.
 
 ## Roster operations
 
@@ -338,6 +349,11 @@ or the member tool `spawn_member`) or into a child mob it creates
   restart. The member tool `spawn_member` wires the two only when the agent
   passes `auto_wire_parent: true`. The host reaches the member by its member
   id with `meta/send_message`.
+- **In the Console (after 0.9.17).** The member is listed in the roster and the topology
+  with its mob. A child mob is shown as a mob nested under the mob of the
+  member that created it (see [Mobs](/guides/console#mobs)), and its members
+  are named by the mob and their name (`<mob id>/<name>`); listing it wakes
+  no member.
 - **On a host store realm** child mobs are process-bound and do not survive a
   restart, while members of the realm's root mob do (see
   [Keeping a Meta realm in your own database](/guides/unified-runtime#keeping-a-meta-realm-in-your-own-database)).

@@ -9,6 +9,7 @@ import {
   checkSubject,
   effectiveRules,
   familiesFor,
+  hasResourceSelector,
   matrixRows,
   ruleCoverage,
 } from "./access-model";
@@ -137,5 +138,41 @@ describe("approvers", () => {
     expect(accessApprovers({ ...seeded, approvers: { "role:release": { subjects: ["carol@example.com"], groups: ["support-leads"] } } } as ConsoleAccessConfig))
       .toEqual([{ id: "role:release", subjects: ["carol@example.com"], groups: ["support-leads"] }]);
     expect(accessApprovers(seeded)).toEqual([]);
+  });
+});
+
+describe("member_keyed: rules that list mobs", () => {
+  const everyone = { id: "everyone", kind: "everyone" as const, label: "Everyone", groups: [], signedIn: false };
+
+  it("count the mobs as a selector: such a rule is no whole grant and no whole deny", () => {
+    const harbor: ConsoleAccessRule = { id: "harbor", effect: "allow", actions: ["agent.view"], mobs: ["harbor"] };
+    expect(hasResourceSelector(harbor)).toBe(true);
+    expect(hasResourceSelector({ id: "plain", actions: ["agent.view"] })).toBe(false);
+    expect(hasResourceSelector({ id: "plain", actions: ["agent.view"], mobs: [] })).toBe(false);
+    const allowed = cellVerdict([harbor], everyone, { id: "one", label: "One", actions: ["agent.view"] });
+    expect(allowed.state).toBe("some");
+    const denied = cellVerdict(
+      [{ id: "all", effect: "allow", actions: ["agent.view"] }, { ...harbor, id: "no-harbor", effect: "deny" }],
+      everyone,
+      { id: "one", label: "One", actions: ["agent.view"] },
+    );
+    expect(denied.state).toBe("some");
+  });
+
+  it("a deny that lists no mobs overrides in every mob, one that lists mobs only in those", () => {
+    const allow = (id: string, mobs?: string[]): ConsoleAccessRule => ({ id, effect: "allow", actions: ["agent.view"], ...(mobs ? { mobs } : {}) });
+    const deny = (id: string, mobs?: string[]): ConsoleAccessRule => ({ id, effect: "deny", actions: ["agent.view"], ...(mobs ? { mobs } : {}) });
+    const allows = [allow("desks"), allow("harbor-desks", ["harbor"]), allow("quay-desks", ["quay"]), allow("every-desks", ["*"])];
+    const overridden = (rule: ConsoleAccessRule) => ruleCoverage(rule, [...allows, rule], CATALOG).overrides.map((overlap) => overlap.rule.id);
+    // A deny that lists no mobs holds in every mob, as the owner decides it.
+    expect(overridden(deny("no-view"))).toEqual(["desks", "harbor-desks", "quay-desks", "every-desks"]);
+    expect(overridden(deny("no-view-anywhere", ["*"]))).toEqual(["desks", "harbor-desks", "quay-desks", "every-desks"]);
+    // A deny in listed mobs takes nothing from a rule of another mob, of
+    // the default mob (whose id the Console does not know) or of every mob.
+    expect(overridden(deny("no-harbor", ["harbor"]))).toEqual(["harbor-desks"]);
+    expect(overridden(deny("no-ports", ["harbor", "quay"]))).toEqual(["harbor-desks", "quay-desks"]);
+    expect(ruleCoverage(allows[0], [allows[0], deny("no-harbor", ["harbor"])], CATALOG).shadowed).toBe(false);
+    expect(ruleCoverage(allows[1], [allows[1], deny("no-harbor", ["harbor"])], CATALOG).shadowed).toBe(true);
+    expect(ruleCoverage(allows[1], [allows[1], deny("no-view")], CATALOG).shadowed).toBe(true);
   });
 });

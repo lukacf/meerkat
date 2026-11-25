@@ -2211,6 +2211,11 @@ pub(super) enum MobCommand {
     DrainRunsSnapshot {
         reply_tx: oneshot::Sender<Result<super::run_drain::DrainSnapshot, MobError>>,
     },
+    /// Observe whether the mob is idle and decide nothing: the facts an idle
+    /// close is decided on, read on the serialized admission path.
+    ObserveIdle {
+        reply_tx: oneshot::Sender<Result<super::admission_close::MobIdleObservation, MobError>>,
+    },
     /// Close admission if the mob is idle (D67). Decided on the serialized
     /// admission path in the same step that closes.
     CloseIfIdle {
@@ -2630,6 +2635,7 @@ impl MobCommand {
             Self::QueryPhase { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(feature = "runtime-adapter")]
             Self::DrainRunsSnapshot { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ObserveIdle { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CloseIfIdle { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CloseAdmission { .. } => ShutdownAnswerClass::CallerRequest,
         }
@@ -2892,6 +2898,7 @@ impl MobCommand {
             Self::QueryPhase { .. } => "QueryPhase",
             #[cfg(feature = "runtime-adapter")]
             Self::DrainRunsSnapshot { .. } => "DrainRunsSnapshot",
+            Self::ObserveIdle { .. } => "ObserveIdle",
             Self::CloseIfIdle { .. } => "CloseIfIdle",
             Self::CloseAdmission { .. } => "CloseAdmission",
         }

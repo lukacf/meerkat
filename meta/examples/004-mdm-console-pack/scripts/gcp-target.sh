@@ -31,7 +31,7 @@ Optional:
   GCP_IMAGE_FAMILY      default debian-12
   GCP_IMAGE_PROJECT     default debian-cloud
   GCP_SSH_USER
-  MDM_TARGET_MODEL      default gpt-6-astra
+  MDM_TARGET_MODEL      default gpt-6.2-astra
   MDM_TARGET_PROVIDER   default openai
   MDM_GCP_FORWARD_ENV   space-separated env names to copy to the VM
 USAGE
@@ -46,7 +46,7 @@ listen=""
 advertise=""
 site="gcp-live"
 platform="linux-gcp-vm"
-model="${MDM_TARGET_MODEL:-gpt-6-astra}"
+model="${MDM_TARGET_MODEL:-gpt-6.2-astra}"
 provider="${MDM_TARGET_PROVIDER:-openai}"
 
 while [[ $# -gt 0 ]]; do

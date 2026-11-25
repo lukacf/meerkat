@@ -60,7 +60,7 @@ impl Pack for RctPack {
                 "implementer",
                 "rct-implementer-skill",
                 "Implementation agent",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 tools_with_shell.clone(),
             ),
             (
@@ -74,7 +74,7 @@ impl Pack for RctPack {
                 "integration_sheriff",
                 "rct-sheriff-skill",
                 "Integration Sheriff reviewer",
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 tools_with_shell.clone(),
             ),
             (

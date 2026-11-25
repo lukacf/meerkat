@@ -56,7 +56,7 @@ pub async fn handle(
         _ => input.question,
     };
 
-    let model = input.model.unwrap_or_else(|| "gpt-6-astra".to_string());
+    let model = input.model.unwrap_or_else(|| "gpt-6.2-astra".to_string());
 
     // If session_id is provided, continue the existing session with start_turn.
     // Model, system_prompt, and shell are inherited from the original session.

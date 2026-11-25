@@ -44,7 +44,7 @@ impl Pack for ReviewPack {
                 "security",
                 "security-skill",
                 "Security-focused reviewer",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
             ),
             (
                 "perf",

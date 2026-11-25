@@ -795,8 +795,10 @@ Unix sockets, connect to the system name resolver (its socket and its service
 name) and read `/private/etc/ssl` and everything under it, the directory of
 the system's TLS configuration and certificate authority files, without a
 `read` grant; beyond the Unix sockets its configuration grants, the
-resolver's is the only one it can connect to. Without IP access it gets none
-of these and reaches no resolver. A denied read (`deny_read`) still wins over
+resolver's is the only one it can connect to. Without IP access the profile
+adds none of these: a process then creates Unix sockets, and connects to one,
+only where its requirement grants a Unix socket (a `custom` requirement can;
+the `workspace` mode grants none). A denied read (`deny_read`) still wins over
 the file and socket allowances. They reach no other system service and no
 keychain: a program that verifies certificates through the system trust
 service instead of a certificate file is not served by them.

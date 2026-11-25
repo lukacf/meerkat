@@ -308,8 +308,14 @@ answers the check from that WorkGraph:
   open work items. When that list does not answer inside one attempt,
   Meerkat ends the attempt and reports that the check did not answer in
   time; what the check had read is in the log, in a warning it writes as
-  it is dropped
-  (`durable resume gate: a claim scan was dropped at the attempt's limit`).
+  it is dropped. The warning goes by the check's own clock.
+  `durable resume gate: a claim scan was dropped at the attempt's limit`
+  says that the scan was unfinished after a whole attempt.
+  `durable resume gate: a claim scan was dropped before the attempt's limit`
+  is written when the scan was dropped earlier on that clock, and says
+  that the check does not know why. It may be that a caller gave the check
+  up, that the runtime shut down, or that Meerkat's attempt had begun more
+  than a millisecond before the check did.
   Meerkat asks again, up to three attempts. When none of them decides, the
   run is neither resumed nor ended: it stays held, and Meerkat asks again
   the next time the worker's runtime wakes or its session registers.

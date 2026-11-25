@@ -94,9 +94,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the attempt decides the run, a round of three attempts over a list that
   does not answer lasts as long as it did (30 seconds), and no run is
   ended, resumed or held that was not. For an attempt that ran out,
-  Meerkat's detail is still that the admission did not answer in time, and
-  a host that reads the cause of a held run reads it as not answered in
-  time. The gate's own word about it is in the log only.
+  Meerkat's detail is still that the admission did not answer in time.
+  Meerkat keeps the cause of a round's last attempt only, so a host that
+  reads the cause of a held run reads not answered in time when the
+  round's last attempt ran out, and answered unavailable when the last
+  attempt was answered so, whatever the earlier attempts did. The gate's
+  own word about a scan that ran out is in the log only.
 
   That word is one warning, written as the gate's scan is dropped, with
   the run (its session and run id), the pages it had read, the time it
@@ -104,22 +107,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   open work item list. The gate is not told why its scan is dropped, and a
   scan is also dropped when a caller gives the check up or the runtime
   shuts down. It has only its own clock, started when the gate was
-  entered, so the warning speaks of time and never of who dropped the
-  scan:
+  entered, so the warning speaks of time, never of who dropped the scan
+  and never of why the scan took the time it took:
 
   - `durable resume gate: a claim scan was dropped at the attempt's limit`
     when the scan was dropped within one millisecond of a whole attempt
-    on the gate's clock. Its reason says that the list was too slow for
-    one attempt.
+    on the gate's clock. Its reason says that the scan was unfinished
+    after a whole attempt.
   - `durable resume gate: a claim scan was dropped before the attempt's limit`
     when it was dropped earlier. Its reason says what had been read and
-    that the gate does not know why it was dropped; it does not say that
-    the list was slow. Meerkat's cut of an attempt whose clock had been
-    running for more than a millisecond before the gate was entered is
-    logged this way too.
+    that the gate does not know why it was dropped. Meerkat's cut of an
+    attempt whose clock had been running for more than a millisecond
+    before the gate was entered is logged this way too.
 
-  A scan that ended logs neither. A dropped scan draws no verdict from the
-  pages it read and writes nothing. The projected path is untouched.
+  A scan that ended logs neither. The warning covers the scan of the open
+  work item list only: an attempt that runs out elsewhere, in the reads of
+  a run that carries an attention projection, in the read of the store's
+  clock or in the write of a lapsed lease's expiry, leaves no warning of
+  the gate. A dropped scan draws no verdict from the pages it read and
+  writes nothing. The projected path is untouched.
 
 - The WorkGraph resume gate's unavailable reasons are the gate's own
   sentences. A WorkGraph read that failed used to put the store's whole

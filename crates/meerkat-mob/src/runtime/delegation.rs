@@ -2007,9 +2007,21 @@ impl DelegationExecutionService {
             .ok()
             .flatten()
             .map(|scope| scope.session_id().clone());
-        if let (Some(session_id), Some(wait_ends)) = (session_id.as_ref(), seat.wait_ends) {
-            self.bound_helper_tool_calls(seat, identity, session_id, wait_ends)
-                .await;
+        match (session_id.as_ref(), seat.wait_ends) {
+            (Some(session_id), Some(wait_ends)) => {
+                self.bound_helper_tool_calls(seat, identity, session_id, wait_ends)
+                    .await;
+            }
+            // The helper's session could not be read at its seat: its tool
+            // calls run under their own deadlines alone, and the log says so.
+            (None, Some(_)) => tracing::debug!(
+                mob_id = %self.handle.mob_id(),
+                member = %identity,
+                "a delegation's helper runs without an inner deadline: its session could not \
+                 be read when it was seated"
+            ),
+            // A wait too long to name a moment bounds nothing.
+            (_, None) => {}
         }
         seat.note(|seated| {
             seated.hidden_from_caller = Some(hidden);
@@ -2028,11 +2040,15 @@ impl DelegationExecutionService {
     /// itself reads the same bound as its call's deadline.
     ///
     /// Set before the helper's turn is admitted, so its first tool call
-    /// runs under it. A helper whose session this host's runtime does not
-    /// hold (one placed on another host), or a mob that runs without the
-    /// runtime adapter, gets no bound: its tools run under their own
-    /// deadlines alone, as before. The run lifts the bound when it is over
-    /// ([`RunSeat::lift_tool_bound`]).
+    /// runs under it. The bound fails open: a helper gets none, and its
+    /// tools run under their own deadlines alone, as before, when this
+    /// host's runtime holds no bindings for its session at that moment (a
+    /// helper placed on another host; bindings that are not published yet),
+    /// when its session could not be read at the seat, when the mob runs
+    /// without the runtime adapter, and from the moment its session is
+    /// registered anew during the run (the new registration's bindings hold
+    /// a slot of their own, which nobody set). The run lifts the bound when
+    /// it is over ([`RunSeat::lift_tool_bound`]).
     async fn bound_helper_tool_calls(
         &self,
         seat: &RunSeat,

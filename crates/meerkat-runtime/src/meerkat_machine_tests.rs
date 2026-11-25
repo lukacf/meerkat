@@ -62062,6 +62062,15 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         .await
         .expect("completion waiter should resolve")
         .expect("the noop turn should complete");
+    // The completion resolves inside the loop's pass, and the loop goes on
+    // under the session's driver for the rest of that pass. A census asked in
+    // that moment cannot read the session and answers its last completed
+    // reading, which is still the 1 of the unsettled run: a count that was
+    // true a moment earlier, and the helper below rightly refuses any count
+    // but the expected one. So the row first waits for the loop to park: a
+    // parked loop holds no driver, and the census then makes a completed
+    // reading. An ordering, not a retry.
+    await_runtime_loop_parked(machine, &held.session_id).await;
     run_settlement_census_settles_at(
         machine,
         past_run_settlement_notice,

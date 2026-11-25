@@ -3374,6 +3374,57 @@ async fn a_spawn_refused_at_its_build_reaches_the_caller_typed() {
     stand_down_released(runtime, 0).await;
 }
 
+/// The same refusal for a profile that states the enable itself
+/// (`tools.web_search = true`) and a spawn that names no override: the
+/// profile's enable is the build's, so the member is refused at its build
+/// with the same kind and reason as a spawn's own enable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_profile_enabling_web_search_is_refused_at_its_build_as_a_spawns_enable_is() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let runtime = bound_lifetime(
+        dir.path(),
+        &unique("bound-profile-search"),
+        &host,
+        native_team_config(native.path()).await,
+        native_team_binding("b"),
+    )
+    .await;
+    let mut spec = SpawnMemberSpec::new(
+        ProfileName::from("coordinator"),
+        AgentIdentity::from("searcher"),
+    );
+    spec.override_profile = MobDefinition::from_toml(
+        "[mob]\nid = \"override\"\n\n[profiles.searcher]\nmodel = \"gpt-5.3-codex\"\n\
+         provider = \"openai\"\nruntime_mode = \"turn_driven\"\n\
+         [profiles.searcher.tools]\ncomms = true\nweb_search = true\n",
+    )
+    .expect("the override definition")
+    .profiles["searcher"]
+        .as_inline()
+        .cloned();
+    let refused = Box::pin(runtime.handle().spawn_spec(spec))
+        .await
+        .expect_err("the profile's enable is refused at the build");
+    assert!(
+        refused
+            .to_string()
+            .contains("member_auth_binding_uncarried:"),
+        "{refused}"
+    );
+    let data = crate::native_realm::member_build_refusal_data(&MobRuntimeError::Mob(refused))
+        .expect("the refusal keeps its data");
+    assert_eq!(data["kind"], json!("member_auth_binding_uncarried"));
+    assert!(
+        data["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("fallback web search")),
+        "{data}"
+    );
+    stand_down_released(runtime, 0).await;
+}
+
 /// A host's member registration hook, as a host composing the stdio gateway
 /// installs one: it selects each member's own session document as its
 /// destination and the host's policy for its prepared surface, and records

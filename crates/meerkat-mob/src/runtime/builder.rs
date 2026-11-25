@@ -14877,7 +14877,10 @@ fn apply_restore_spec_build_inputs(
     config
         .tool_dispatch_admission
         .clone_from(&restore_spec.tool_dispatch_admission);
-    config.override_web_search = restore_spec.tool_category_overrides.web_search;
+    crate::build::apply_spawn_web_search_override(
+        config,
+        restore_spec.tool_category_overrides.web_search,
+    );
 }
 
 /// The restore spec's budget limits on the build of `req`, as a spawn sets

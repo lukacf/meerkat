@@ -46,6 +46,8 @@ pub mod client;
 pub mod client_compatible;
 #[cfg(test)]
 mod continuity_issuer_replay_tests;
+#[cfg(test)]
+mod foreign_tool_call_id_request_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "experimental-gpt-live"))]
 pub mod gpt_live;
 #[cfg(all(

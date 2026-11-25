@@ -172,7 +172,22 @@ pub(crate) fn open_profile_tool_categories_for_inherited_filter(profile: &mut Pr
     profile.tools.mob = true;
     profile.tools.schedule = true;
     profile.tools.image_generation = true;
+    // `web_search` stays as the profile states it (unset included): the
+    // provider's own search is no tool of the inherited allow-list, and an
+    // enable here would be an explicit one, which fails a build it cannot
+    // serve.
     profile.tools.mcp.clear();
+}
+
+/// A spawn's own web search override on a member's build: it wins when it
+/// names a choice, and `Inherit` leaves what the member's profile set.
+pub(crate) fn apply_spawn_web_search_override(
+    config: &mut AgentBuildConfig,
+    spawn_override: meerkat_core::ToolCategoryOverride,
+) {
+    if !matches!(spawn_override, meerkat_core::ToolCategoryOverride::Inherit) {
+        config.override_web_search = spawn_override;
+    }
 }
 
 /// Parameters for building an agent config from a mob profile.
@@ -368,6 +383,10 @@ pub async fn build_agent_config(
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.schedule);
     config.override_image_generation =
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.image_generation);
+    // Web search is the one category a profile may leave unset: the build
+    // then names no choice, as before the key existed.
+    config.override_web_search =
+        meerkat_core::ToolCategoryOverride::from_override(profile.tools.web_search);
     let should_grant_default_spawn_profiles =
         profile.tools.mob && mob_tool_authority_context.is_none();
     let (override_mob, mut authority) =
@@ -408,7 +427,11 @@ pub async fn build_agent_config(
     // entries the own gate lacks travel apart: the factory installs each
     // where the build mounts it and never refuses for one. The build always
     // names its gate, the empty gate included, so a member resume installs
-    // the gate its profiles define now, never an older recorded one.
+    // the gate its profiles define now, never an older recorded one. Web
+    // search, whose switch a profile may leave unset, is named here only
+    // when the profile states it: unset, the build names no choice (so the
+    // session records none) and the factory mounts the gated family closed,
+    // as before the key existed.
     let own_gate = profile.tools.grant_gated.clone();
     for family in &own_gate.families {
         let category = match family.as_str() {
@@ -417,6 +440,7 @@ pub async fn build_agent_config(
             "workgraph" => &mut config.override_workgraph,
             "schedule" => &mut config.override_schedule,
             "image_generation" => &mut config.override_image_generation,
+            "web_search" if profile.tools.web_search.is_some() => &mut config.override_web_search,
             _ => continue,
         };
         *category = meerkat_core::ToolCategoryOverride::Enable;
@@ -646,6 +670,7 @@ fn enabled_tool_families(tools: &crate::profile::ToolConfig) -> Vec<String> {
         ("mob", tools.mob),
         ("schedule", tools.schedule),
         ("image_generation", tools.image_generation),
+        ("web_search", tools.web_search == Some(true)),
     ]
     .into_iter()
     .filter(|(_, enabled)| *enabled)
@@ -1387,6 +1412,7 @@ mod tests {
                     mob: true,
                     schedule: false,
                     image_generation: true,
+                    web_search: None,
                     read_only: false,
                     deny: Vec::new(),
                     mcp: vec![],
@@ -1426,6 +1452,7 @@ mod tests {
                     mob: false,
                     schedule: false,
                     image_generation: false,
+                    web_search: None,
                     read_only: false,
                     deny: Vec::new(),
                     mcp: vec![],

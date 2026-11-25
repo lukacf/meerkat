@@ -1944,6 +1944,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             mob: tools.mob,
             schedule: tools.schedule,
             image_generation: tools.image_generation,
+            web_search: tools.web_search,
             read_only: tools.read_only,
             deny: tools.deny.clone(),
             mcp: tools.mcp.clone(),

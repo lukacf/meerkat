@@ -14,19 +14,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that `state.refusal` is available on the result of `identities.operation()`.
   The other outcome strings narrow to their corresponding result types.
 
-### Changed
-
-- The agent tool `delegate` of a Meta member owns its wait, as in Meerkat
-  (see Changed in the Meerkat changelog): a call whose wait ends without its
-  helper's result issues a cancel of the helper's run, starts the helper's
-  retirement and answers a typed error that names the helper's mob. Meta's
-  wrapper around the mob tools hands
-  `delegate` the plan the agent loop resolved for the call
-  (`dispatch_resolved_with_context`), so the call ends before the same
-  deadline as before (`[tools.tool_timeouts] delegate`, else `[tools]
-  default_timeout`). Without that forward a `delegate` of a Meta member
-  would have waited 30 minutes by default. The wrapper's own checks and
-  rewrites are unchanged.
+- Before setting the key, read its limits with the released versions in
+  the Meerkat changelog's entry for it: what holds by source for 0.9.15,
+  0.9.16, 0.9.17 and 0.9.18, what was observed on 0.9.16 only, and that
+  state written by this change read by a released 0.9.18 runtime is not
+  verified. No Meta gateway was run for any of them. A mob profile's
+  optional `tools.web_search` (see the Meerkat changelog)
+  is shown where a profile's tool configuration is shown: the rendering of a
+  held identity request has a `Web search: enabled` or `Web search:
+  disabled` line for a profile that states the key, and none for a profile
+  that omits it, whose rendering is unchanged. The profile's digest covers
+  the choice. A gateway launched with `runtime_options.member_auth_binding`
+  refuses, as before, a member whose enabled web search would be served by
+  Meerkat's helper and not by the provider's own search. A member whose
+  enabled web search is served by the provider's own search is reported in
+  the gateway's log, at each build, as a declared tool category missing
+  from its tool catalog: the line is expected, a warning only, and nothing
+  is refused. Rust API: the label constant
+  `meerkat_meta::identity_creation::render::labels::WEB_SEARCH` is new.
+  The gateway binaries bind no member host, so a gateway holds no member
+  placed on another host and the limit on a placed member's stored spec
+  does not arise there; a Rust host that embeds Meta and binds a member
+  host through the mob handle holds such specs.
 
 ### Fixed
 
@@ -144,6 +153,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   are the outcome, the result's fields, the deadline and every default. The
   gateway's start warning for such a Console now names this consequence for
   questions too.
+
+- The agent tool `delegate` of a Meta member owns its wait, as in Meerkat
+  (see Changed in the Meerkat changelog): a call whose wait ends without its
+  helper's result issues a cancel of the helper's run, starts the helper's
+  retirement and answers a typed error that names the helper's mob. Meta's
+  wrapper around the mob tools hands
+  `delegate` the plan the agent loop resolved for the call
+  (`dispatch_resolved_with_context`), so the call ends before the same
+  deadline as before (`[tools.tool_timeouts] delegate`, else `[tools]
+  default_timeout`). Without that forward a `delegate` of a Meta member
+  would have waited 30 minutes by default. The wrapper's own checks and
+  rewrites are unchanged.
 
 ## [0.9.18] - 2026-11-22
 

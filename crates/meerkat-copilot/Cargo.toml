@@ -39,6 +39,10 @@ meerkat-runtime = { workspace = true, features = ["test-support"] }
 [features]
 default = ["oauth"]
 oauth = ["meerkat-auth-core/oauth"]
+# Test-only code: a runtime whose HTTP transport is replaced by scripted
+# answers (`CopilotRuntime::with_scripted_answers_for_tests`). Off in every
+# normal build; a dependent turns it on only through [dev-dependencies].
+test-support = []
 
 [lints]
 workspace = true

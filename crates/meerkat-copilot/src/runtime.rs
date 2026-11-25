@@ -535,6 +535,7 @@ impl CopilotRuntime {
     /// order, one per request, whatever the request's URL. A request past
     /// the end of the script is answered with status 599. The returned
     /// counter reads how many requests the transport has answered.
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn with_scripted_answers_for_tests(
         answers: Vec<CopilotScriptedAnswer>,
@@ -882,6 +883,7 @@ impl Default for CopilotRuntime {
 /// One scripted answer of
 /// [`CopilotRuntime::with_scripted_answers_for_tests`]: an HTTP status and a
 /// JSON body. Test support; not part of the supported API.
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct CopilotScriptedAnswer {
@@ -892,10 +894,12 @@ pub struct CopilotScriptedAnswer {
 /// The number of requests the transport of a runtime made by
 /// [`CopilotRuntime::with_scripted_answers_for_tests`] has answered. Test
 /// support; not part of the supported API.
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[derive(Debug, Clone, Default)]
 pub struct CopilotScriptedRequests(Arc<AtomicU64>);
 
+#[cfg(feature = "test-support")]
 impl CopilotScriptedRequests {
     #[must_use]
     pub fn count(&self) -> u64 {
@@ -905,11 +909,13 @@ impl CopilotScriptedRequests {
 
 /// The transport behind
 /// [`CopilotRuntime::with_scripted_answers_for_tests`].
+#[cfg(feature = "test-support")]
 struct ScriptedAnswersTransport {
     answers: Mutex<std::collections::VecDeque<CopilotScriptedAnswer>>,
     requests: CopilotScriptedRequests,
 }
 
+#[cfg(feature = "test-support")]
 #[async_trait]
 impl CopilotHttpTransport for ScriptedAnswersTransport {
     async fn get(

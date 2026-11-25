@@ -4433,9 +4433,10 @@ impl MobMcpState {
     /// state shared that way has no way to own a background task, so unfinished
     /// councils then need an explicit
     /// [`TemporaryCouncilCoordinator::recover_unfinished`] call. It also runs a
-    /// restore re-attempt, a resume, a create and a stored definition update
-    /// inline in the caller's future, so a dropped caller cancels them
-    /// mid-way, and the next admission of a re-attempt ends an abandoned one.
+    /// restore re-attempt, a resume, a create, a stored definition update and
+    /// the ensure of a session's implicit delegation mob inline in the
+    /// caller's future, so a dropped caller cancels them mid-way, and the next
+    /// admission of a re-attempt ends an abandoned one.
     #[must_use]
     pub fn into_shared(self) -> Arc<Self> {
         Arc::new_cyclic(|weak| {
@@ -10307,7 +10308,10 @@ impl MobMcpState {
     /// a task this state owns, and wait for its answer. A caller dropped
     /// mid-create then cannot leave a created mob outside the managed set,
     /// where no stand-down would see it: the task finishes the insertion (or
-    /// cleans up a duplicate), and a stand-down waits for it.
+    /// cleans up a duplicate), and a stand-down waits for it. The ensure of a
+    /// session's implicit delegation mob runs the same way: it holds no
+    /// admission of its own (the create inside it takes one) and may end by
+    /// reusing a mob.
     #[cfg(not(target_arch = "wasm32"))]
     async fn run_admitted_create<F, T>(&self, name: &'static str, create: F) -> Result<T, MobError>
     where
@@ -14717,7 +14721,10 @@ impl MobMcpState {
             return Ok((cached_mob_id.clone(), false));
         }
 
-        // Get or create a per-owner-bridge-session lock
+        // One call at a time per owner session does what follows. The
+        // session's lock is taken here, in the caller's future: a call that
+        // stops waiting for it (its wait was used up, its turn was
+        // interrupted) leaves the queue, and nothing acts for it later.
         let session_lock = {
             let mut locks = self.implicit_mob_locks.lock().await;
             locks
@@ -14725,8 +14732,57 @@ impl MobMcpState {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _guard = session_lock.lock().await;
+        let guard = session_lock.lock_owned().await;
 
+        // The lock then travels with the work into a task this state owns.
+        // A caller that stops waiting from here on leaves that work running
+        // with the lock held, so a later call of the session waits for it,
+        // under its own bound, and finds its mob: no second creation of the
+        // same mob starts beside the first, and one task per session exists.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(state) = self.self_weak.get().and_then(std::sync::Weak::upgrade) {
+            let bridge_session_id = bridge_session_id.to_string();
+            let model = model.to_string();
+            let self_hosted_server_id = self_hosted_server_id.map(str::to_owned);
+            let auth_binding = auth_binding.cloned();
+            return self
+                .run_admitted_create("implicit mob ensure", async move {
+                    let _guard = guard;
+                    state
+                        .ensure_implicit_mob_locked(
+                            &bridge_session_id,
+                            &model,
+                            provider,
+                            self_hosted_server_id.as_deref(),
+                            auth_binding.as_ref(),
+                        )
+                        .await
+                })
+                .await;
+        }
+        let _guard = guard;
+        self.ensure_implicit_mob_locked(
+            bridge_session_id,
+            model,
+            provider,
+            self_hosted_server_id,
+            auth_binding,
+        )
+        .await
+    }
+
+    /// The part of [`Self::ensure_implicit_mob_on_route`] that runs under
+    /// the owner session's lock, which its caller holds: reuse the
+    /// session's implicit mob, replace one that runs on another route, or
+    /// create it.
+    async fn ensure_implicit_mob_locked(
+        &self,
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<&str>,
+        auth_binding: Option<&meerkat_core::AuthBindingRef>,
+    ) -> Result<(MobId, bool), MobError> {
         if let Some(mob_id) = self
             .find_implicit_mob_for_bridge_session(bridge_session_id)
             .await
@@ -14742,23 +14798,43 @@ impl MobMcpState {
             // The handle of the comparison is released before the destroy
             // starts: the destroy's storage cleanup drains the observer
             // every handle of the mob shares, and refuses while one is held.
-            let on_route = {
+            // The watch of the mob's actor task is taken from that handle
+            // while it is held: a watch holds no store handle, so it outlives
+            // the handle and the destroy below.
+            let (on_route, mut replaced_actor) = {
                 let found = self.managed_handle(&mob_id).await?;
-                Self::implicit_mob_is_on_route(
-                    &found,
-                    bridge_session_id,
-                    model,
-                    provider,
-                    self_hosted_server_id,
-                    auth_binding,
+                (
+                    Self::implicit_mob_is_on_route(
+                        &found,
+                        bridge_session_id,
+                        model,
+                        provider,
+                        self_hosted_server_id,
+                        auth_binding,
+                    ),
+                    found.actor_task_watch(),
                 )
             };
             if on_route {
                 return Ok((mob_id, false));
             }
+            // The replacement is created under the same id. A destroyed
+            // mob's actor replies first and lets go of what it held under
+            // that id afterwards (its supervisor's name among it), when its
+            // task ends: the creation waits for that, so that it does not
+            // meet the name of the mob it replaces.
             self.mob_destroy_unchecked(&mob_id)
                 .await
                 .map_err(MobMcpDestroyError::into_mob_error)?;
+            let ended = replaced_actor.wait().await;
+            if ended != meerkat_mob::MobActorTaskWait::Returned {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    ended = ?ended,
+                    "the actor of a replaced implicit mob did not end before its \
+                     replacement is created"
+                );
+            }
         }
 
         let owner_bridge_session_id = SessionId::parse(bridge_session_id).map_err(|error| {

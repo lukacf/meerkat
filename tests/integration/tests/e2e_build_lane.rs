@@ -33,3 +33,7 @@ build_suite!(
     e2e_build_surface_rkat_mcp_deterministic,
     "surface-rkat-mcp-deterministic"
 );
+build_suite!(
+    e2e_build_surface_rkat_mcp_workgraph_evidence,
+    "surface-rkat-mcp-workgraph-evidence"
+);

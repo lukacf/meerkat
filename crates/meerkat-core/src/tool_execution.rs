@@ -281,6 +281,86 @@ impl ToolDeadlineChain {
     }
 }
 
+/// A bound on a session's tool calls that comes from outside its own tool
+/// deadlines: the session runs for a caller that stops waiting at `ends_at`,
+/// and needs room after its last tool call to report to that caller.
+///
+/// The agent loop adds what the bound allows a call as one more contributor
+/// to the call's deadline chain (owner
+/// [`ToolDeadlineOwner::DirectCaller`]), so the narrowest deadline still
+/// wins: a tool with a shorter configured deadline keeps it, and no tool
+/// gets longer than its own. The bound is a timing fact of one process; it
+/// is not persisted and does not travel to another host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCallOuterBound {
+    ends_at: crate::time_compat::Instant,
+    report_reserve: Duration,
+}
+
+impl ToolCallOuterBound {
+    /// A bound for a caller that stops waiting at `ends_at`, with
+    /// `report_reserve` kept back for the session's report.
+    #[must_use]
+    pub const fn new(ends_at: crate::time_compat::Instant, report_reserve: Duration) -> Self {
+        Self {
+            ends_at,
+            report_reserve,
+        }
+    }
+
+    /// When the caller stops waiting.
+    #[must_use]
+    pub const fn ends_at(&self) -> crate::time_compat::Instant {
+        self.ends_at
+    }
+
+    /// How long a call whose dispatch started at `started` may run: what is
+    /// left of the caller's wait then, less the report reserve, or less a
+    /// quarter of what is left when that is shorter. Zero once the caller
+    /// has stopped waiting.
+    #[must_use]
+    pub fn allows_from(&self, started: crate::time_compat::Instant) -> Duration {
+        let left = self.ends_at.saturating_duration_since(started);
+        left.saturating_sub(self.report_reserve.min(left / 4))
+    }
+}
+
+/// The slot a session's runtime bindings hold for its
+/// [`ToolCallOuterBound`], shared by every clone of those bindings: the host
+/// that runs the session for a bounded caller sets it, and the agent loop
+/// reads it at each tool batch. Empty for a session nobody bounds.
+#[derive(Debug, Default)]
+pub struct ToolCallOuterBoundSlot {
+    bound: std::sync::Mutex<Option<ToolCallOuterBound>>,
+}
+
+impl ToolCallOuterBoundSlot {
+    /// Bound the session's tool calls from now on.
+    pub fn set(&self, bound: ToolCallOuterBound) {
+        *self
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bound);
+    }
+
+    /// Lift the bound.
+    pub fn clear(&self) {
+        *self
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// The bound in force, if any.
+    #[must_use]
+    pub fn get(&self) -> Option<ToolCallOuterBound> {
+        *self
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 fn format_duration(duration: Duration) -> String {
     if duration.subsec_nanos() == 0 {
         format!("{}s", duration.as_secs())
@@ -2310,6 +2390,39 @@ mod tests {
 
     fn finite(owner: ToolDeadlineOwner, seconds: u64) -> ToolDeadlineContributor {
         ToolDeadlineContributor::finite(owner, Duration::from_secs(seconds))
+    }
+
+    /// What an outer bound allows a call: what is left of the caller's wait
+    /// less the report reserve, less a quarter of what is left when that is
+    /// shorter, and nothing once the caller has stopped waiting.
+    #[test]
+    fn an_outer_bound_allows_what_is_left_less_the_report_reserve() {
+        let now = crate::time_compat::Instant::now();
+        let reserve = Duration::from_secs(30);
+        let allows = |left_secs: u64| {
+            ToolCallOuterBound::new(now + Duration::from_secs(left_secs), reserve).allows_from(now)
+        };
+        // The engine's defaults: a wait of 585 s leaves a tool 555 s.
+        assert_eq!(allows(585), Duration::from_secs(555));
+        assert_eq!(allows(120), Duration::from_secs(90));
+        // Under four times the reserve: a quarter of what is left.
+        assert_eq!(allows(100), Duration::from_secs(75));
+        assert_eq!(allows(8), Duration::from_secs(6));
+        assert_eq!(allows(0), Duration::ZERO);
+        let ended = ToolCallOuterBound::new(now, reserve);
+        assert_eq!(ended.ends_at(), now);
+        assert_eq!(
+            ended.allows_from(now + Duration::from_secs(5)),
+            Duration::ZERO,
+            "a call that starts after the caller stopped waiting gets nothing"
+        );
+        // The slot holds what was set last, and nothing once cleared.
+        let slot = ToolCallOuterBoundSlot::default();
+        assert_eq!(slot.get(), None);
+        slot.set(ended);
+        assert_eq!(slot.get(), Some(ended));
+        slot.clear();
+        assert_eq!(slot.get(), None);
     }
 
     fn ephemeral_fingerprint(label: &str) -> EphemeralToolBindingFingerprint {

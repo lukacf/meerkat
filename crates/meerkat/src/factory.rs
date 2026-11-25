@@ -11922,6 +11922,10 @@ impl AgentFactory {
                 builder = builder.with_auth_lease_handle(bindings.auth_lease().clone());
                 builder = builder
                     .with_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
+                // The slot a host sets when it runs this session for a
+                // bounded caller: the loop reads the bound at each tool batch.
+                builder = builder
+                    .with_tool_call_outer_bound(Arc::clone(bindings.tool_call_outer_bound()));
             }
             RuntimeBuildMode::StandaloneEphemeral => {
                 let capability_base_filter_for_machine = capability_base_filter_override

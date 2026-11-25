@@ -1184,6 +1184,47 @@ impl CouncilFixture {
         ));
     }
 
+    /// [`Self::restart_cold_with_agent_mob_tools`] after a host that died
+    /// mid-run: the previous lifetime's mobs are stopped as a crash stops
+    /// them (their durable active work is kept, not terminalized as a
+    /// graceful shutdown would), its sessions are shut down, and a fresh
+    /// service and state come back over the same durable stores.
+    pub async fn restart_cold_after_crash_with_agent_mob_tools(
+        &mut self,
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+    ) {
+        assert!(
+            self.runtime_adapter.is_none(),
+            "a cold restart of a runtime-backed fixture is not modelled here"
+        );
+        for (_, handle) in self.state.mob_handles_snapshot().await.unwrap_or_default() {
+            handle
+                .crash_stop_preserving_durable_work_for_test()
+                .await
+                .expect("crash-stop the previous lifetime's mob");
+        }
+        self.service
+            .try_shutdown()
+            .await
+            .expect("shut the previous lifetime's sessions down");
+        let client = Arc::new(ScriptedCouncilClient::new(script));
+        self.calls = client.calls();
+        let (service, mob_tools_slot) =
+            persistent_service_with_mob_tools_slot(&self.root, self.runtime_store.clone(), client);
+        self.service = service;
+        let state_root = self.root.join("state");
+        self.state = customize(Self::state_over(&self.service, None), &state_root)
+            .try_with_persistent_storage_root(Some(state_root))
+            .expect("reopen rooted council + capability custody")
+            .into_shared();
+        *mob_tools_slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+            meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&self.state)),
+        ));
+    }
+
     /// A second session service over the SAME durable stores, with no live
     /// sessions of its own. A read through it sees only what was persisted,
     /// which is how a test distinguishes durable state from a live actor's

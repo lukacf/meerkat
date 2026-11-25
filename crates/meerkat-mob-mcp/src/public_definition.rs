@@ -175,6 +175,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             mob: input.tools.mob,
             schedule: input.tools.schedule,
             image_generation: input.tools.image_generation,
+            web_search: input.tools.web_search,
             read_only: input.tools.read_only,
             deny: input.tools.deny,
             mcp: input.tools.mcp,
@@ -695,5 +696,24 @@ mod tests {
         assert!(decode_public_profile(durable).expect("decodes").durable);
         let ordinary = profile_input(serde_json::json!({ "comms": true }));
         assert!(!decode_public_profile(ordinary).expect("decodes").durable);
+    }
+
+    /// A public profile input may state `tools.web_search`, and the decoded
+    /// profile keeps the enable it states.
+    #[test]
+    fn decode_public_profile_keeps_an_enabled_web_search() {
+        let input: MobProfileInput = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "tools": { "comms": true, "web_search": true }
+        }))
+        .expect("a profile input stating web_search is accepted");
+        let profile = decode_public_profile(input).expect("decodes");
+        let stored = serde_json::to_value(&profile).expect("the profile serializes");
+        assert_eq!(
+            stored["tools"]["web_search"],
+            serde_json::json!(true),
+            "the decoded profile states the enable: {}",
+            stored["tools"]
+        );
     }
 }

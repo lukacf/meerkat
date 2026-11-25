@@ -2829,6 +2829,7 @@ export interface WireMobToolConfig {
   read_only?: boolean;
   schedule?: boolean;
   shell?: boolean;
+  web_search?: boolean | null;
   workgraph?: boolean;
 }
 
@@ -3782,6 +3783,7 @@ export interface MobToolConfigInput {
   read_only?: boolean;
   schedule?: boolean;
   shell?: boolean;
+  web_search?: boolean | null;
   workgraph?: boolean;
 }
 
@@ -3980,6 +3982,7 @@ export interface PortableToolConfig {
   read_only?: boolean;
   schedule?: boolean;
   shell?: boolean;
+  web_search?: boolean | null;
   workgraph?: boolean;
 }
 

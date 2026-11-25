@@ -2702,3 +2702,62 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
         rendering.card().expect("a structured card");
     }
 }
+
+/// The rendering shows a profile's web search choice only when the profile
+/// states one (`enabled` or `disabled`): a profile that leaves web search to
+/// the build renders as it did. The digest covers the choice.
+#[test]
+fn the_rendering_shows_a_web_search_choice_only_when_the_profile_states_one() {
+    let definition = declaring_definition();
+    let request =
+        normalized_create(&approval_policy(1000), &host_facts(), &[spec("scout")]).request;
+    let declared = |choice: Option<bool>| {
+        let mut profile = declared_profile("tok-A-VALUE");
+        profile.tools.web_search = choice;
+        ProfileTools::of_profile("worker", &profile, &definition, None).expect("declared")
+    };
+    let rendered = |declared: &ProfileTools| {
+        let configurations = ToolConfigurations::of_request(
+            &request,
+            vec![AgentTools::new("scout", "worker")],
+            BTreeMap::from([("worker".to_owned(), declared.clone())]),
+        )
+        .expect("the profiles of the request");
+        render_held_v1(&request, None, &configurations)
+            .expect("renders")
+            .as_str()
+            .to_owned()
+    };
+
+    let unset = rendered(&declared(None));
+    assert!(
+        !unset.contains("Web search"),
+        "a profile that states no choice shows none:\n{unset}"
+    );
+    for (choice, shown) in [
+        (
+            true,
+            "Tool families (2):\n- shell\n- comms\nWeb search: enabled\nRead only: no\n",
+        ),
+        (
+            false,
+            "Tool families (2):\n- shell\n- comms\nWeb search: disabled\nRead only: no\n",
+        ),
+    ] {
+        let text = rendered(&declared(Some(choice)));
+        assert!(
+            text.contains(shown),
+            "`web_search = {choice}` is shown as {shown:?}:\n{text}"
+        );
+    }
+    assert_ne!(
+        declared(None).digest(),
+        declared(Some(true)).digest(),
+        "the digest covers an enable"
+    );
+    assert_ne!(
+        declared(Some(true)).digest(),
+        declared(Some(false)).digest(),
+        "the digest tells an enable from a disable"
+    );
+}

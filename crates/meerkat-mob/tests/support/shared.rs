@@ -759,6 +759,8 @@ pub struct RecordedMemberCreate {
     /// The operator-instruction target the session the create mints is born
     /// with: the target its build's session carrier holds, if any.
     pub born_instruction_target: Option<meerkat_core::SessionInstructionState>,
+    /// The web search switch the create's build names.
+    pub override_web_search: Option<meerkat_core::ToolCategoryOverride>,
 }
 
 impl RecordedMemberCreate {
@@ -781,6 +783,7 @@ impl RecordedMemberCreate {
                         .instruction_target_state()
                         .expect("a build's session carrier reads its instruction target")
                 }),
+            override_web_search: build.map(|build| build.override_web_search),
         }
     }
 }
@@ -5503,6 +5506,7 @@ pub fn sample_portable_member_spec(
                 mob: false,
                 schedule: false,
                 image_generation: false,
+                web_search: None,
                 read_only: false,
                 deny: Vec::new(),
                 mcp_servers: std::collections::BTreeMap::new(),

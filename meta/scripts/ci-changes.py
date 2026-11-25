@@ -85,11 +85,11 @@ from pathlib import Path
 from typing import Callable
 
 # The lanes, each named by the `changes` output its jobs test in meta-ci.yml.
-# rust-unit, rust-conformance, rust-integration, rust-extension-state-lib and
-# rust-voice-lib run on pull requests only: the root CI runs those tests on
-# the push.
+# rust-unit-build and its rust-unit legs, rust-conformance, rust-integration,
+# rust-extension-state-lib and rust-voice-lib run on pull requests only: the
+# root CI runs those tests on the push.
 LANE_JOBS = {
-    "rust": ("rust-unit", "rust-examples", "rust-conformance", "rust-features-check"),
+    "rust": ("rust-unit-build", "rust-unit", "rust-examples", "rust-conformance", "rust-features-check"),
     "integration": ("rust-integration",),
     "voice": ("rust-voice", "rust-voice-lib"),
     "extension_state": ("rust-extension-state", "rust-extension-state-lib"),

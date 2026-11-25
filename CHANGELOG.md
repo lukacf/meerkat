@@ -47,11 +47,101 @@ them.
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
 
+- `meerkat-mob`: the public struct `ToolConfig` gains the public field `web_search: Option<bool>` (the profile key `tools.web_search`, see Added). `meerkat-contracts`: the public structs `wire::PortableToolConfig`, `WireMobToolConfig` and `wire::MobToolConfigInput` gain the same field. Code that builds one of them with a struct literal adds the field; `..Default::default()` covers it.
+
 ### Added
 
 - Rust API: a host can poll a run that waits for its resume gate. After a kill and a restart, a durable worker's run whose resume gate cannot decide (it answers `Unavailable`, or takes too long) is neither resumed nor settled and waits, as documented since 0.9.11; until now nothing a host could read said that it waits, for how long, or why. `MobHandle::members_with_pending_resumed_runs()` (`meerkat-mob`) lists the locally seated members whose session marks a run that has neither resumed nor settled, and `MeerkatMachine::pending_resumed_run(&session_id)` / `pending_resumed_runs()` (`meerkat-runtime`) answer one session or every session of the process. An answer (`PendingResumedRunRead::Pending`) carries the session, the run id that `stop_member_run` takes, how long the registration has marked the run (`marked_for`), whether a stop is recorded and not settled yet (`stop_requested`), and whether the machine holds the run for its gate (`ResumedRunAdmissionState::Held`) with the undecided rounds, the time since the first of them, the typed cause (`TimedOut` or `AnsweredUnavailable`) and the gate's own reason for the last round, cut at `RESUMED_RUN_ADMISSION_REASON_MAX_BYTES` (512 bytes). The poll is answered from memory: no store call, no ask of the gate, no wake and no change, so it answers for a worker whose runtime loop makes no pass and never moves the round count. It does not wait out a busy session: the read gives up its wait for a session's own state after `PENDING_RESUMED_RUN_READ_BOUND` and answers `PendingResumedRunRead::NotReadableNow`, as it does for a registration that needs a reload; that answer means "ask again", not "no run waits". The constant is the length of that one wait, not a bound on the call: the lookup of the session comes before it, and a poll of several sessions or members reads them one after another. The new types are `#[non_exhaustive]`, and so is the `NotReadableNow` variant: match it with `..`. See [Durable runs: seeing a run that waits](docs/guides/durable-runs.mdx#seeing-a-run-that-waits).
 
   What this does not change: nothing is emitted on any stream or wire surface, no SDK or RPC method is added, nothing asks the gate again on a timer, and a waiting run is never resumed or settled because time has passed. A host that wants an alert polls and raises its own. Whether a run is held, and which run, is the runtime machine's state; the rounds, the times, the cause and the reason are noted by the current registration and start over at every registration, so they count from one again after a restart.
+
+- **A mob profile can state web search for its members:** the optional key
+  `tools.web_search`, in a TOML or stored definition, a realm profile, the
+  public profile input and the wire profile. A profile that omits it behaves
+  exactly as before: the provider's own web search rides the member's requests
+  where its model has one and the provider's switch is on, and a member whose
+  tools are governed (a read-only profile, a deny list, a tool access or
+  application tool policy, a dispatch admission, a tool grant gate that covers
+  `web_search`) has none, since governance turns the provider's own tools off.
+  - Before setting the key, its limits with the released versions, each
+    by the evidence it rests on.
+    - No new key is written when neither the profile sets the key nor a
+      spawn's own web search override is kept for the member (a test of
+      this change asserts it for a profile that does not set the key). A
+      kept override is stored in a local member's stored profile, which
+      the mob profile struct named next reads; a placed member's portable
+      spec keeps the profile's own value.
+    - By source, for 0.9.15, 0.9.16, 0.9.17 and 0.9.18, whose three
+      deciding source files are byte-identical: the mob profile struct
+      (`ToolConfig`) tolerates unknown keys and does not know this one, so
+      a set key is ignored there and is not preserved when the profile is
+      read into that struct and written again: `web_search = false` is not
+      enforced by that field. So, by source and not as an observed result
+      of running those four releases: do not rely on `web_search=false` in
+      a JSON mob profile to keep search disabled after a downgrade to
+      0.9.15, 0.9.16, 0.9.17 or 0.9.18. The strict forms reject the unknown
+      key: the portable stored spec of a placed member
+      (`PortableToolConfig`) and the two wire profile structs
+      (`WireMobToolConfig`, `MobToolConfigInput`).
+    - Observed on 0.9.16 only, with a debug build made from the 0.9.16 tag
+      (not the published binary). A hand-written JSON mob profile that
+      names the key is accepted without a warning. Over state written by
+      an older state of this change, with a placed member of a profile that
+      named the key: on the member host `rkat mob host` exits with
+      `host binding record serde failed`, naming the unknown field
+      `web_search`, and on the controlling host the mob is held as
+      quarantined (`store_unreadable`); a placed member of a profile
+      without the key is not affected; after a completed retire of the
+      member that build starts on both hosts. For an identity adopted
+      through `mob/adopt_member_identity_declaration` while its profile
+      named the key, no recovery on 0.9.16 was demonstrated. What another
+      release does after such a rejection is not shown by these
+      observations.
+    - Not verified: state written by this change read by a released 0.9.18
+      runtime.
+  - `web_search = true` is the build's explicit enable. Where the provider's
+    own search serves the member, it stays the provider's own. Where it does
+    not (a model without one, or a governed member), the member gets the
+    ordinary `web_search` tool, served by a helper that runs the provider's
+    default model through the realm's default binding for that provider, and
+    gated like any other tool: a read-only profile admits it, a deny list
+    that names it refuses it, and a tool grant gate that covers it keeps it
+    closed until a grant. Where that helper cannot be provided (the member's
+    provider is not Anthropic, OpenAI or Gemini, the provider's web search
+    switch is off, its default model has no web search, or the realm
+    resolves no default binding for it), the member's build fails with
+    `BuildAgentError::CapabilityUnavailable` (capability `web_search`), as an
+    explicit enable always has. Not verified over a GitHub Copilot binding:
+    the build succeeds wherever the helper's connection resolves, and
+    whether a search then works is decided at call time by what that route
+    serves. One limit, unchanged from a spawn's or a session's explicit
+    enable: on an ungoverned member whose model has its own search, the
+    enable gives no search and no error while that provider's web search
+    switch is off; the helper is not tried there.
+  - `web_search = false` is the build's explicit disable: no search of
+    either kind. One exception: the profile's own tool grant gate that
+    covers `web_search` mounts the tool closed whatever the switch says,
+    and a grant then opens it.
+  - A spawn's own `tool_category_overrides.web_search` wins over the profile
+    in both directions, and keeps winning when the member is revived: the
+    spawn's choice now travels in the member's stored profile. A member
+    placed on another host is the exception: its spawn's choice stays in
+    the overlay of its spec, as before, and a respawn of it does not carry
+    the choice, a disabling one included.
+  - A member's session records the choice it was built with, and a removed
+    key states no choice. A member built while its profile said `true`
+    keeps web search after the key is removed (`web_search = false` takes
+    it away), and one built while it said `false` keeps none
+    (`web_search = true` gives it back); only a new session returns to the
+    unset behaviour.
+  - A placed member and a declared identity carry their profile's choice in
+    their portable profile (`PortableToolConfig.web_search`), omitted when
+    the profile states none, so the specs and stored material of profiles
+    that omit the key keep their bytes and digests. An adaptive layer's
+    inline profile may state it, and an enable counts as the `web_search`
+    tool class in the layer's policy evidence; the layer decision schema
+    bundled in adaptive packs is unchanged.
+  See [Web search](docs/guides/mobs.mdx#web-search).
 
 ### Changed
 
@@ -61,7 +151,11 @@ them.
 
 ### Fixed
 
+- `meerkat-openai`: a session whose history holds a tool call that another provider issued under a long id can continue on a Responses model. The Responses request wrote every stored tool-use id unchanged as the `call_id` of the call (`function_call`) and of its result (`function_call_output`). The provider refuses a whole request for one `call_id` over its limit (its refusal names a maximum length of 64), so once such a session was switched to a Responses model every later request failed the same way, a compaction on that model included: each of them replays the same history. Now, in a request that carries the history, a stored id of more than 64 bytes is replaced, in the request only, by a short id derived from it (`call_sha256_` and the first 32 hex digits of the id's SHA-256). The call and its result carry the same one in every such request, and two different stored ids get different ones. The stored session, its events and what every other wire is sent keep the id as it was issued, so a switch back to the issuing provider sends that provider its own id. A request for a history whose ids are within the limit is byte for byte what it was, with one designed exception: a stored id that itself has the derived form is derived again, whatever its length, so it cannot meet the `call_id` derived for another id. Two stored ids that would derive one `call_id` in one request are refused as an invalid request instead of being sent paired wrongly. This holds for every Responses backend: the OpenAI API, the ChatGPT backend, Azure OpenAI, the Copilot Responses route and a self-hosted server in Responses mode. The rule does not ask who issued an id: a self-hosted Responses server that itself issues ids over 64 bytes, or of the derived form, is sent the derived id in place of its own in such a request, on the call and on its result alike. A continuation of a stored response (`previous_response_id`) is exempt: it carries a result without its call, which the server holds under the id it issued, so every id in it is written as stored, as before. The Chat Completions request and the realtime text turn are unchanged and carry the stored id as stored: no limit is established for them. Reported against 0.9.18. No public type, wire format, schema or SDK changes.
+
 - `meerkat-session`: `session/instruction_status` no longer fails while the session's run is in a tool round. From a run's first tool round until the run committed, the read (`SessionServiceInstructionExt::read_session_instructions`) answered the JSON-RPC internal error (`-32603`) with the store's transcript revision conflict as its text, and answered again by itself once the run had committed. `mob/instruction_status` still answered its page, but the row of a member in that state read `effective_read: unreadable` with the same text as its `reason`: its slots carried no `recorded` or `effective` view, so a slot in effect read `pending` (`delivery_owed`). Now both reads answer the session's last committed state for the whole run: the recorded target, the entries in effect and the model's lowering as the last committed turn left them, read from one committed snapshot. Nothing of the running run shows: a change that run applied at its start reads `pending` until the run commits, as it already did before the run's first tool round. Affected: 0.9.9 to 0.9.18 for the Rust reads (`SessionServiceInstructionExt::read_session_instructions`, `PersistentSessionService::read_sessions_instructions`, `MobHandle::operator_instruction_status`), and 0.9.11, which added `session/instruction_status` and `mob/instruction_status`, to 0.9.18 for those methods; durable sessions of a SQLite realm. The reads that decide a session's lifecycle (a resume, a cold rebuild, an archive, a spawn over a session, a mob's restore of its members) are unchanged and still refuse typed while a round commit stands. No error code, SDK error vocabulary or documented error form changes.
+
+- `meerkat-sandbox`, macOS confinement: the generated Seatbelt profile now allows what a confined process uses to resolve a host name, to verify a certificate against the system's certificate files, to read the host name and the kernel version, and to resolve a path one component at a time. Before, a launch with `network = "unrestricted"` could open IP sockets, but the profile neither named the system resolver, which answers a name lookup in place of an IP socket of the process, nor allowed a read of the system's certificate directory unless the configuration granted one. With IP access the profile now allows the process to create Unix sockets, to connect to the system resolver's socket (`/private/var/run/mDNSResponder`), to look up the resolver's service name (`com.apple.dnssd.service`) and to read `/private/etc/ssl` and everything under it, the directory of the system's TLS configuration and certificate authority files; beyond the Unix sockets its configuration grants, the resolver's is the only one it can connect to. Without IP access the profile gains none of these: such a launch creates Unix sockets, and connects to one, only where its requirement grants a Unix socket, as before (in the `[confinement]` configuration only a `custom` requirement can; the `workspace` preset grants none, so under it a launch without IP access still reaches no resolver). For every confined launch the profile now also allows the kernel names `kern.hostname` and `kern.version` (the host name and the kernel version: the `uname` library call reads them together with the names the baseline already allowed, and `uname -n` and `uname -v` print them), and the metadata, never a listing or file data, of the system links `/etc`, `/tmp` and `/var`, of the fixed directories `/private`, `/usr`, `/System` and `/dev`, and of each directory above a path granted for reading or writing that is not itself granted for reading (a directory granted for writing alone included): a script runtime that resolves its main file, or `realpath`, reads the metadata of each directory on the way to a granted path. Not changed: deny rules follow the new file and socket allowances and win over them, so a denied read stays denied where it lies above a grant or names the certificate directory or the resolver's socket; no other system service and no keychain becomes reachable, so a program that verifies certificates through the system trust service instead of the certificate files is not served by this change; Linux confinement, the `[confinement]` configuration and every public signature are as they were. The rows of this change check the generated profile text; they do not run the macOS sandbox.
 
 ### Security
 

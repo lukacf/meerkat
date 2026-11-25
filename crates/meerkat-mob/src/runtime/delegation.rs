@@ -2360,6 +2360,34 @@ pub fn lose_delegation_run_for_test(identity: AgentIdentity) {
         .insert(identity);
 }
 
+/// The slot of the outer bound on the tool calls of member `identity` of
+/// the mob `handle` serves, as this host's runtime holds it for the
+/// member's session: the slot a bounded delegation run sets for its helper
+/// and lifts when the run is over. `None` when the member has no session or
+/// the runtime holds no bindings for it. Exposed only by test builds, for
+/// the rows of the bound's set and lift.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub async fn helper_tool_bound_slot_for_test(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> {
+    let session_id = handle.resolve_bridge_session_id(identity).await?;
+    #[cfg(feature = "runtime-adapter")]
+    {
+        handle
+            .runtime_adapter
+            .as_ref()?
+            .session_tool_call_outer_bound(&session_id)
+            .await
+    }
+    #[cfg(not(feature = "runtime-adapter"))]
+    {
+        let _ = session_id;
+        None
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 async fn hold_run_if_requested(identity: &AgentIdentity, point: RunHoldPoint) {
     let hold = DELEGATION_RUN_HOLDS

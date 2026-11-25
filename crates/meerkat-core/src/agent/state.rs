@@ -24476,6 +24476,11 @@ mod tests {
     /// One call of `never_answers` through the loop's dispatch, under the
     /// default deadline `default_timeout`, the per-tool deadlines
     /// `tool_timeouts` and the session's outer bound `outer_bound`.
+    ///
+    /// The rows that use it run on a paused runtime clock: the loop's timer
+    /// for the call is the next thing the runtime waits for, so it elapses
+    /// at once, and no row depends on how fast its runner is. The guard
+    /// here is far beyond every bound of those rows.
     async fn dispatch_under_outer_bound<T: AgentToolDispatcher + 'static>(
         dispatcher: Arc<T>,
         tool: &str,
@@ -24489,7 +24494,7 @@ mod tests {
             args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
         };
         let mut results = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_mins(5),
             super::dispatch_tool_calls_fenced_boxed(
                 dispatcher,
                 crate::ToolDispatchContext::default(),
@@ -24511,12 +24516,11 @@ mod tests {
     /// (what the caller has left less the report reserve, here a quarter),
     /// reports that shorter timeout, and its dispatch context says what the
     /// bound allowed.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_outer_bound_cuts_a_call_before_its_configured_deadline() {
         let probe = Arc::new(OuterBoundProbe::new());
-        let started = std::time::Instant::now();
         let bound = crate::ToolCallOuterBound::new(
-            crate::time_compat::Instant::now() + std::time::Duration::from_millis(800),
+            crate::time_compat::Instant::now() + std::time::Duration::from_secs(40),
             std::time::Duration::from_secs(30),
         );
         let result = dispatch_under_outer_bound(
@@ -24532,14 +24536,9 @@ mod tests {
         };
         assert_eq!(name, "never_answers");
         assert!(
-            (1..=600).contains(&timeout_ms),
-            "the call reports what the bound allowed (at most three quarters of 800 ms), not its \
+            (1..=30_000).contains(&timeout_ms),
+            "the call reports what the bound allowed (at most three quarters of 40 s), not its \
              configured 10 minutes: {timeout_ms} ms"
-        );
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(4),
-            "the call ended at the bound: {:?}",
-            started.elapsed()
         );
         assert_eq!(probe.entered.load(std::sync::atomic::Ordering::SeqCst), 1);
         let told = probe
@@ -24552,7 +24551,7 @@ mod tests {
 
     /// The narrowest deadline wins: a tool with a shorter configured
     /// deadline keeps it under an outer bound, and reports its own.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_shorter_configured_deadline_stays_under_an_outer_bound() {
         let probe = Arc::new(OuterBoundProbe::new());
         let bound = crate::ToolCallOuterBound::new(
@@ -24584,14 +24583,14 @@ mod tests {
 
     /// A call that starts once the caller has stopped waiting times out
     /// without entering its tool.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_call_that_starts_after_the_outer_bound_ended_does_not_enter_its_tool() {
         let probe = Arc::new(OuterBoundProbe::new());
+        // The bound ended at this moment: every call starts at or after it.
         let bound = crate::ToolCallOuterBound::new(
             crate::time_compat::Instant::now(),
             std::time::Duration::from_secs(30),
         );
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let result = dispatch_under_outer_bound(
             Arc::clone(&probe),
             "never_answers",
@@ -24616,15 +24615,15 @@ mod tests {
     /// A tool that owns its lifetime bound is not cut by the loop's default
     /// deadline, but a session's outer bound cuts it: a nested call of such
     /// a tool ends before the caller above it stops waiting.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_outer_bound_cuts_a_tool_that_owns_its_deadline() {
         let bound = crate::ToolCallOuterBound::new(
-            crate::time_compat::Instant::now() + std::time::Duration::from_millis(800),
+            crate::time_compat::Instant::now() + std::time::Duration::from_secs(40),
             std::time::Duration::from_secs(30),
         );
         let result = dispatch_under_outer_bound(
             Arc::new(ToolOwnedDeadlineDispatcher::new(
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_mins(30),
             )),
             "slow_tool",
             std::time::Duration::from_millis(20),
@@ -24637,7 +24636,7 @@ mod tests {
         };
         assert_eq!(name, "slow_tool");
         assert!(
-            (21..=600).contains(&timeout_ms),
+            (21..=30_000).contains(&timeout_ms),
             "cut by the outer bound, not by the default deadline of 20 ms: {timeout_ms} ms"
         );
     }

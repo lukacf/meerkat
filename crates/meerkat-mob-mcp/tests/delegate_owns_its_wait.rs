@@ -32,8 +32,9 @@ use serde_json::{Value, json};
 use support::{ScriptedCouncilClient, ScriptedTurn, TurnGate, last_user_text, participant_profile};
 
 /// The bound every wait of a row sits under: a hang guard, far above what a
-/// passing row needs.
-const ROW_BOUND: Duration = Duration::from_mins(1);
+/// passing row needs (the longest rows wait about 50 s for a helper's tool
+/// to be cut).
+const ROW_BOUND: Duration = Duration::from_mins(2);
 
 /// A host tool that never answers: a helper's slow tool.
 const HOST_WAIT: &str = "host_wait";
@@ -617,13 +618,17 @@ fn helper_report(result: &str) -> (Value, String) {
 /// delegate has left, less the room the helper needs to report: it times out
 /// inside the helper before the delegate's wait ends, the helper reports it,
 /// and the caller gets that report where it got an error.
+///
+/// The row runs on real time, so its wait is long enough to leave the
+/// helper a quarter of a minute to report after its tool is cut: a loaded
+/// runner does not turn the report into a missed wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_helpers_slow_tool_times_out_inside_the_helper_and_the_caller_gets_its_report() {
     let rig = Rig::new().await;
     let helper_task = calls_text(&[json!({ "id": "helper-wait", "name": HOST_WAIT, "args": {} })]);
     let started = Instant::now();
     let turn = rig
-        .parent_calls(&[delegate_call("call", &helper_task, "stuck", Some(8))])
+        .parent_calls(&[delegate_call("call", &helper_task, "stuck", Some(60))])
         .await;
     let result = rig.result_of("call").await;
     let answered = started.elapsed();
@@ -636,11 +641,11 @@ async fn a_helpers_slow_tool_times_out_inside_the_helper_and_the_caller_gets_its
     // The order: the tool's bound, then the delegate's wait, then the call's
     // deadline. The helper's tool gets at most three quarters of the wait.
     assert!(
-        (1..=6_000).contains(&cut_ms),
-        "the helper's tool was cut inside the delegate's wait of 8 s, not at its configured \
+        (1..=45_000).contains(&cut_ms),
+        "the helper's tool was cut inside the delegate's wait of 60 s, not at its configured \
          10 minutes: {cut_ms} ms"
     );
-    assert_eq!(payload["max_run_secs"], 8, "{payload}");
+    assert_eq!(payload["max_run_secs"], 60, "{payload}");
     assert_eq!(
         rig.host_wait_entered.load(Ordering::SeqCst),
         1,
@@ -653,7 +658,7 @@ async fn a_helpers_slow_tool_times_out_inside_the_helper_and_the_caller_gets_its
     );
     assert!(!is_member(&rig.implicit().await, "stuck").await);
     eprintln!(
-        "DT-INNER-DEADLINE: under a delegate wait of 8 s the helper's tool was cut after \
+        "DT-INNER-DEADLINE: under a delegate wait of 60 s the helper's tool was cut after \
          {cut_ms} ms and the caller had the helper's report {answered:?} after its turn was \
          started"
     );
@@ -664,13 +669,14 @@ async fn a_helpers_slow_tool_times_out_inside_the_helper_and_the_caller_gets_its
 /// Issue 2207 as reported: caller and helper run under one tool deadline
 /// and nothing else is configured. The helper's slow tool no longer ends
 /// with the `delegate` that waits for it: it ends first, and the helper
-/// reports it.
+/// reports it. Real time, so the wait leaves the helper a quarter of a
+/// minute to report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn under_one_default_deadline_a_helpers_slow_tool_ends_first_and_the_helper_reports() {
     let mut config = meerkat::Config::default();
-    // The call's wait: 12 s less its quarter. The helper's tool is configured
-    // the same 12 s.
-    config.tools.default_timeout = Duration::from_secs(12);
+    // The call's wait: 80 s less 15 s. The helper's tool is configured the
+    // same 80 s.
+    config.tools.default_timeout = Duration::from_secs(80);
     let rig = Rig::with_config(config).await;
     let helper_task = calls_text(&[json!({ "id": "helper-wait", "name": HOST_WAIT, "args": {} })]);
     let started = Instant::now();
@@ -690,12 +696,12 @@ async fn under_one_default_deadline_a_helpers_slow_tool_ends_first_and_the_helpe
     assert!(report.starts_with("done "), "{payload}");
     let cut_ms = reported_tool_timeout_ms(&report);
     assert!(
-        (1..=6_750).contains(&cut_ms),
-        "the helper's tool was cut inside the delegate's wait of 9 s, under its configured \
-         12 s: {cut_ms} ms"
+        (1..=48_750).contains(&cut_ms),
+        "the helper's tool was cut inside the delegate's wait of 65 s, under its configured \
+         80 s: {cut_ms} ms"
     );
-    // 12 s less its quarter.
-    assert_wait_secs(&payload, 9, in_tool);
+    // 80 s less 15 s.
+    assert_wait_secs(&payload, 65, in_tool);
     assert!(!is_member(&rig.implicit().await, "reporter").await);
     finish(turn, "the calling turn").await;
     rig.teardown().await;
@@ -704,15 +710,18 @@ async fn under_one_default_deadline_a_helpers_slow_tool_ends_first_and_the_helpe
 /// The same one level down: a helper's own `delegate` passes the bound on.
 /// The inner helper's slow tool times out inside the inner helper, the inner
 /// helper reports to the outer one, and the outer one reports to the caller.
+/// Real time, so the inner wait leaves the inner helper a quarter of a
+/// minute to report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_level_down_a_helpers_slow_tool_ends_first_and_every_level_reports() {
     let mut config = meerkat::Config::default();
-    // The outer call's wait: 100 s less 15 s. What it leaves a nested call
-    // is above the floor under which a nested call is refused.
-    config.tools.default_timeout = Duration::from_secs(100);
+    // The outer call's wait: 200 s less 15 s. It leaves a nested call 155 s,
+    // well above the floor under which a nested call is refused and above
+    // the 60 s the nested call asks for.
+    config.tools.default_timeout = Duration::from_secs(200);
     let rig = Rig::with_config(config).await;
     let inner_task = calls_text(&[json!({ "id": "inner-wait", "name": HOST_WAIT, "args": {} })]);
-    let outer_task = calls_text(&[delegate_call("inner-call", &inner_task, "inner", Some(6))]);
+    let outer_task = calls_text(&[delegate_call("inner-call", &inner_task, "inner", Some(60))]);
     let turn = rig
         .parent_calls(&[delegating_helper_call(
             "outer-call",
@@ -725,10 +734,10 @@ async fn one_level_down_a_helpers_slow_tool_ends_first_and_every_level_reports()
     assert!(inner_report.starts_with("done "), "{inner_payload}");
     let cut_ms = reported_tool_timeout_ms(&inner_report);
     assert!(
-        (1..=4_500).contains(&cut_ms),
-        "the inner helper's tool was cut inside the inner delegate's wait of 6 s: {cut_ms} ms"
+        (1..=45_000).contains(&cut_ms),
+        "the inner helper's tool was cut inside the inner delegate's wait of 60 s: {cut_ms} ms"
     );
-    assert_eq!(inner_payload["max_run_secs"], 6, "{inner_payload}");
+    assert_eq!(inner_payload["max_run_secs"], 60, "{inner_payload}");
     let (outer_payload, outer_report) = helper_report(&rig.result_of("outer-call").await);
     assert!(
         outer_report.starts_with("done ") && outer_report.contains("inner-call"),
@@ -2003,6 +2012,99 @@ async fn a_caller_with_manage_scope_is_told_the_member_tools_and_they_work() {
     finish(turn, "the retiring turn").await;
     wait_gone(&implicit, "kept", "its caller retired it").await;
     let _ = release.send(());
+    rig.teardown().await;
+}
+
+/// The bound a run puts on its helper's tool calls stands while the run
+/// waits and is lifted when the run is over: the run keeps the slot it set
+/// the bound in, and clears it once it has settled its helper. A helper
+/// that outlives its run is then not cut by a wait that has ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_that_is_over_has_lifted_the_bound_on_its_helpers_tool_calls() {
+    let rig = short_wait_rig().await;
+    let helper = AgentIdentity::from("bounded");
+    let (reached, release) = meerkat_mob::hold_delegation_limit_for_test(helper.clone());
+    let turn = rig
+        .parent_calls(&[delegate_call("call", &hang("bounded"), "bounded", None)])
+        .await;
+    tokio::time::timeout(ROW_BOUND, reached)
+        .await
+        .expect("the run reaches its limit")
+        .expect("the run is held at its limit");
+
+    // The run is held before it ends its helper: the helper is seated, and
+    // its session's tool calls are bounded by the call's wait.
+    let implicit = rig.implicit().await;
+    let slot = meerkat_mob::helper_tool_bound_slot_for_test(&implicit, &helper)
+        .await
+        .expect("this host's runtime holds the helper's bindings");
+    let bound = slot
+        .get()
+        .expect("the helper's tool calls are bounded while its run waits");
+    assert!(
+        bound.ends_at() <= Instant::now(),
+        "the bound ends with the call's wait, which has elapsed at the limit"
+    );
+
+    let _ = release.send(());
+    let data = error_data(&rig.result_of("call").await);
+    assert_eq!(data["kind"], "delegate_helper_ended", "{data}");
+    finish(turn, "the calling turn").await;
+    wait_gone(&implicit, "bounded", "its end was let go").await;
+    // The run lets go of its mob after it has lifted the bound.
+    wait_no_foreground_owner(&implicit, "the run ended its helper").await;
+    assert_eq!(
+        slot.get(),
+        None,
+        "the run that is over lifted the bound it put on its helper's tool calls"
+    );
+    rig.teardown().await;
+}
+
+/// The same for a run that is lost: the guard that ends the lost run's
+/// helper lifts the bound once the helper is ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_run_has_lifted_the_bound_once_its_helper_is_ended() {
+    let rig = Rig::new().await;
+    let helper = AgentIdentity::from("lost-bound");
+    let (reached, release) = meerkat_mob::hold_delegation_start_for_test(helper.clone());
+    meerkat_mob::lose_delegation_run_for_test(helper.clone());
+    let turn = rig
+        .parent_calls(&[delegate_call(
+            "call",
+            &hang("lost-bound"),
+            "lost-bound",
+            None,
+        )])
+        .await;
+    tokio::time::timeout(ROW_BOUND, reached)
+        .await
+        .expect("the run seats its helper")
+        .expect("the run is held in its start");
+
+    // The helper is seated and bounded; its turn was not admitted yet.
+    let implicit = rig.implicit().await;
+    let slot = meerkat_mob::helper_tool_bound_slot_for_test(&implicit, &helper)
+        .await
+        .expect("this host's runtime holds the helper's bindings");
+    assert!(
+        slot.get().is_some(),
+        "the helper's tool calls are bounded from its seat on"
+    );
+
+    // Once its start returns, the run is lost; its guard ends the helper.
+    let _ = release.send(());
+    let data = error_data(&rig.result_of("call").await);
+    assert_helper_ended(&data, "run_lost", "unknown");
+    wait_gone(&implicit, "lost-bound", "the run that seated it was lost").await;
+    // The guard's task holds the mob until it has lifted the bound.
+    wait_no_foreground_owner(&implicit, "the lost run's guard ended its helper").await;
+    assert_eq!(
+        slot.get(),
+        None,
+        "the guard of the lost run lifted the bound once the helper was ended"
+    );
+    finish(turn, "the calling turn").await;
     rig.teardown().await;
 }
 

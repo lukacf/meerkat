@@ -5822,15 +5822,18 @@ async fn handle_meerkat_run_with_help_tools(
 }
 
 /// What the plain resume does with a failed turn on the live session.
+///
+/// A not-found answer does not prove that the turn did not run. The session
+/// service hands the turn's reserved admission back with an error when the
+/// turn did not take it, so only a not-found answer that came with the
+/// admission lets the resume submit its prompt again.
 enum LiveTurnFailure<A> {
     /// The session was not found and the turn's reserved admission came back
-    /// with the answer: the session is rebuilt and the prompt runs on that
-    /// admission.
+    /// with the answer: the turn did not run. The session is rebuilt and the
+    /// prompt runs on that admission.
     Rebuild(A),
-    /// The session was not found and no admission came back: the session is
-    /// rebuilt and the prompt runs on a newly reserved admission.
-    RebuildOnNewAdmission,
-    /// Any other failure is the resume's result.
+    /// Any other failure is the resume's result, a not-found answer without
+    /// the admission included: nothing is submitted again.
     Surface(SessionError),
 }
 
@@ -5839,7 +5842,6 @@ enum LiveTurnFailure<A> {
 fn live_turn_failure<A>(error: SessionError, returned_admission: Option<A>) -> LiveTurnFailure<A> {
     match (error, returned_admission) {
         (SessionError::NotFound { .. }, Some(admission)) => LiveTurnFailure::Rebuild(admission),
-        (SessionError::NotFound { .. }, None) => LiveTurnFailure::RebuildOnNewAdmission,
         (error, _admission) => LiveTurnFailure::Surface(error),
     }
 }
@@ -6515,21 +6517,6 @@ async fn handle_meerkat_resume(
                         runtime_materialization_committed = outcome.committed;
                         outcome.result
                     }
-                    LiveTurnFailure::RebuildOnNewAdmission => {
-                        let admission = match resume_admission.take() {
-                            Some(admission) => admission,
-                            None => state
-                                .service
-                                .reserve_runtime_turn_admission(&session_id)
-                                .await
-                                .map_err(|err| {
-                                    ToolCallError::internal(format!("Agent error: {err}"))
-                                })?,
-                        };
-                        let outcome = materialize_resume(Some(admission)).await?;
-                        runtime_materialization_committed = outcome.committed;
-                        outcome.result
-                    }
                     LiveTurnFailure::Surface(error) => Err(error),
                 }
             }
@@ -6810,6 +6797,7 @@ mod tests {
     use meerkat::Session;
 
     pub(crate) mod committed_reads_tests;
+    mod live_turn_failure_tests;
     use meerkat::surface::{
         CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
     };

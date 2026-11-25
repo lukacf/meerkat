@@ -2957,11 +2957,22 @@ impl Drop for StartTurnAdmissionClaim {
 /// The failure of a turn claim that was refused, as the execution start
 /// returns it: the claim's error, paired with the reserved admission its
 /// caller gets back.
+///
+/// A refused claim took nothing: no claim exists, no command was built, and
+/// the reserved admission is still the execution start's. A not-found
+/// refusal hands it back, as the execution start's other not-found answers
+/// do: a not-found answer does not prove that the turn did not run, and the
+/// returned admission is what tells such a refusal from one that came after
+/// the turn started. A busy refusal answers without it, as it did.
 fn refused_turn_claim<A>(
     error: SessionError,
-    _reserved_admission: &mut Option<A>,
+    reserved_admission: &mut Option<A>,
 ) -> (SessionError, Option<A>) {
-    (error, None)
+    let returned_admission = match &error {
+        SessionError::NotFound { .. } => reserved_admission.take(),
+        _ => None,
+    };
+    (error, returned_admission)
 }
 
 impl SessionHandle {
@@ -17780,3 +17791,6 @@ mod operator_instruction_tests;
 
 #[cfg(test)]
 mod turn_reasoning_effort_tests;
+
+#[cfg(test)]
+mod turn_claim_refusal_tests;

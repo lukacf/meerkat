@@ -152,7 +152,7 @@ const NOTICE_WORDS: Record<QuestionSetNoticeKind, string> = {
 
 /** Show the byte counter from here on: near the limit, not before. */
 const FREE_TEXT_COUNTER_FROM = 200;
-const SOMETHING_ELSE = "Something else";
+const SOMETHING_ELSE = "Write my own reply";
 /** How long after Send or Dismiss the card still takes the focus for its
  * sentence: the state follows the press at once, so anything later is not
  * that press. */

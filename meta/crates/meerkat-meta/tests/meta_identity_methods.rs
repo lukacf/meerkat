@@ -4137,6 +4137,157 @@ async fn another_request_under_a_held_id_that_cannot_be_judged_reads_the_held_de
     let _ = runtime.shutdown().await;
 }
 
+/// A decision that ended is the answer of its operation for good, whatever
+/// is asked under it: the held request, another request the host's own
+/// check refuses, a change of an agent the host configures, and a request
+/// that cannot be judged all answer how the decision ended
+/// (`decision_closed`), and none of them the refusal a new request gets.
+///
+/// RED before the held state answered ahead of the owner's rule, the
+/// host's check and the judgment's refusals: the three other requests were
+/// answered `validation_refused`, `owner_read_only` and `profile_unknown`.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_an_ended_decision_every_request_answers_how_it_ended() {
+    use meerkat_meta::identity_creation::WithdrawRequest;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(
+        held_policy(),
+        IdentityFamilyOptions::new().with_host_hooks(Arc::new(NamingHooks))
+    ));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "r-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+
+    let held = asked_create(&family, &mob, &host, "r-1", scout()).await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    family
+        .withdraw(&mob, &host, WithdrawRequest::new(operation.clone()))
+        .await
+        .expect("the host withdraws the held create");
+
+    let configured = match family
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new(HOST_A)))
+        .await
+    {
+        Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest.clone(),
+        other => panic!("a get answers {HOST_A}: {other:?}"),
+    };
+    let mut wrong = Vec::new();
+    for (what, change) in [
+        ("the held request", create_of(scout())),
+        (
+            "a create the host's check refuses",
+            create_of(json!([{"name": "forbidden", "profile": "worker"}])),
+        ),
+        (
+            "an archive of an agent the host configures",
+            IdentityChangeSpec::Archive(agent_ref(HOST_A, &configured)),
+        ),
+        (
+            "a create that cannot be judged",
+            create_of(json!([{"name": "other", "profile": "no-such-profile"}])),
+        ),
+    ] {
+        let answer = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(operation.clone(), change),
+            )
+            .await;
+        match answer.refusal() {
+            Some(refusal) if refusal.kind_token() == "decision_closed" => {}
+            _ => wrong.push(format!("{what} answers {}", answer.to_json())),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// [`held_policy`]'s creates, under the peer rules `peers`.
+fn held_policy_giving_peers(peers: Value) -> Arc<IdentityCreationPolicy> {
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": peers,
+            "approval": {"rules": [
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"identity": ["scout"]}, "outcome": approval},
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// NOT CURED, and pinned as it is: a held request asked again that still
+/// normalizes, but to another normalized form than the one the decision
+/// holds, is refused `operation_reused`, while the operation still reads
+/// its decision. A normalized request states what the rules gave it (here
+/// the rule each peer is given under), and the held request is compared by
+/// the digest of that form. A create with a peer is held while the peer
+/// rules' default gives the peer; the next launch's policy gives the same
+/// peer under a named rule. The same request under the same id normalizes,
+/// its form names the other rule, and it is taken for another request.
+/// Telling it apart would take an identity of the request as it was sent,
+/// kept with the decision; the held body has none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_change_asked_again_that_normalizes_to_another_form_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "held-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker", "peers": [HOST_A]}]);
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    assert!(runtime.attach_identity_policy(
+        held_policy_giving_peers(json!({"default": "allow"})),
+        IdentityFamilyOptions::new()
+    ));
+    let held = asked_create(
+        &runtime.identity_family().expect("the family"),
+        &runtime.mob_handle(),
+        &host,
+        "held-1",
+        scout(),
+    )
+    .await;
+    let decision_id = decision_of(&held);
+    ended_for_a_reopen(runtime, temp.path()).await;
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    assert!(runtime.attach_identity_policy(
+        held_policy_giving_peers(json!({
+            "rules": [{"id": "workers", "target": {"profile": ["worker"]}, "outcome": "allow"}],
+            "default": "allow",
+        })),
+        IdentityFamilyOptions::new()
+    ));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+
+    let again = asked_create(&family, &mob, &host, "held-1", scout()).await;
+    assert_eq!(
+        refusal_of(&again).0,
+        "operation_reused",
+        "the same request, normalized to another form, is taken for another: {again:?}"
+    );
+    assert_eq!(
+        decision_read(&family, &mob, &host, &operation).await,
+        decision_id,
+        "the operation still reads its held decision"
+    );
+    let _ = runtime.shutdown().await;
+}
+
 /// A person's approval is evidence, never authority over the launch's
 /// policy. A create is held and approved; the launch that carries it out
 /// has a policy that denies creates: nothing is created, the decision ends

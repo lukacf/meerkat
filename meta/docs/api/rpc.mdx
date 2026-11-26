@@ -1803,7 +1803,8 @@ of the held change's kind that names the same agents and can no longer be
 normalized, or for which a read failed, answers the held decision too: it
 cannot be told from the held request, and nothing is held or written for
 it. Any other request that cannot be normalized, of another change kind or
-naming other agents, is `operation_reused`. A request that is normalized
+naming other agents, is `operation_reused`, and so is one under a decision
+whose held request this gateway cannot read. A request that is normalized
 and is not the held one is answered by the owner's rule
 (`owner_read_only`) or the host's own check (`validation_refused`) where
 they refuse it, and `operation_reused` otherwise. One retry is not
@@ -1811,7 +1812,11 @@ recognised: a held request that still normalizes, but to another form than
 the one the decision holds (the peer rules now give one of its peers under
 another rule, for one), is refused `operation_reused`, while
 `meta/identity/operation` reads the decision. Under the `request_id` of a
-decision that has ended, every request answers how it ended.
+decision that ended without its change (rejected, expired, withdrawn, or
+refused when it was carried out), every request answers how it ended. A
+decision that was approved and carried out is a change that committed: a
+retry under its `request_id` is compared with what committed, as the
+paragraph before this one says.
 
 With every change the mob drives the seats it still owes again (see
 [`meta/identity/create`](#meta%2Fidentity%2Fcreate)), beside the change: the

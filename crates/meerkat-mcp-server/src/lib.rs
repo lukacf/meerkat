@@ -9718,14 +9718,200 @@ mod tests {
         }
     }
 
+    /// The answers the MCP page publishes for a plain `meerkat_resume` that
+    /// is queued beside a resume that rebuilds the session (docs/api/mcp.mdx,
+    /// `meerkat_resume`, under the field `reasoning_effort`: such a resume
+    /// "is answered Ok, with `-32003` (`session_resume_required`), or with
+    /// one of two errors that carry no kind", and beside a resume that
+    /// rebuilds for another field it "has the same answers").
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PublishedPlainResumeAnswer {
+        /// The resume ran its turn and answered Ok.
+        Ran,
+        /// `-32003` with the kind `session_resume_required`.
+        ResumeRequired,
+        /// `-32603` with no data and the runtime's not-ready text.
+        RuntimeNotReady,
+        /// `-32005` with no data and the text `request cancelled`.
+        Cancelled,
+    }
+
+    /// Reads a plain resume's answer against the published set. An answer
+    /// outside the set is refused with what it was.
+    fn published_plain_resume_answer(
+        answer: Result<(), &ToolCallError>,
+    ) -> Result<PublishedPlainResumeAnswer, String> {
+        const RUNTIME_NOT_READY: &str =
+            "Agent error: agent error: Internal error: Runtime not ready: destroyed";
+        const CANCELLED: &str = "request cancelled";
+        let Err(ended) = answer else {
+            return Ok(PublishedPlainResumeAnswer::Ran);
+        };
+        let kind = ended
+            .data
+            .as_ref()
+            .and_then(|data| data.get("kind"))
+            .and_then(Value::as_str);
+        match (ended.code, ended.data.is_some(), ended.message.as_str()) {
+            (-32003, true, _) if kind == Some("session_resume_required") => {
+                Ok(PublishedPlainResumeAnswer::ResumeRequired)
+            }
+            (-32003, _, text) => Err(format!(
+                "-32003 without the kind session_resume_required (kind {kind:?}): {text}"
+            )),
+            (-32603, false, RUNTIME_NOT_READY) => Ok(PublishedPlainResumeAnswer::RuntimeNotReady),
+            (-32005, false, CANCELLED) => Ok(PublishedPlainResumeAnswer::Cancelled),
+            (code @ (-32603 | -32005), true, text) => Err(format!(
+                "an answer that carries no kind carries data: {code} {:?}: {text}",
+                ended.data
+            )),
+            (code @ (-32603 | -32005), false, text) => {
+                Err(format!("another text for {code}: {text}"))
+            }
+            (code, _, text) => Err(format!("another code, {code}: {text}")),
+        }
+    }
+
+    /// The ground of the page's advice to read the history before sending a
+    /// prompt again: whatever the plain resume answered, its prompt is in the
+    /// session's history at most once, and exactly once when it answered Ok.
+    fn plain_prompt_history_is_published(
+        answer: PublishedPlainResumeAnswer,
+        times_in_history: usize,
+    ) -> Result<(), String> {
+        match (answer, times_in_history) {
+            (_, times) if times > 1 => Err(format!(
+                "the plain resume answered {answer:?} and its prompt is in the history {times} times"
+            )),
+            (PublishedPlainResumeAnswer::Ran, 0) => {
+                Err("the plain resume answered Ok and its prompt is not in the history".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// How many user messages of the session's history hold `prompt`.
+    async fn user_messages_holding(
+        state: &MeerkatMcpState,
+        session_id: &meerkat::SessionId,
+        prompt: &str,
+    ) -> usize {
+        let history = Box::pin(handle_tools_call(
+            state,
+            "meerkat_history",
+            &json!({ "session_id": session_id.to_string() }),
+        ))
+        .await
+        .expect("the session's history");
+        let history = unwrap_payload(history);
+        assert_eq!(history["has_more"], false, "the whole history was read");
+        history["messages"]
+            .as_array()
+            .expect("the history's messages")
+            .iter()
+            .filter(|message| message["role"] == "user" && message.to_string().contains(prompt))
+            .count()
+    }
+
+    /// The teeth of the two readers above: the four published answers pass,
+    /// and each answer outside the set is refused with a reason that names
+    /// what it was. The same for the history: once or not at all, and once
+    /// after Ok.
+    #[test]
+    fn a_plain_resume_answer_outside_the_published_set_is_refused() {
+        use PublishedPlainResumeAnswer::{Cancelled, Ran, ResumeRequired, RuntimeNotReady};
+        const NOT_READY: &str =
+            "Agent error: agent error: Internal error: Runtime not ready: destroyed";
+        let ended = |code: i32, message: &str, data: Option<Value>| ToolCallError {
+            code,
+            message: message.to_string(),
+            data,
+        };
+        let typed = json!({ "kind": "session_resume_required", "session_resume_required": true });
+
+        assert_eq!(published_plain_resume_answer(Ok(())), Ok(Ran));
+        for (answer, published) in [
+            (
+                ended(-32003, "MCP ingress is unavailable", Some(typed.clone())),
+                ResumeRequired,
+            ),
+            (ended(-32603, NOT_READY, None), RuntimeNotReady),
+            (ended(-32005, "request cancelled", None), Cancelled),
+        ] {
+            assert_eq!(
+                published_plain_resume_answer(Err(&answer)),
+                Ok(published),
+                "{answer:?}"
+            );
+        }
+
+        for (name, answer, reason) in [
+            (
+                "another code",
+                ended(-32004, "Session not found: x", None),
+                "another code, -32004",
+            ),
+            (
+                "another -32603 text",
+                ended(-32603, "Agent error: session not found: x", None),
+                "another text for -32603",
+            ),
+            (
+                "another -32005 text",
+                ended(-32005, "request cancelled before response publish", None),
+                "another text for -32005",
+            ),
+            (
+                "the not-ready text with data",
+                ended(-32603, NOT_READY, Some(json!({ "kind": "something" }))),
+                "carries data",
+            ),
+            (
+                "the cancelled text with data",
+                ended(-32005, "request cancelled", Some(json!({}))),
+                "carries data",
+            ),
+            (
+                "-32003 with another kind",
+                ended(-32003, "busy", Some(json!({ "kind": "something_else" }))),
+                "without the kind session_resume_required",
+            ),
+            (
+                "-32003 with no data",
+                ended(-32003, "MCP ingress is unavailable", None),
+                "without the kind session_resume_required",
+            ),
+        ] {
+            let refusal = published_plain_resume_answer(Err(&answer))
+                .expect_err("an answer outside the published set is refused");
+            assert!(refusal.contains(reason), "{name}: {refusal}");
+        }
+
+        for answer in [Ran, ResumeRequired, RuntimeNotReady, Cancelled] {
+            assert_eq!(plain_prompt_history_is_published(answer, 1), Ok(()));
+            let twice = plain_prompt_history_is_published(answer, 2)
+                .expect_err("a prompt kept twice is refused");
+            assert!(twice.contains("in the history 2 times"), "{twice}");
+        }
+        for answer in [ResumeRequired, RuntimeNotReady, Cancelled] {
+            assert_eq!(plain_prompt_history_is_published(answer, 0), Ok(()));
+        }
+        let absent = plain_prompt_history_is_published(Ran, 0)
+            .expect_err("a prompt absent after Ok is refused");
+        assert!(absent.contains("not in the history"), "{absent}");
+    }
+
     /// A `meerkat_resume` that rebuilds the session for another build field
     /// (here `max_tokens`) is unchanged: sent while a turn runs, it is not
     /// answered busy. It waits behind that turn, rebuilds the session and
     /// runs. The rebuild replaces the session's runtime attachment, so a
-    /// plain resume queued beside it either runs or ends with the typed
-    /// `session_resume_required` answer, depending on which of the two
-    /// reaches the session first: both outcomes are pinned, and nothing
-    /// else. The session is live afterwards and takes its next resume.
+    /// plain resume queued beside it has the answers the MCP page publishes
+    /// for it ([`PublishedPlainResumeAnswer`]): it runs, it ends with the
+    /// typed `session_resume_required` answer, or it ends with one of the
+    /// two errors that carry no kind. Those four are pinned with their
+    /// texts, and nothing else. Whatever it answered, its prompt is in the
+    /// session's history at most once, and exactly once when it answered Ok.
+    /// The session is live afterwards and takes its next resume.
     #[tokio::test]
     async fn resume_that_rebuilds_for_another_field_while_a_turn_runs_waits_and_runs() {
         // Bounds a failure only; the passing path never waits for it.
@@ -9797,24 +9983,26 @@ mod tests {
                     answer.err()
                 );
             }
-            match timeout(FAILURE_BOUND, plain)
+            let plain = timeout(FAILURE_BOUND, plain)
                 .await
                 .unwrap_or_else(|_| panic!("plain_first={plain_first}: the plain resume answers"))
-                .expect("resume task")
-            {
-                Ok(_) => {}
-                Err(ended) => {
-                    assert_eq!(
-                        (
-                            ended.code,
-                            ended.data.as_ref().map(|data| data["kind"].clone()),
-                        ),
-                        (-32003, Some(json!("session_resume_required"))),
-                        "plain_first={plain_first}: the plain resume: {}",
-                        ended.message
-                    );
-                }
+                .expect("resume task");
+            let plain = published_plain_resume_answer(plain.as_ref().map(|_| ()))
+                .unwrap_or_else(|refusal| {
+                    panic!(
+                        "plain_first={plain_first}: the plain resume answered outside the published set: {refusal}"
+                    )
+                });
+            println!("plain_first={plain_first}: the plain resume answered {plain:?}");
+            // Both resumes have answered: the history is read as the page
+            // advises, before anything else is sent.
+            let kept = user_messages_holding(&state, &session_id, "plain turn").await;
+            if let Err(refusal) = plain_prompt_history_is_published(plain, kept) {
+                panic!("plain_first={plain_first}: {refusal}");
             }
+            println!(
+                "plain_first={plain_first}: the plain prompt is in the history {kept} time(s)"
+            );
             assert_eq!(
                 (
                     state.service.has_live_session(&session_id).await.ok(),

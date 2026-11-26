@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The stdio gateway (`rpc_gateway`) answers Meerkat's question about the
+  form a build records a named auth binding in. A build records a binding
+  stamped with the realm that declares it, so a member whose realm inherits
+  its binding from a parent realm names the binding under its own realm and
+  its session records it under the parent's. Where Meerkat would keep a
+  member's live session and not rebuild it, it keeps the session only when
+  it records the binding the member names, as named or in that recorded
+  form, and it asks the gateway's session service for the form. The
+  gateway's agent builder wraps the builder that builds every agent and did
+  not pass the question on, so only the named form counted there: by the
+  source, a live session on an inherited binding is answered as a binding
+  conflict. The builder now forwards the question and returns the wrapped
+  builder's answer unchanged: the recorded form, and the wrapped builder's
+  own error for a binding it does not resolve, which still has no other
+  form. The HTTP gateway (`meta_gateway`) uses the wrapped builder directly
+  and already answered. This was found by reading the source; no gateway
+  was run to reproduce it.
+
 ## [0.9.19] - 2026-11-26
 
 ### Added
@@ -145,24 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reason that the gate does not write itself; they come last in it, and a
   control character in either is replaced by `?`. The verdicts are
   unchanged.
-
-- The stdio gateway (`rpc_gateway`) answers Meerkat's question about the
-  form a build records a named auth binding in. A build records a binding
-  stamped with the realm that declares it, so a member whose realm inherits
-  its binding from a parent realm names the binding under its own realm and
-  its session records it under the parent's. Where Meerkat would keep a
-  member's live session and not rebuild it, it keeps the session only when
-  it records the binding the member names, as named or in that recorded
-  form, and it asks the gateway's session service for the form. The
-  gateway's agent builder wraps the builder that builds every agent and did
-  not pass the question on, so only the named form counted there: by the
-  source, a live session on an inherited binding is answered as a binding
-  conflict. The builder now forwards the question and returns the wrapped
-  builder's answer unchanged: the recorded form, and the wrapped builder's
-  own error for a binding it does not resolve, which still has no other
-  form. The HTTP gateway (`meta_gateway`) uses the wrapped builder directly
-  and already answered. This was found by reading the source; no gateway
-  was run to reproduce it.
 
 ### Upgrade notes
 

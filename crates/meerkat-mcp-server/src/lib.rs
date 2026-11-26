@@ -9832,7 +9832,7 @@ mod tests {
         assert_eq!(published_plain_resume_answer(Ok(())), Ok(Ran));
         for (answer, published) in [
             (
-                ended(-32003, "MCP ingress is unavailable", Some(typed.clone())),
+                ended(-32003, "MCP ingress is unavailable", Some(typed)),
                 ResumeRequired,
             ),
             (ended(-32603, NOT_READY, None), RuntimeNotReady),

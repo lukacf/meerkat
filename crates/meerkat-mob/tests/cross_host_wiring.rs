@@ -461,7 +461,7 @@ async fn host_restart_reinstalls_wired_peer_trust_without_manual_drive() {
 }
 
 // ==========================================================================
-// A placed member's reply after its host was cut off and came back on the
+// A placed member's reply after its host was stopped and came back on the
 // same binding carries what the host holds at that turn
 // ==========================================================================
 
@@ -533,22 +533,28 @@ fn bound_host_row(
 }
 
 /// A value only the member host holds reaches the controlling mob through
-/// the placed member's ordinary reply, and after the host was cut off and
+/// the placed member's ordinary reply, and after the host was stopped and
 /// came back on the same binding the next reply carries the value the host
-/// holds then.
+/// holds at that turn.
 ///
 /// The value is a file on the host's side. The member's model stand-in reads
 /// it again for every turn and keeps no copy; the controlling mob is never
-/// handed it. The value changes while the host is down. The cut is the
-/// fixture's partition: the host daemon is fully quiesced and keeps its
-/// identity, address, binding rows and member realm, and the restore boots
-/// it over them. No bind follows the first one: the controlling roster's
-/// row of the host and the host's own binding record are the same before
-/// and after, and the member keeps its session.
+/// handed it. The value changes twice: while the host is down, and again
+/// once the host is back and the member is ready, before the second turn.
+/// The second turn's reply carries the last value and neither earlier one,
+/// so a value read once when the host came back and kept would fail it.
+///
+/// The stop is the fixture's partition: the host daemon is fully quiesced
+/// and keeps its identity, address, binding rows and member realm, and the
+/// restore boots it over them. No bind follows the first one: the
+/// controlling roster's row of the host and the host's own binding record,
+/// read again after the second turn, are the same as before the stop, and
+/// the member keeps its session.
 #[tokio::test(flavor = "multi_thread")]
-async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_then() {
+async fn placed_member_reply_after_host_restart_carries_what_the_host_holds_then() {
     const BEFORE: &str = "host-only-value-alpha-7f3a";
-    const AFTER: &str = "host-only-value-bravo-91c2";
+    const WHILE_DOWN: &str = "host-only-value-bravo-91c2";
+    const LATEST: &str = "host-only-value-charlie-5d8e";
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
 
     let host_side = tempfile::tempdir().expect("host-side directory");
@@ -577,9 +583,9 @@ async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_th
         .materialized
         .get("b2")
         .cloned()
-        .expect("b2 materialized row before the cut");
+        .expect("b2 materialized row before the stop");
     // The public placed-member event subscription is the consumer that makes
-    // readiness observable; it is held across the cut.
+    // readiness observable; it is held across the stop.
     let b2_events = controlling
         .handle
         .subscribe_agent_events(&identity("b2"))
@@ -605,7 +611,7 @@ async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_th
             meerkat_contracts::wire::WireHostBindPhase::Bound,
             Some(report.epoch),
         ),
-        "the host is bound at the bind's epoch before the cut"
+        "the host is bound at the bind's epoch before the stop"
     );
     let binding_before = fixture.host_binding_record(&mob_id).await;
 
@@ -615,20 +621,22 @@ async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_th
         .member(&identity("b2"))
         .await
         .expect("b2 handle")
-        .send("reconnect-row-turn-one", HandlingMode::Queue)
+        .send("restart-row-turn-one", HandlingMode::Queue)
         .await
         .expect("turn one admits");
-    let first = reply_rows(&controlling, "b2", "reconnect-row-turn-one").await;
+    let first = reply_rows(&controlling, "b2", "restart-row-turn-one").await;
     assert!(
         first.iter().any(|row| row.contains(BEFORE)),
         "turn one's reply carries the host's value: {first:?}"
     );
     assert!(
-        !first.iter().any(|row| row.contains(AFTER)),
+        !first
+            .iter()
+            .any(|row| row.contains(WHILE_DOWN) || row.contains(LATEST)),
         "turn one's reply cannot carry a value the host did not hold yet: {first:?}"
     );
 
-    // The cut. The host's value changes while the host is down.
+    // The stop. The host's value changes while the host is down.
     let partitioned = fixture.partition().await;
     wait_until("public reachability to observe the host outage", || async {
         let Ok(snapshot) = controlling.handle.member_status(&identity("b2")).await else {
@@ -639,7 +647,7 @@ async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_th
                 != Some(meerkat_contracts::wire::WireReachability::Reachable)
     })
     .await;
-    std::fs::write(&value_file, AFTER).expect("change the host's value");
+    std::fs::write(&value_file, WHILE_DOWN).expect("change the host's value while it is down");
     let fixture = partitioned
         .restore_with_member_llm_client(member_client)
         .await;
@@ -657,18 +665,18 @@ async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_th
             binding_before.epoch,
             binding_before.binding_generation,
         ),
-        "the host's binding record is the one from before the cut"
+        "the host's binding record is the one from before the stop"
     );
     let b2_after = binding_after
         .materialized
         .get("b2")
         .cloned()
-        .expect("b2 materialized row survives the cut");
+        .expect("b2 materialized row survives the stop");
     assert_eq!(
         b2_after.session_id, b2_before.session_id,
-        "the member keeps its session across the cut"
+        "the member keeps its session across the stop"
     );
-    wait_until("public remote-member readiness after the cut", || async {
+    wait_until("public remote-member readiness after the stop", || async {
         public_remote_member_ready(
             &controlling,
             "b2",
@@ -682,26 +690,62 @@ async fn placed_member_reply_after_host_reconnect_carries_what_the_host_holds_th
     assert_eq!(
         bound_host_row(&controlling, &report.host_id),
         roster_before,
-        "the controlling roster's row of the host is the one from before the cut"
+        "the controlling roster's row of the host is the one from before the stop"
     );
+
+    // The host's value changes again, now that the host is back and the
+    // member is ready: a value read once when the host came back, and kept,
+    // is not this one.
+    std::fs::write(&value_file, LATEST).expect("change the host's value once it is back");
 
     // Turn two: the reply carries the value the host holds now.
     controlling
         .handle
         .member(&identity("b2"))
         .await
-        .expect("b2 handle after the cut")
-        .send("reconnect-row-turn-two", HandlingMode::Queue)
+        .expect("b2 handle after the stop")
+        .send("restart-row-turn-two", HandlingMode::Queue)
         .await
         .expect("turn two admits");
-    let second = reply_rows(&controlling, "b2", "reconnect-row-turn-two").await;
+    let second = reply_rows(&controlling, "b2", "restart-row-turn-two").await;
     assert!(
-        second.iter().any(|row| row.contains(AFTER)),
-        "turn two's reply carries the value the host holds after the cut: {second:?}"
+        second.iter().any(|row| row.contains(LATEST)),
+        "turn two's reply carries the value the host holds at that turn: {second:?}"
     );
     assert!(
-        !second.iter().any(|row| row.contains(BEFORE)),
-        "turn two's reply carries no value from before the cut: {second:?}"
+        !second
+            .iter()
+            .any(|row| row.contains(BEFORE) || row.contains(WHILE_DOWN)),
+        "turn two's reply carries no earlier value: {second:?}"
+    );
+
+    // Still the same binding after the turn: nothing bound again on the way.
+    let binding_at_the_end = fixture.host_binding_record(&mob_id).await;
+    assert_eq!(
+        (
+            &binding_at_the_end.supervisor_peer_id,
+            binding_at_the_end.epoch,
+            binding_at_the_end.binding_generation,
+        ),
+        (
+            &binding_before.supervisor_peer_id,
+            binding_before.epoch,
+            binding_before.binding_generation,
+        ),
+        "the host's binding record after turn two is the one from before the stop"
+    );
+    assert_eq!(
+        binding_at_the_end
+            .materialized
+            .get("b2")
+            .map(|row| row.session_id.clone()),
+        Some(b2_before.session_id.clone()),
+        "the member's session after turn two is the one from before the stop"
+    );
+    assert_eq!(
+        bound_host_row(&controlling, &report.host_id),
+        roster_before,
+        "the controlling roster's row of the host after turn two is the one from before the stop"
     );
 
     fixture.shutdown().await;

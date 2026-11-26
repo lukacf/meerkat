@@ -53,7 +53,14 @@ import {
   rowKey,
   waveOf,
   compiledInDocKeys,
+  BUILT_BY_A_READER_ROW,
+  BUILT_BY_ANOTHER_LANE,
+  BUILT_BY_NO_LANE,
+  BUILT_NOT_KNOWN,
+  BUILT_ON_THE_PUSH,
+  nameLeftReadersByState,
   readerRows,
+  readerStates,
   touchesGuardLane,
   withTestFeatures,
 } from "./ci-cargo-lanes.mjs";
@@ -1203,8 +1210,10 @@ for (const path of [
       "scripts/ci-release-asset-download",
     ]) {
       const plan = planFor([path], ["--event", event]);
+      // The report of the readers (reader_states) names the readers each
+      // path selects, as changed_paths names the path: it is no lane.
       const differing = Object.keys({ ...expected, ...plan }).filter(
-        (key) => key !== "changed_paths" && key !== "reason" && !isDeepStrictEqual(expected[key], plan[key]),
+        (key) => key !== "changed_paths" && key !== "reason" && key !== "reader_states" && !isDeepStrictEqual(expected[key], plan[key]),
       );
       if (plan.mode !== "workspace" || plan.reason !== `global build configuration changed: ${path}` || differing.length > 0) {
         unlike.push(`${path} (${event}): mode ${plan.mode}, reason "${plan.reason}", ${differing.length} other plan fields differ`);
@@ -2186,6 +2195,164 @@ for (const path of [
   assert.deepEqual(canaryRows(["downstream_builds"]), [[], ["facade:test:canarybin canaries"]]);
   assert.deepEqual(canaryRows(null), [[], ["facade:test:canarybin canaries"]], "the whole canary binary is the push's");
   assert.deepEqual(canaryRows(["static_check"]), [["--test canarybin -E test(/(^|::)(static_check)$/)"], []]);
+}
+
+// The report of the readers' states (reader_states): for each selection the
+// lane that compiles its target, from the plan, and what happens to the
+// tests it names, from their sources. It changes no row: the rows and the
+// labels left to the push are the ones the plan had.
+{
+  const byName = new Map([
+    [
+      "sdk",
+      {
+        name: "sdk",
+        targets: [
+          { name: "sdk", kind: ["lib"] },
+          { name: "contract", kind: ["test"], src_path: resolve(root, "sdk/tests/contract.rs") },
+          { name: "demo", kind: ["example"], src_path: resolve(root, "sdk/examples/demo.rs") },
+        ],
+      },
+    ],
+  ]);
+  const inventory = { entries: [{ path: "sdk/python/", package: "sdk", target: "test:contract", sources: ["sdk/tests/support.rs"] }] };
+  const ignored = '#[test]\n#[ignore = "needs a Python environment"]\nfn runs_the_sdk_script() {}\n';
+  const plain = "#[test]\nfn runs_the_sdk_script() {}\n";
+  const lane = { "scripts/sdk-lane": "cargo test -p sdk --test contract -- --exact runs_the_sdk_script --ignored\n" };
+  const report = ({ deferToPush, source, files = {}, features = [], tests = ["runs_the_sdk_script"], target = "test:contract", scope = "target", search = undefined }) => {
+    const notes = [];
+    const deferred = { reader_rows: [] };
+    const selections = [{ package: "sdk", target, scope, tests, features, paths: ["sdk/python/x.py"], reads: ["sdk/python/"] }];
+    const base = {
+      selections,
+      result: { main_unit_shards: [], unit_packages: [], unit_shards: [], integration_suites: [] },
+      byName,
+      heavyChain: new Set(["sdk"]),
+      deferToPush,
+      compiledInDocs: new Set(),
+      unified: new Map([["sdk", new Set()]]),
+    };
+    const rows = readerRows({ ...base, deferred, notes });
+    // The notes change nothing: the same call without them plans the same
+    // rows and leaves the same labels.
+    const plainDeferred = { reader_rows: [] };
+    assert.deepEqual([readerRows({ ...base, deferred: plainDeferred }), plainDeferred], [rows, deferred], "the notes change no row");
+    const texts = { "sdk/tests/contract.rs": source, "sdk/tests/support.rs": "pub fn helper() {}\n", ...files };
+    const states = readerStates({
+      notes,
+      inventory,
+      byName,
+      readSource: (path) => texts[path] ?? null,
+      filesNaming: search ?? (() => Object.keys(files)),
+    });
+    assert.equal(states.length, 1);
+    const left = [...deferred.reader_rows];
+    nameLeftReadersByState(deferred, states);
+    assert.deepEqual(
+      [...deferred.reader_rows, ...deferred.reader_rows_not_executed, ...deferred.reader_rows_separately_executed, ...deferred.reader_rows_unproven].sort(),
+      left.sort(),
+      "every label left to the push stays in exactly one list",
+    );
+    return { rows: rows.map((row) => row.test_flags), deferred, state: states[0] };
+  };
+  const key = ({ state }) => [state.label, state.planned, state.built, state.execution];
+
+  // PLANNED, BUILT, IGNORED AND NOT EXECUTED: the pull request leaves the
+  // target to the push, whose rows build it; its one named test is ignored
+  // and no file runs it. It is named as built and not run, and not among
+  // the rows the push runs.
+  {
+    const pr = report({ deferToPush: true, source: ignored });
+    assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "ignored, not executed"]);
+    assert.deepEqual(
+      [pr.rows, pr.deferred.reader_rows, pr.deferred.reader_rows_not_executed, pr.deferred.reader_rows_separately_executed, pr.deferred.reader_rows_unproven],
+      [[], [], ["sdk:test:contract"], [], []],
+    );
+    assert.deepEqual(pr.state.ignored_tests, [
+      {
+        name: "runs_the_sdk_script",
+        reason: "needs a Python environment",
+        source: "sdk/tests/contract.rs",
+        line: 3,
+        claimed_lane: null,
+        execution: "ignored, not executed",
+        evidence: [],
+      },
+    ]);
+    // On the push another lane (its closure-tests rows) builds it; with a
+    // feature those rows do not build, a reader row does. Built either way,
+    // it is still not executed.
+    assert.deepEqual(key(report({ deferToPush: false, source: ignored })), ["sdk:test:contract", true, BUILT_BY_ANOTHER_LANE, "ignored, not executed"]);
+    const row = report({ deferToPush: false, source: ignored, features: ["python"] });
+    assert.deepEqual([key(row), row.rows], [["sdk:test:contract", true, BUILT_BY_A_READER_ROW, "ignored, not executed"], ["--test contract -E test(/(^|::)(runs_the_sdk_script)$/)"]]);
+  }
+
+  // SEPARATELY EXECUTED: a file other than the test's own sources asks for
+  // ignored tests and names the test. The evidence is that file and its
+  // lines.
+  {
+    const pr = report({ deferToPush: true, source: ignored, files: lane });
+    assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "separately executed"]);
+    assert.deepEqual([pr.deferred.reader_rows, pr.deferred.reader_rows_separately_executed], [[], ["sdk:test:contract"]]);
+    assert.deepEqual(pr.state.ignored_tests[0].evidence, [
+      {
+        path: "scripts/sdk-lane",
+        flag_line: 1,
+        flag: "cargo test -p sdk --test contract -- --exact runs_the_sdk_script --ignored",
+        selector_line: 1,
+        selector: "cargo test -p sdk --test contract -- --exact runs_the_sdk_script --ignored",
+      },
+    ]);
+    // The test's own source saying how to run it is no runner.
+    const own = `// cargo test -p sdk --test contract -- --exact runs_the_sdk_script --ignored\nconst HOW: &str = "runs_the_sdk_script --ignored";\n${ignored}`;
+    assert.equal(report({ deferToPush: true, source: own, search: () => ["sdk/tests/contract.rs"] }).state.execution, "ignored, not executed");
+  }
+
+  // UNPROVEN: the ignore reason names a lane and no file shows its runner;
+  // or the search for runners failed. Neither run nor not run.
+  {
+    const claimed = report({ deferToPush: true, source: ignored.replace("needs a Python environment", "lane:sdk-live") });
+    assert.deepEqual(key(claimed), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "unproven"]);
+    assert.deepEqual([claimed.deferred.reader_rows, claimed.deferred.reader_rows_unproven, claimed.state.ignored_tests[0].claimed_lane], [[], ["sdk:test:contract"], "sdk-live"]);
+    assert.equal(report({ deferToPush: true, source: ignored, search: () => null }).state.execution, "unproven", "a failed search is no proof of absence");
+  }
+
+  // THE MIXED FILE: a target with an ignored and a plain test, read whole,
+  // is executed in part; the push runs it, so it stays among the rows left
+  // to the push, and the ignored test is reported by itself.
+  {
+    const mixed = report({ deferToPush: true, source: `${ignored}#[test]\nfn reads_the_docs() {}\n`, tests: null });
+    assert.deepEqual(key(mixed), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "executed in part"]);
+    assert.deepEqual([mixed.state.tests, mixed.state.ignored, mixed.state.ignored_tests.map((test) => [test.name, test.execution])], [2, 1, [["runs_the_sdk_script", "ignored, not executed"]]]);
+    assert.deepEqual([mixed.deferred.reader_rows, mixed.deferred.reader_rows_not_executed], [["sdk:test:contract"], []]);
+  }
+
+  // THE SOURCE CHANGES, THE REPORT FOLLOWS: without its ignore attribute
+  // the same row is executed and is a row the push runs.
+  {
+    const pr = report({ deferToPush: true, source: plain });
+    assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "executed"]);
+    assert.deepEqual([pr.deferred.reader_rows, pr.deferred.reader_rows_not_executed, pr.state.ignored_tests], [["sdk:test:contract"], [], undefined]);
+  }
+
+  // A row no CI lane builds (a live-provider feature) executes nothing in
+  // CI even when its test is plain; a runner of its own is still credited.
+  {
+    const live = report({ deferToPush: false, source: plain, features: ["integration-real-tests"] });
+    assert.deepEqual([key(live), live.rows], [["sdk:test:contract", true, BUILT_BY_NO_LANE, "not executed"], []]);
+    const laneRun = report({ deferToPush: false, source: ignored, features: ["integration-real-tests"], files: lane });
+    assert.deepEqual(key(laneRun), ["sdk:test:contract", true, BUILT_BY_NO_LANE, "separately executed"]);
+  }
+
+  // Library code is reached by every test of its package and is not judged
+  // test by test; an example program without tests is run by no lane, and
+  // the plan does not say which lane compiles it.
+  {
+    const whole = report({ deferToPush: false, source: ignored, target: "lib", scope: "package", tests: null });
+    assert.deepEqual([key(whole), whole.state.judged, whole.rows], [["sdk:package", true, BUILT_BY_A_READER_ROW, "executed"], false, ["--lib"]]);
+    const example = report({ deferToPush: false, source: plain, target: "example:demo", tests: null, files: { "sdk/examples/demo.rs": "fn main() {}\n" }, search: () => [] });
+    assert.deepEqual(key(example), ["sdk:example:demo", true, BUILT_NOT_KNOWN, "not judged"]);
+  }
 }
 
 // Compiled-in documentation is a crate's reader of a doc in its own
@@ -3347,6 +3514,85 @@ for (const path of [
   const browserLines = outputs(["--event", "pull_request", "--", browser]);
   assert.equal(browserLines.reader_not_run, "integration-tests:test:gpt_live_public_e2e", "the gate names the readers no lane runs");
   assert.doesNotMatch(browserLines.deferred_to_push, /gpt_live_public_e2e/, "and does not call them deferred");
+  // What happens to the readers' tests is reported beside the rows
+  // (reader_states), from the tests' own attributes. The three Python SDK
+  // contract targets of meerkat-meta hold one test each, marked ignore, and
+  // no file runs them with an ignored-run flag: a pull request names them
+  // as built on the push and run by no lane, not among the rows the push
+  // runs; the push builds them in its closure-tests rows and says the same.
+  // When a lane runs them, or the attribute goes, these lines change with
+  // it.
+  {
+    const sdkPath = "meta/sdk/python/meerkat_meta/__init__.py";
+    const sdkRows = ["meta:test:reference_app", "meta:test:sdk_parity", "meta:test:sdk_productization"];
+    const statesOf = (plan) => plan.reader_states.map((row) => [row.label, row.built, row.tests, row.ignored, row.execution]);
+    const sdkPr = planFor([sdkPath], ["--event", "pull_request"]);
+    assert.deepEqual(statesOf(sdkPr), sdkRows.map((label) => [label, BUILT_ON_THE_PUSH, 1, 1, "ignored, not executed"]));
+    assert.deepEqual(
+      [sdkPr.reader_rows, sdkPr.deferred_to_push.reader_rows, sdkPr.deferred_to_push.reader_rows_not_executed],
+      [[], [], sdkRows],
+      "the same three labels, named as not run",
+    );
+    const sdkPrLines = outputs(["--event", "pull_request", "--", sdkPath]);
+    assert.match(
+      sdkPrLines.deferred_to_push,
+      /(^|; )reader rows it builds and no lane runs \(every test they name is ignored\) meta:test:reference_app, meta:test:sdk_parity, meta:test:sdk_productization($|;)/,
+      "the gate says the push builds them and no lane runs them",
+    );
+    assert.doesNotMatch(sdkPrLines.deferred_to_push, /(^|; )reader rows meta:/, "and does not list them as rows the push runs");
+    const sdkPush = planFor([sdkPath]);
+    assert.deepEqual(statesOf(sdkPush), sdkRows.map((label) => [label, BUILT_BY_ANOTHER_LANE, 1, 1, "ignored, not executed"]));
+    assert.deepEqual([sdkPush.reader_rows, sdkPush.deferred_to_push], [[], null], "the push plans no row for them and leaves nothing");
+    for (const binary of ["meerkat-meta::reference_app", "meerkat-meta::sdk_parity", "meerkat-meta::sdk_productization"]) {
+      assert.ok(sdkPush.closure_test_rows.some((row) => row.binaries.includes(binary)), `the push's closure-tests rows build ${binary}`);
+    }
+    // The classification job's log carries the rows that are not simply
+    // executed, on every event.
+    assert.deepEqual(
+      JSON.parse(outputs(["--", sdkPath]).reader_states),
+      sdkRows.map((row) => ({ row, built: BUILT_BY_ANOTHER_LANE, tests: 1, ignored: 1, execution: "ignored, not executed", evidence: [] })),
+    );
+    assert.equal(outputs(["--event", "pull_request", "--", "docs/index.mdx"]).reader_states, "[]", "a plan whose readers all run reports none");
+    assert.ok(planFor(["docs/index.mdx"], ["--event", "pull_request"]).reader_states.every((row) => row.execution === "executed"));
+
+    // The live targets and Connect's fixture rows are ignored too, and a
+    // runner of their own selects them: they are never reported as "ignored,
+    // not executed" on the attribute alone. Each ignored test is credited
+    // only with a file that asks for ignored tests and names it (the live
+    // lane table, a fixture script); a test with no such file leaves its row
+    // unproven.
+    const liveRows = ["mcp-server:test:live_mcp_matrix", "rest:test:live_rest_matrix", "rpc:test:live_rpc_regression", "rpc:test:live_smoke_rpc"];
+    const live = planFor(["tests/fixtures/live_smoke/support.rs"], ["--event", "pull_request"]);
+    const connect = planFor(["connect/scripts/fixtures/r5_canonical_g_predecessor.py"], ["--event", "pull_request"]);
+    for (const [plan, labels, where] of [
+      [live, liveRows, /^tests\/integration\/src\/e2e_lanes\.rs$/],
+      [connect, ["connect:lib"], /^connect\/scripts\/fixtures\/[a-z0-9_]+\.py$/],
+    ]) {
+      for (const label of labels) {
+        const row = plan.reader_states.find((state) => state.label === label);
+        assert.ok(row, `${label} is planned`);
+        assert.ok(row.tests > 0 && row.ignored === row.tests, `${label}: every test it names is ignored`);
+        assert.ok(["separately executed", "unproven"].includes(row.execution), `${label} is ${row.execution}`);
+        for (const test of row.ignored_tests) {
+          assert.equal(test.execution, test.evidence.length > 0 ? "separately executed" : test.claimed_lane ? "unproven" : "ignored, not executed", `${label}: ${test.name}`);
+          // Every file that asks for ignored tests and names the test is
+          // cited (a test of a fixture script's argv is one, beside the
+          // script): the runner's own file is among them.
+          assert.ok(test.evidence.length === 0 || test.evidence.some((item) => where.test(item.path)), `${label}: ${test.name} is selected in its runner's file`);
+          for (const item of test.evidence) {
+            assert.ok(item.flag_line > 0 && item.selector_line > 0 && item.selector.includes(test.name), `${label}: ${test.name} cites its lines in ${item.path}`);
+          }
+        }
+        assert.equal(
+          row.execution === "separately executed",
+          row.ignored_tests.every((test) => test.evidence.length > 0),
+          `${label}: credited exactly when every test has its evidence`,
+        );
+      }
+    }
+    assert.deepEqual(connect.deferred_to_push.reader_rows_not_executed, [], "no Connect row is named as run by no lane");
+    assert.deepEqual(live.deferred_to_push.reader_rows_not_executed, [], "no live row is named as run by no lane");
+  }
   // An in-crate doc the crate compiles in selects the crate like its code
   // (no reader row: the crate's own lanes run); other in-crate docs select
   // nothing.

@@ -8,11 +8,16 @@ import assert from "node:assert/strict";
 import {
   READER_DEFINITION_PATHS,
   WHOLE_CHECKOUT,
+  hasIgnoredRunFlag,
+  ignoredRunEvidence,
   inventoryPathCovers,
   loadNonRustReaders,
   parseNonRustReaders,
+  readerExecution,
   readerPackagesFor,
   readerSelectionsFor,
+  readerTestState,
+  rustTestAttributes,
 } from "./ci-non-rust-readers.mjs";
 
 const inventory = loadNonRustReaders();
@@ -190,6 +195,171 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
   ];
   for (const [label, document] of bad) {
     assert.throws(() => parseNonRustReaders(document), Error, label);
+  }
+}
+
+// What a lane does with a reader row's tests: one fixture for each state,
+// the file that holds ignored and plain tests, and the change of a source.
+{
+  const plain = '#[test]\nfn reads_the_docs() {}\n';
+  const ignored = '#[test]\n#[ignore] // needs a Python environment\nfn runs_the_sdk_script() {}\n';
+  const laneIgnored = '#[tokio::test(flavor = "multi_thread")]\n#[ignore = "lane:e2e-smoke"]\nasync fn e2e_scenario_one() {}\n';
+  const stateOf = (tests, ...texts) => readerTestState(tests, texts.map((text, index) => ({ path: `tests/file_${index}.rs`, text })));
+  const none = () => [];
+
+  // The test attributes of a source: the kinds of test attribute, an ignore
+  // with a literal reason and one with a comment, an ignore that holds on
+  // some builds only, an attribute over several lines, comments and blank
+  // lines between an attribute and its function, and a function that is no
+  // test.
+  assert.deepEqual(
+    rustTestAttributes(
+      [
+        "#[test]",
+        "fn first() {}",
+        "",
+        "#[tokio::test(",
+        '    flavor = "multi_thread",',
+        ")]",
+        '#[ignore = "lane:e2e-live"]',
+        "// a comment between the attributes and the item",
+        "",
+        "pub(crate) async fn second() {}",
+        "#[test]",
+        '#[cfg_attr(not(target_os = "linux"), ignore)]',
+        "fn third() {}",
+        "#[rstest]",
+        "#[ignore] // by hand only",
+        "fn fourth() {}",
+        "#[cfg(test)]",
+        "fn helper() {}",
+        "#[derive(Debug)]",
+        "struct NotAFunction;",
+        "fn after_a_struct() {}",
+      ].join("\n"),
+    ),
+    [
+      { name: "first", line: 2, ignored: "no", reason: null },
+      { name: "second", line: 10, ignored: "always", reason: "lane:e2e-live" },
+      { name: "third", line: 13, ignored: "conditional", reason: null },
+      { name: "fourth", line: 16, ignored: "always", reason: "by hand only" },
+    ],
+  );
+
+  // An ignored-run flag is a runner's; git's own --ignored and nextest's
+  // default mode are not.
+  for (const line of [
+    'cargo test -p x --test y -- --ignored --nocapture',
+    "os.execve(binary, [binary, '--exact', selector, '--ignored'], env)",
+    "nextest run --run-ignored all -E 'test(x)'",
+    "nextest run --run-ignored=ignored-only",
+    "cargo test -- --include-ignored",
+    "          run_ignored: all",
+  ]) {
+    assert.ok(hasIgnoredRunFlag(line), `${line} asks for ignored tests`);
+  }
+  for (const line of [
+    'subprocess.run(["git", "status", "--porcelain", "--ignored"])',
+    "git ls-files --others --ignored --exclude-standard",
+    "nextest run --run-ignored default",
+    "cargo test -- --ignored-by-design",
+    "# these tests are ignored",
+  ]) {
+    assert.ok(!hasIgnoredRunFlag(line), `${line} asks for no ignored test`);
+  }
+
+  // EXECUTED: a test the row names carries no ignore attribute.
+  assert.equal(readerExecution(stateOf(["reads_the_docs"], plain), none).execution, "executed");
+
+  // IGNORED, NOT EXECUTED: every named test is ignored, no file shows a
+  // runner, and the ignore reason names no lane.
+  {
+    const report = readerExecution(stateOf(["runs_the_sdk_script"], ignored), none);
+    assert.deepEqual(
+      [report.execution, report.tests, report.ignored, report.ignored_tests.map((test) => [test.name, test.reason, test.execution, test.evidence])],
+      ["ignored, not executed", 1, 1, [["runs_the_sdk_script", "needs a Python environment", "ignored, not executed", []]]],
+    );
+  }
+
+  // SEPARATELY EXECUTED: credited only on a file that holds an ignored-run
+  // flag AND the test's own name; the evidence is the file and both lines.
+  {
+    const lane = { path: "scripts/sdk-lane", text: "#!/bin/sh\nset -e\ncargo test -p x --test sdk -- --exact runs_the_sdk_script \\\n  --ignored\n" };
+    const evidence = ignoredRunEvidence("runs_the_sdk_script", [lane]);
+    assert.deepEqual(evidence, [
+      {
+        path: "scripts/sdk-lane",
+        flag_line: 4,
+        flag: "--ignored",
+        selector_line: 3,
+        selector: "cargo test -p x --test sdk -- --exact runs_the_sdk_script \\",
+      },
+    ]);
+    assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], ignored), () => evidence).execution, "separately executed");
+    // No credit for a file with the flag and ANOTHER test's name, for one
+    // that names the test and asks for no ignored test, for a longer name
+    // that only contains it, for a lane's name, for a runner that skips
+    // the test, or for a comment that names the test or the flag.
+    for (const text of [
+      "cargo test -- --exact some_other_test --ignored\n",
+      "cargo test -- --exact runs_the_sdk_script\n",
+      "cargo test -- --exact runs_the_sdk_script_twice --ignored\n",
+      "# lane: sdk (ignored tests)\ncargo test -p x --test sdk -- --ignored\n",
+      "cargo test -p x --test sdk -- --ignored --skip runs_the_sdk_script\n",
+      "cargo test -p x --test sdk -- --ignored --skip=sdk::runs_the_sdk_script\n",
+      "# runs_the_sdk_script is not run here\ncargo test -p x --test sdk -- --ignored\n",
+      "// to run it: cargo test -- --ignored\nconst NAME: &str = \"runs_the_sdk_script\";\n",
+    ]) {
+      assert.deepEqual(ignoredRunEvidence("runs_the_sdk_script", [{ path: "scripts/other", text }]), [], text.trim());
+    }
+  }
+
+  // UNPROVEN: a runner is claimed and not shown. The ignore reason names a
+  // lane; or the evidence could not be read; or only some of the row's
+  // ignored tests have evidence. Never "executed", never "not executed".
+  assert.equal(readerExecution(stateOf(["e2e_scenario_one"], laneIgnored), none).execution, "unproven");
+  assert.equal(readerExecution(stateOf(["e2e_scenario_one"], laneIgnored), none).ignored_tests[0].claimed_lane, "e2e-smoke");
+  assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], ignored), () => null).execution, "unproven", "an unread search is no proof of absence");
+  {
+    const some = (name) => (name === "runs_the_sdk_script" ? [{ path: "scripts/sdk-lane", flag_line: 1, flag: "--ignored", selector_line: 1, selector: name }] : []);
+    const second = '#[test]\n#[ignore]\nfn runs_the_other_script() {}\n';
+    const report = readerExecution(stateOf(["runs_the_other_script", "runs_the_sdk_script"], ignored, second), some);
+    assert.deepEqual(
+      [report.execution, report.ignored_tests.map((test) => test.execution)],
+      ["unproven", ["ignored, not executed", "separately executed"]],
+    );
+  }
+
+  // THE MIXED FILE: a target with a plain and an ignored test is executed
+  // in part, and the ignored one is reported by itself.
+  {
+    const report = readerExecution(stateOf(null, `${plain}${ignored}`), none);
+    assert.deepEqual(
+      [report.execution, report.tests, report.ignored, report.ignored_tests.map((test) => [test.name, test.execution])],
+      ["executed in part", 2, 1, [["runs_the_sdk_script", "ignored, not executed"]]],
+    );
+    // A row that names only the plain test of that file is executed; one
+    // that names only the ignored test is not.
+    assert.equal(readerExecution(stateOf(["reads_the_docs"], `${plain}${ignored}`), none).execution, "executed");
+    assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], `${plain}${ignored}`), none).execution, "ignored, not executed");
+  }
+
+  // THE SOURCE CHANGES, THE REPORT FOLLOWS: the same test without its
+  // ignore attribute is executed; with a conditional ignore it is not
+  // counted as ignored; ignored in one module and plain in another, it
+  // runs.
+  assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], ignored.replace("#[ignore] // needs a Python environment\n", "")), none).execution, "executed");
+  assert.equal(
+    readerExecution(stateOf(["runs_the_sdk_script"], ignored.replace("#[ignore]", '#[cfg_attr(windows, ignore)]')), none).execution,
+    "executed",
+  );
+  assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], ignored, ignored.replace("#[ignore] // needs a Python environment\n", "")), none).execution, "executed");
+
+  // NOT JUDGED: a named test no source holds, or a target without a test.
+  {
+    const report = readerExecution(stateOf(["renamed_away"], plain), none);
+    assert.deepEqual([report.execution, report.unknown], ["not judged", ["renamed_away"]]);
+    assert.equal(readerExecution(stateOf(null, "fn main() {}\n"), none).execution, "not judged");
   }
 }
 

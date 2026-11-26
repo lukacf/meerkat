@@ -1140,6 +1140,11 @@ them.
   prefix) is the mob's own as before, and the declared default mob's
   store is the default mob's whatever its file is called.
 
+- Added 2026-11-25, after the release. The sentence above that the name an
+  earlier release gave a store is the mob's own as before holds for a mob
+  whose own id begins with `mob--`, and for no other. See [Upgrading to 0.8.31](https://docs.rkat.ai/guides/upgrading#upgrading-to-0-8-31)
+  for the filename rules and the limit of this source-only finding.
+
 - `meerkat-mob`, `meerkat-mob-mcp`: the answer of an existing call
   changes. A create of a mob from a definition (`mob_create_definition`
   and its variants, an agent's `mob_create`) under an id the mob set

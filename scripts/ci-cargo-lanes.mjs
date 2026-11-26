@@ -3947,7 +3947,7 @@ function deferredSummary(deferred) {
   }
   if (deferred.reader_rows_selected_elsewhere?.length > 0) {
     parts.push(
-      `reader rows whose ignored tests the reader lanes of this plan do not run; a script or lane table selects them, and its run is not shown ${deferred.reader_rows_selected_elsewhere.join(", ")}`,
+      `reader rows whose ignored tests the reader lanes of this plan do not run, though a script or lane table selects them and its run is not shown ${deferred.reader_rows_selected_elsewhere.join(", ")}`,
     );
   }
   if (deferred.reader_rows_unproven?.length > 0) {

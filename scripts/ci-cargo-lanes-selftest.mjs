@@ -3755,17 +3755,29 @@ for (const path of [
     assert.deepEqual(live.deferred_to_push.reader_rows_not_executed, [], "no live row is named as without a runner");
     // The notice says only what the planner knows, and says it of the tests,
     // not of the row: the plan's reader lanes do not run the row's ignored
-    // tests; a script or a lane table selects them; whether and where that
-    // selector runs is not shown (the evidence is a file, not the job that
-    // runs it, which could be a step of this workflow). The plan may run
-    // other tests of the same target: on a push, a reader row runs this
-    // library's.
+    // tests, though a script or a lane table selects them, and whether and
+    // where that selector runs is not shown (the evidence is a file, not
+    // the job that runs it, which could be a step of this workflow). The
+    // plan may run other tests of the same target: on a push, a reader row
+    // runs this library's.
     const connectLines = outputs(["--event", "pull_request", "--", connectPath]);
     assert.match(
       connectLines.deferred_to_push,
-      /(^|; )reader rows whose ignored tests the reader lanes of this plan do not run; a script or lane table selects them, and its run is not shown connect:lib($|;)/,
+      /(^|; )reader rows whose ignored tests the reader lanes of this plan do not run, though a script or lane table selects them and its run is not shown connect:lib($|;)/,
     );
     assert.doesNotMatch(connectLines.deferred_to_push, /no lane of this plan|it builds and does not run/, "the notice claims nothing of other lanes, and nothing of the row");
+    // The notice is one item of a list joined by "; ": it holds no "; " of
+    // its own, so no part of it reads as another item.
+    assert.deepEqual(
+      connectLines.deferred_to_push.split("; ").filter((item) => item.startsWith("reader rows") || item.includes("selects them")),
+      ["reader rows whose ignored tests the reader lanes of this plan do not run, though a script or lane table selects them and its run is not shown connect:lib"],
+      "the notice is one item of the list",
+    );
+    assert.deepEqual(
+      sdkPrLines.deferred_to_push.split("; ").filter((item) => item.includes("reader rows") || item.includes("was found")),
+      ["reader rows it builds whose every named test is ignored and for which no runner asking for ignored tests was found meta:test:reference_app, meta:test:sdk_parity, meta:test:sdk_productization"],
+      "and so is the notice of the rows with no runner found",
+    );
     assert.deepEqual(
       planFor([connectPath]).reader_rows.map((row) => `${row.name} | ${row.test_flags}`),
       ["reader connect:lib | --lib"],

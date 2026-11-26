@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `StdioDecisionConnection::notice_openings(owner)` (Rust): the task a stdio gateway starts so that its connection tells the host of open decisions without a list.
+
+### Upgrade notes
+
+- A host that speaks JSON-RPC to the stdio gateway itself, never calls `meta/decisions/list`, and treats a notification it does not expect as an error now receives a `meta/decisions/notice` for each durable decision the runtime opens and for each one already open when it connects: ignore the notification, or read it. The sentence "a host that never lists decisions receives no notices" no longer holds. Hosts on the SDKs see no change unless they registered a notice handler.
+
+### Changed
+
+- The stdio gateway now tells its host of an open durable decision without being asked: it writes the `meta/decisions/notice` (`event` `held`) of a decision the gateway's own runtime opens when it opens, and of each decision already open once when the connection starts. A member's question set (`kind` `ask_user.questions`) so reaches a host that never lists decisions. `on_decision_notice` / `onDecisionNotice` receive these notices; a `held` notice that arrives before a handler is registered is kept (the newest 1024 decisions) and handed over at registration. A host's own `meta/decisions/list` writes its notices as before, also for a decision it was already told of, so a host with a handler that also lists sees `held` twice for one decision.
+
 ## [0.9.19] - 2026-11-26
 
 ### Added
@@ -38,8 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   placed on another host and the limit on a placed member's stored spec
   does not arise there; a Rust host that embeds Meta and binds a member
   host through the mob handle holds such specs.
-
-- `StdioDecisionConnection::notice_openings(owner)` (Rust): the task a stdio gateway starts so that its connection tells the host of open decisions without a list.
 
 ### Fixed
 
@@ -154,8 +164,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
 
-- A host that speaks JSON-RPC to the stdio gateway itself, never calls `meta/decisions/list`, and treats a notification it does not expect as an error now receives a `meta/decisions/notice` for each durable decision the runtime opens and for each one already open when it connects: ignore the notification, or read it. The sentence "a host that never lists decisions receives no notices" no longer holds. Hosts on the SDKs see no change unless they registered a notice handler.
-
 ### Changed
 
 - `ask_user` on a gateway whose Console requires sign-in and trusts no
@@ -185,8 +193,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   default_timeout`). Without that forward a `delegate` of a Meta member
   would have waited 30 minutes by default. The wrapper's own checks and
   rewrites are unchanged.
-
-- The stdio gateway now tells its host of an open durable decision without being asked: it writes the `meta/decisions/notice` (`event` `held`) of a decision the gateway's own runtime opens when it opens, and of each decision already open once when the connection starts. A member's question set (`kind` `ask_user.questions`) so reaches a host that never lists decisions. `on_decision_notice` / `onDecisionNotice` receive these notices; a `held` notice that arrives before a handler is registered is kept (the newest 1024 decisions) and handed over at registration. A host's own `meta/decisions/list` writes its notices as before, also for a decision it was already told of, so a host with a handler that also lists sees `held` twice for one decision.
 
 ## [0.9.18] - 2026-11-22
 

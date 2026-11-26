@@ -4,15 +4,6 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
-## 0.9.19
-
-### Added
-
-- Python identity results can be narrowed by their `outcome` string. For
-  example, after `if state.outcome == "refused":`, mypy and pyright know
-  that `state.refusal` is available on the result of `identities.operation()`.
-  The other outcome strings narrow to their corresponding result types.
-
 ### Changed
 
 - `MetaRuntime.on_decision_notice(handler)`: with a stdio gateway of this
@@ -30,6 +21,15 @@ All notable changes to the Python SDK are documented here.
   receives the kept notices only before the next notice that arrives. A
   host that registers no handler sees no change. See Changed and Upgrade
   notes in Meta's changelog.
+
+## 0.9.19
+
+### Added
+
+- Python identity results can be narrowed by their `outcome` string. For
+  example, after `if state.outcome == "refused":`, mypy and pyright know
+  that `state.refusal` is available on the result of `identities.operation()`.
+  The other outcome strings narrow to their corresponding result types.
 
 ### Upgrade notes
 

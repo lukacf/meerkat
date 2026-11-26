@@ -2525,6 +2525,11 @@ jobs:
       # console-backends built in this run: its digest is compared with the
       # one that job published, both are printed, and a difference or a
       # missing digest fails the job here, before the acceptance runs.
+      # The script runs the server from META_EXAMPLE_BIN_DIR. The server
+      # looks for mcp_fixture by itself: CARGO_BIN_EXE_mcp_fixture first,
+      # then Cargo's target directory, and it builds the bin when it finds
+      # neither. The variable names the checked file, so the server runs
+      # that file, and refuses a missing one, in a job that compiles nothing.
       - name: Unpack and verify the incident pack's binaries
         env:
           BUILT_INCIDENT_COMMAND_CENTER_SHA256: ${{ needs.console-backends.outputs.incident_command_center_sha256 }}
@@ -2547,6 +2552,7 @@ jobs:
           done
           if [[ "${status}" != 0 ]]; then exit 1; fi
           echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+          echo "CARGO_BIN_EXE_mcp_fixture=${bin_dir}/mcp_fixture" >> "${GITHUB_ENV}"
       - run: npm --prefix console ci --silent --no-fund --no-audit
       - run: npm --prefix console exec -- playwright install --with-deps chromium
       - run: npm --prefix console run build --silent

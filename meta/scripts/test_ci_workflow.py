@@ -1015,6 +1015,7 @@ class CiWorkflowTests(unittest.TestCase):
             "- name: Fetch the console acceptance backends\n",
             f"- name: {INCIDENT_VERIFY}\n",
             'echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"\n',
+            'echo "CARGO_BIN_EXE_mcp_fixture=${bin_dir}/mcp_fixture" >> "${GITHUB_ENV}"\n',
             "- run: npm --prefix console run build --silent\n",
             "      - name: Stock incident topology acceptance\n"
             "        run: examples/001-incident-command-center-pack/topology_examples.sh\n"
@@ -1025,6 +1026,21 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         script = (ROOT / "examples/001-incident-command-center-pack/topology_examples.sh").read_text()
         self.assertIn("for required in incident_command_center mcp_fixture; do", script)
+        # The script runs the server from META_EXAMPLE_BIN_DIR, but the
+        # server finds mcp_fixture by itself: the variable below first (a
+        # missing file there is refused), then Cargo's target directory,
+        # and failing both it builds the bin. Only the variable points it at
+        # the checked file in a job that compiles nothing, and mcp_fixture
+        # is the one program the example starts or builds.
+        example = (ROOT / "examples/001-incident-command-center-pack/incident_command_center.rs").read_text()
+        lookup = example[example.index("fn fixture_binary_path()"):example.index("fn incident_fixture_target_dir(")]
+        by_variable = lookup.index('std::env::var("CARGO_BIN_EXE_mcp_fixture")')
+        refused = lookup.index("CARGO_BIN_EXE_mcp_fixture points to missing fixture binary")
+        by_target = lookup.index('std::env::var_os("CARGO_TARGET_DIR")')
+        built = lookup.index('Command::new("cargo")')
+        self.assertEqual([by_variable, refused, by_target, built], sorted([by_variable, refused, by_target, built]))
+        self.assertEqual(example.count("Command::new("), 1)
+        self.assertEqual(example.count("CARGO_BIN_EXE_"), 2)
         # The digests travel as job outputs, not in the archive they describe.
         self.assertEqual(backends["outputs"], {
             f"{name}_sha256": f"${{{{ steps.incident_digests.outputs.{name} }}}}"
@@ -1097,7 +1113,8 @@ class CiWorkflowTests(unittest.TestCase):
 
             result, named, bin_dir = unpack("same", published)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(named, f"META_EXAMPLE_BIN_DIR={bin_dir}\n")
+            self.assertEqual(named, f"META_EXAMPLE_BIN_DIR={bin_dir}\n"
+                                    f"CARGO_BIN_EXE_mcp_fixture={bin_dir / _INCIDENT_BIN}\n")
             self.assertEqual(sorted(path.name for path in bin_dir.iterdir()), sorted(names))
             for name in names:
                 self.assertTrue(os.access(bin_dir / name, os.X_OK), name)

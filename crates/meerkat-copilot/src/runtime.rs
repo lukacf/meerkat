@@ -530,6 +530,24 @@ impl CopilotRuntime {
         }
     }
 
+    /// Test support; not part of the supported API. A runtime whose HTTP
+    /// transport is replaced by scripted answers: it answers `answers` in
+    /// order, one per request, whatever the request's URL. A request past
+    /// the end of the script is answered with status 599. The returned
+    /// counter reads how many requests the transport has answered.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_scripted_answers_for_tests(
+        answers: Vec<CopilotScriptedAnswer>,
+    ) -> (Self, CopilotScriptedRequests) {
+        let requests = CopilotScriptedRequests::default();
+        let transport = ScriptedAnswersTransport {
+            answers: Mutex::new(answers.into_iter().collect()),
+            requests: requests.clone(),
+        };
+        (Self::with_transport(Arc::new(transport)), requests)
+    }
+
     pub async fn resolve(
         &self,
         binding: &ValidatedBinding,
@@ -859,6 +877,68 @@ fn model_access(offering: &CopilotModelOffering, provider: Provider) -> CopilotM
 impl Default for CopilotRuntime {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// One scripted answer of
+/// [`CopilotRuntime::with_scripted_answers_for_tests`]: an HTTP status and a
+/// JSON body. Test support; not part of the supported API.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct CopilotScriptedAnswer {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+
+/// The number of requests the transport of a runtime made by
+/// [`CopilotRuntime::with_scripted_answers_for_tests`] has answered. Test
+/// support; not part of the supported API.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct CopilotScriptedRequests(Arc<AtomicU64>);
+
+#[cfg(feature = "test-support")]
+impl CopilotScriptedRequests {
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The transport behind
+/// [`CopilotRuntime::with_scripted_answers_for_tests`].
+#[cfg(feature = "test-support")]
+struct ScriptedAnswersTransport {
+    answers: Mutex<std::collections::VecDeque<CopilotScriptedAnswer>>,
+    requests: CopilotScriptedRequests,
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl CopilotHttpTransport for ScriptedAnswersTransport {
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: HeaderMap,
+    ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+        self.requests.0.fetch_add(1, Ordering::SeqCst);
+        let answer = self
+            .answers
+            .lock()
+            .pop_front()
+            .unwrap_or_else(|| CopilotScriptedAnswer {
+                status: 599,
+                body: serde_json::json!({"message": "the script holds no answer for this request"}),
+            });
+        Ok(CopilotHttpResponse {
+            status: answer.status,
+            body: answer.body.to_string().into_bytes(),
+            retry_after: None,
+            rate_limited: false,
+            rate_limit_reset: None,
+        })
     }
 }
 

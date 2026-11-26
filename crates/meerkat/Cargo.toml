@@ -114,6 +114,9 @@ meerkat-runtime = { workspace = true, features = ["test-support"] }
 # Held change-watch registrations for the delivery owner's store-watch tests
 # (tests/runtime_delivery_hosting.rs).
 meerkat-sqlite = { workspace = true, features = ["test-support"] }
+# The scripted Copilot HTTP transport for the factory row that builds on a
+# stored device sign-in (src/factory/reasoning_effort_build_tests.rs).
+meerkat-copilot = { workspace = true, features = ["test-support"] }
 tracing-subscriber = { workspace = true }
 meerkat-core = { workspace = true, features = [
     "jsonschema",

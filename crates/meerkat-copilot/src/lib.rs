@@ -27,3 +27,11 @@ pub use runtime::{
     CopilotRuntime, CopilotSeatedAccount, capability_gated_client, routed_client,
     verify_operator_token,
 };
+
+// Test support (feature `test-support`); not part of the supported API.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "oauth",
+    feature = "test-support"
+))]
+pub use runtime::{CopilotScriptedAnswer, CopilotScriptedRequests};

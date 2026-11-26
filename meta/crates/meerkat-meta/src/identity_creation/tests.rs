@@ -1511,10 +1511,12 @@ fn an_update_that_takes_one_of_two_authority_labels_off_names_the_one_it_keeps()
     let mut value = policy_json();
     value["reserved_keys"]["labels"] = json!(["team", "clearance", "tier"]);
     value["authority_fields"]["tier"] = json!({"values": ["gold"]});
-    // A change of authority labels gets a notice under these rules, which
-    // is no human decision.
+    // No rule names a change of authority labels here, so its outcome is
+    // the default, which allows: no human decision. (A rule that names that
+    // change class has to hold a human decision; the policy refuses any
+    // other.)
     value["approval"]["rules"][2]["change"] = json!(["capability", "peers"]);
-    value["approval"]["rules"][3]["change"] = json!(["descriptive", "remove", "authority"]);
+    value["approval"]["default"] = json!({"kind": "allow"});
     let policy = parse(&value);
     let carried = [("clearance", "elevated"), ("tier", "gold")];
     let entry = entry_with("assistant", &carried);
@@ -1537,7 +1539,7 @@ fn an_update_that_takes_one_of_two_authority_labels_off_names_the_one_it_keeps()
     );
 
     let refusal = update_with(&policy, &RequesterFacts::host("gateway"), &entry, &spec)
-        .expect_err("a notice is no human decision");
+        .expect_err("the default's allow is no human decision");
     assert_eq!(
         refusal.kind,
         IdentityRefusalKind::AuthorityFieldNeedsApproval {

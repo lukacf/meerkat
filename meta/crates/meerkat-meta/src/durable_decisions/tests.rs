@@ -595,3 +595,193 @@ fn an_unknown_notice_event_decodes_as_unknown() {
         assert_eq!(serde_json::to_value(event).expect("encode"), json!(known));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The message of a malformed request (`params_fault`)
+// ---------------------------------------------------------------------------
+
+/// A value no message may carry.
+const CALLER_VALUE: &str = "caller-value-7f3a91";
+
+/// A type whose own refusal quotes the value it was given.
+#[derive(Debug, serde::Deserialize)]
+#[serde(try_from = "String")]
+#[allow(dead_code)]
+struct Quoting;
+
+impl TryFrom<String> for Quoting {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, String> {
+        Err(format!("no reading of {value}"))
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum Choice {
+    Plain,
+    Sized { size: u32 },
+}
+
+/// Params of the shapes the decision verbs' own params do not have: a type
+/// with a message of its own, a tuple, an enum that carries data, and
+/// numbers of each kind.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[allow(dead_code)]
+struct Shapes {
+    quoting: Option<Quoting>,
+    pair: Option<(u8, u8)>,
+    choice: Option<Choice>,
+    small: Option<i8>,
+    whole: Option<u64>,
+}
+
+/// The message for `params`, which `serde_json` refuses to read as
+/// [`Shapes`], as the verbs' parser asks for it.
+fn shapes_fault(params: serde_json::Value) -> String {
+    assert!(
+        serde_json::from_value::<Shapes>(params.clone()).is_err(),
+        "serde_json reads {params}"
+    );
+    super::params_fault::message::<Shapes>(&params)
+}
+
+#[test]
+fn a_params_fault_names_the_place_and_the_kind_found() {
+    for (params, message) in [
+        (
+            json!({"small": 300}),
+            "small: invalid value: integer, expected i8",
+        ),
+        (
+            json!({"whole": -70421}),
+            "whole: invalid value: integer, expected u64",
+        ),
+        (
+            json!({"whole": 1.5}),
+            "whole: invalid type: floating point, expected u64",
+        ),
+        (
+            json!({"whole": true}),
+            "whole: invalid type: boolean, expected u64",
+        ),
+        (
+            json!({"pair": {}}),
+            "pair: invalid type: map, expected a tuple of size 2",
+        ),
+        (
+            json!({"pair": [1]}),
+            "pair: invalid length 1, expected a tuple of size 2",
+        ),
+        (
+            json!({"pair": [1, 2, 3]}),
+            "pair: invalid length 3, expected fewer elements in array",
+        ),
+        (
+            json!({"pair": [1, null]}),
+            "pair[1]: invalid type: null, expected u8",
+        ),
+        (
+            json!({"choice": {"sized": {}}}),
+            "choice.sized.size: missing field",
+        ),
+        (
+            json!({"choice": {"plain": null, "sized": {"size": 1}}}),
+            "choice: invalid type: map, expected enum Choice",
+        ),
+        (json!(7), "invalid type: integer, expected struct Shapes"),
+        (
+            json!([null, [1]]),
+            "[1]: invalid length 1, expected a tuple of size 2",
+        ),
+    ] {
+        assert_eq!(
+            shapes_fault(params.clone()),
+            format!("invalid params: {message}"),
+            "{params}"
+        );
+    }
+}
+
+#[test]
+fn a_params_fault_never_carries_a_value_of_the_request() {
+    for (params, message) in [
+        // The reading type's own message quotes the value: none of it is
+        // kept.
+        (json!({"quoting": CALLER_VALUE}), "quoting: invalid value"),
+        (
+            json!({"choice": CALLER_VALUE}),
+            "choice: unknown variant, expected `plain` or `sized`",
+        ),
+        (
+            json!({"choice": {CALLER_VALUE: 1}}),
+            "choice: unknown variant, expected `plain` or `sized`",
+        ),
+        (
+            json!({"choice": {"sized": {"size": CALLER_VALUE}}}),
+            "choice.sized.size: invalid type: string, expected u32",
+        ),
+        (
+            json!({CALLER_VALUE: 1}),
+            "unknown field, expected one of `quoting`, `pair`, `choice`, `small`, `whole`",
+        ),
+        (
+            json!(CALLER_VALUE),
+            "invalid type: string, expected struct Shapes",
+        ),
+        (json!([CALLER_VALUE]), "[0]: invalid value"),
+    ] {
+        let fault = shapes_fault(params.clone());
+        assert_eq!(fault, format!("invalid params: {message}"), "{params}");
+        assert!(!fault.contains(CALLER_VALUE), "{fault}");
+    }
+}
+
+/// The second read takes a variant's name as `serde_json` does, from a
+/// string only: a kind given as a number is the fault, not what follows it.
+#[test]
+fn a_params_fault_refuses_a_variant_named_by_a_number() {
+    let params = json!({
+        "decision_id": format!("decision:{}", "0".repeat(64)),
+        "presentation": {"audience": {"kind": 0}},
+    });
+    assert!(
+        serde_json::from_value::<meerkat_contracts::DecisionPresentParams>(params.clone()).is_err()
+    );
+    assert_eq!(
+        super::params_fault::message::<meerkat_contracts::DecisionPresentParams>(&params),
+        "invalid params: presentation.audience.kind: invalid type: integer, expected variant \
+         identifier"
+    );
+}
+
+/// Params `serde_json` reads are read: the message is asked for only once
+/// it refuses, and a second read that finds no fault names none.
+#[test]
+fn the_verbs_parser_reads_what_serde_json_reads() {
+    let id = json!("request-1");
+    let read: Shapes =
+        super::stdio::parse(&id, json!({"pair": [1, 2], "choice": "plain"})).expect("read");
+    assert_eq!(read.pair, Some((1, 2)));
+    assert!(matches!(read.choice, Some(Choice::Plain)));
+    let refused =
+        super::stdio::parse::<Shapes>(&id, json!({"small": CALLER_VALUE})).expect_err("refused");
+    assert_eq!(
+        refused,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "request-1",
+            "error": {
+                "code": -32602,
+                "message": "invalid params: small: invalid type: string, expected i8",
+            },
+        })
+    );
+    assert_eq!(
+        super::params_fault::message::<Shapes>(&json!({})),
+        "invalid params"
+    );
+}

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The decision verbs (`meta/decisions/list`, `get`, `rendering`, `present`,
+  `decide` and `withdraw` on the stdio gateway, and the Console's
+  `meta/decisions/list`, `get`, `rendering` and `withdraw`): the message of
+  a request whose params cannot be read now names the field at fault, and
+  no longer quotes anything the request sent. A `meta/decisions/decide`
+  whose `presented_digest` is null was refused with `invalid params: invalid
+  type: null, expected a string`, which names no field. It is now refused
+  with `invalid params: presented_digest: invalid type: null, expected a
+  string`. A nested field is named by its path, and a missing field in the
+  same way: `invalid params: presentation.at_ms: invalid type: string,
+  expected u64`, `invalid params: presentation.parts_shown[0].index: invalid
+  type: null, expected u32`, `invalid params: presentation.channel_ref:
+  missing field`. Params that are no object have no path (`invalid params:
+  invalid type: string, expected struct MetaDecisionDecideParams`). A fault
+  in the body of a presentation's `audience` other than a missing field is
+  placed at `presentation.audience`. Where the old message quoted the value
+  it found (`invalid type: string "..."`, `invalid value: integer ...`), the
+  new one names only its kind (`string`, `integer`, `floating point`,
+  `boolean`, `null`, `sequence`, `map`). An unknown variant or an unknown
+  field is reported without the name the request used, with the names that
+  are accepted: `invalid params: presentation.audience.kind: unknown
+  variant, expected `approver` or `reviewer``, and for an unknown field the
+  path of the object that holds it. The error code (`-32602`) is unchanged,
+  the error still carries no `data`, and the same requests are refused as
+  before. Only the message text changes, so a client that matched the old
+  text has to be updated; no SDK reads it.
+
 ## [0.9.19] - 2026-11-26
 
 ### Added

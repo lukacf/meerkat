@@ -10708,6 +10708,14 @@ verification.
   `shutdown` now returns only once that actor's task has returned (within
   the root mob's terminal shutdown budget), so after a teardown that settled
   every member, dropping the runtime releases the custody at once.
+  Added 2026-11-26, after the release: the last clause is not a
+  guarantee. `shutdown` waits for the root mob's actor task only until its
+  terminal shutdown deadline, and its report does not prove that the task
+  has exited or that dropping the runtime frees the state directory at
+  once for another runtime in the same process. A runtime composed there
+  while the custody is still held can be refused with the typed error
+  `StorageLayoutError::RuntimeInUse`. See
+  [Shutdown](docs/guides/unified-runtime.mdx#shutdown).
 - `meta/mob_announcements/declarations/get` waits for a declarations
   reconcile in progress (at startup, at an apply, after a change in the
   gateway's set of mobs, or at a health pass retry) and answers with what

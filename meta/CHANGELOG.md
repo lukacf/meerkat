@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A change of an agent that waits for a person's decision answers that
+  decision when the same request is sent again under its `request_id`,
+  also after the launch's identity policy, the mob's definition or the
+  host's own check has turned against it. The request was judged again as
+  a new one before it was compared with the held one, so the retry
+  answered the new refusal (`change_denied`, `profile_unknown`,
+  `validation_refused` and so on) while `meta/identity/operation` still
+  read `pending_decision`. Now the held request answers `pending_decision`
+  with its decision, as the operation's read does. When each of the three
+  is asked is unchanged: the policy and the mob are asked again when the
+  decision is carried out, and the host's own check is asked when a change
+  is asked or planned and never when a decision is carried out. So a host
+  whose check has turned against a held change sees its refusal on a new
+  request, not on the retry and not when the change is carried out.
+
+  Answers that change under the `request_id` of a change that waits:
+
+  - A request of the held change's kind that names the same agents and
+    cannot be normalized (a profile the mob does not define, for one), or
+    for which a read failed, reads the held decision, where it was answered
+    its own refusal or the failed read. Without a normalized form it cannot
+    be told from the held request. Nothing is held or written for it.
+  - A request of another change kind, or one that names other agents, that
+    cannot be normalized is refused `operation_reused`, where it was
+    answered its own refusal. This includes two refusals that answered the
+    held decision to any request under the id: `stale_spec` and
+    `identity_unknown` now answer it only to a request of the held kind
+    over the held agents, and `operation_reused` to any other.
+  - A request that normalizes and is not the held one is refused as before:
+    by the owner's rule, by the host's check, or `operation_reused`.
+
+  Under the `request_id` of a decision that ended without its change
+  (rejected, expired, withdrawn, or refused when it was carried out),
+  every request now answers how it ended, where one that was refused for a
+  reason of its own was answered that refusal. One case is not cured: a
+  retry that still normalizes, but to another normalized form than the one
+  held (a peer the peer rules now give under another rule, for one), is
+  still refused `operation_reused`; `meta/identity/operation` reads the
+  decision. A retry of a change that committed is unchanged, and a
+  decision that was approved and carried out is such a change. The RPC
+  reference states these limits under "Requests, operations and retries".
+
 ## [0.9.19] - 2026-11-26
 
 ### Added
@@ -145,48 +189,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reason that the gate does not write itself; they come last in it, and a
   control character in either is replaced by `?`. The verdicts are
   unchanged.
-
-- A change of an agent that waits for a person's decision answers that
-  decision when the same request is sent again under its `request_id`,
-  also after the launch's identity policy, the mob's definition or the
-  host's own check has turned against it. The request was judged again as
-  a new one before it was compared with the held one, so the retry
-  answered the new refusal (`change_denied`, `profile_unknown`,
-  `validation_refused` and so on) while `meta/identity/operation` still
-  read `pending_decision`. Now the held request answers `pending_decision`
-  with its decision, as the operation's read does. When each of the three
-  is asked is unchanged: the policy and the mob are asked again when the
-  decision is carried out, and the host's own check is asked when a change
-  is asked or planned and never when a decision is carried out. So a host
-  whose check has turned against a held change sees its refusal on a new
-  request, not on the retry and not when the change is carried out.
-
-  Answers that change under the `request_id` of a change that waits:
-
-  - A request of the held change's kind that names the same agents and
-    cannot be normalized (a profile the mob does not define, for one), or
-    for which a read failed, reads the held decision, where it was answered
-    its own refusal or the failed read. Without a normalized form it cannot
-    be told from the held request. Nothing is held or written for it.
-  - A request of another change kind, or one that names other agents, that
-    cannot be normalized is refused `operation_reused`, where it was
-    answered its own refusal. This includes two refusals that answered the
-    held decision to any request under the id: `stale_spec` and
-    `identity_unknown` now answer it only to a request of the held kind
-    over the held agents, and `operation_reused` to any other.
-  - A request that normalizes and is not the held one is refused as before:
-    by the owner's rule, by the host's check, or `operation_reused`.
-
-  Under the `request_id` of a decision that ended without its change
-  (rejected, expired, withdrawn, or refused when it was carried out),
-  every request now answers how it ended, where one that was refused for a
-  reason of its own was answered that refusal. One case is not cured: a
-  retry that still normalizes, but to another normalized form than the one
-  held (a peer the peer rules now give under another rule, for one), is
-  still refused `operation_reused`; `meta/identity/operation` reads the
-  decision. A retry of a change that committed is unchanged, and a
-  decision that was approved and carried out is such a change. The RPC
-  reference states these limits under "Requests, operations and retries".
 
 ### Upgrade notes
 

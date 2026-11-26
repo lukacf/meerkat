@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.19] - 2026-11-26
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `brain_swap` still reports `staged` or `already_staged`, not the outcome. Previously the switch could take effect with an incompatible level and the next input would be refused. Now, before the next input, a target route that refuses the held level, alone or in combination with the session's other reasoning settings, is denied with `CapabilityPolicy`. The session keeps its model and level and runs the input there. The agent gets no later turn notice of the denial; the routing record and a host log warning identify it.
@@ -55226,7 +55228,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.18...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.19...HEAD
+[0.9.19]: https://github.com/lukacf/meerkat/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/lukacf/meerkat/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/lukacf/meerkat/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/lukacf/meerkat/compare/v0.9.15...v0.9.16

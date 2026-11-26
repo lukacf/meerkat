@@ -3753,12 +3753,20 @@ for (const path of [
     assert.equal(scripts.length + argvTest.length, connectItems.length, "no other file is cited for the Connect row");
     assert.deepEqual(connect.deferred_to_push.reader_rows_not_executed, [], "no Connect row is named as without a runner");
     assert.deepEqual(live.deferred_to_push.reader_rows_not_executed, [], "no live row is named as without a runner");
-    // The notice says what is shown: a script or a lane table selects the
-    // tests; no lane of the plan runs it.
+    // The notice says what is shown, and says it of the tests, not of the
+    // row: no lane of the plan runs the row's ignored tests, though a script
+    // or a lane table selects them. (The plan may run other tests of the
+    // same target: on a push, a reader row runs this library's.)
     const connectLines = outputs(["--event", "pull_request", "--", connectPath]);
     assert.match(
       connectLines.deferred_to_push,
-      /(^|; )reader rows it builds and does not run, whose ignored tests a script or lane table selects \(no lane of this plan runs it\) connect:lib($|;)/,
+      /(^|; )reader rows whose ignored tests no lane of this plan runs, though a script or lane table selects them connect:lib($|;)/,
+    );
+    assert.doesNotMatch(connectLines.deferred_to_push, /does not run/, "the notice does not say that the row is not run");
+    assert.deepEqual(
+      planFor([connectPath]).reader_rows.map((row) => `${row.name} | ${row.test_flags}`),
+      ["reader connect:lib | --lib"],
+      "the push does run the library row's other tests",
     );
     const [connectLine] = JSON.parse(connectLines.reader_states);
     assert.deepEqual([connectLine.row, connectLine.execution], ["connect:lib", "selected, run not shown"]);

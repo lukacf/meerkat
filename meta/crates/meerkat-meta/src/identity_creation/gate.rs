@@ -843,6 +843,20 @@ impl IdentityGate {
         self
     }
 
+    /// The request the decision `decision_id` holds while it waits. A body
+    /// that cannot be read here is `operation_reused`: nothing is taken for
+    /// a held request that cannot be read.
+    fn held_request(&self, decision_id: &str) -> Result<IdentityRequest, IdentityRefusal> {
+        let reused = || IdentityRefusal::new(IdentityRefusalKind::OperationReused);
+        let rows = self.decision_rows.as_ref().ok_or_else(reused)?;
+        let id =
+            meerkat_core::approval::decision::DecisionId::new(decision_id).map_err(|_| reused())?;
+        let row = rows.get(&id).map_err(|_| reused())?;
+        HeldIdentityChange::of(&row)
+            .map(|held| held.request)
+            .map_err(|_| reused())
+    }
+
     /// Whether `request` is the request the decision behind `state` holds.
     /// A decision that still waits is compared by its request's digest; one
     /// that ended is the answer of its operation for good, whatever is
@@ -855,16 +869,47 @@ impl IdentityGate {
         let IdentityOutcome::PendingDecision { decision_id, .. } = state else {
             return Ok(());
         };
-        let reused = || IdentityRefusal::new(IdentityRefusalKind::OperationReused);
-        let rows = self.decision_rows.as_ref().ok_or_else(reused)?;
-        let id = meerkat_core::approval::decision::DecisionId::new(decision_id.as_str())
-            .map_err(|_| reused())?;
-        let row = rows.get(&id).map_err(|_| reused())?;
-        let held = HeldIdentityChange::of(&row).map_err(|_| reused())?;
-        match (request.request_digest(), held.request.request_digest()) {
+        let held = self.held_request(decision_id)?;
+        match (request.request_digest(), held.request_digest()) {
             (Ok(asked), Ok(holds)) if asked == holds => Ok(()),
-            _ => Err(reused()),
+            _ => Err(IdentityRefusal::new(IdentityRefusalKind::OperationReused)),
         }
+    }
+
+    /// Whether the call `change` asks the change the decision behind
+    /// `state` holds, as far as a call can be told without judging it: its
+    /// change kind and the agents it names, as the replay of a committed
+    /// change is compared with its receipt. A decision that ended is the
+    /// answer of its operation for good, whatever is asked under it.
+    fn names_the_held_change(&self, state: &IdentityOutcome, change: &IdentityChangeSpec) -> bool {
+        let IdentityOutcome::PendingDecision { decision_id, .. } = state else {
+            return true;
+        };
+        let Ok(held) = self.held_request(decision_id) else {
+            return false;
+        };
+        let same_kind = matches!(
+            (change, &held.action),
+            (IdentityChangeSpec::Create(_), RequestAction::Create { .. })
+                | (IdentityChangeSpec::Update(_), RequestAction::Update(_))
+                | (
+                    IdentityChangeSpec::Archive(_),
+                    RequestAction::Archive { .. }
+                )
+                | (
+                    IdentityChangeSpec::Unarchive(_),
+                    RequestAction::Unarchive { .. }
+                )
+                | (IdentityChangeSpec::Remove(_), RequestAction::Remove { .. })
+                | (IdentityChangeSpec::Adopt(_), RequestAction::Adopt { .. })
+        );
+        let held_agents: BTreeSet<String> = held
+            .action
+            .identities()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        same_kind && named_agents(change) == held_agents
     }
 
     /// This family as a caller that sees the agents `seen` admits calls it.
@@ -1808,11 +1853,16 @@ impl IdentityGate {
         // is asked when the decision is carried out, and it never answers
         // the held request asked again.
         // - A request the judgment refuses now has no normalized form to
-        //   compare, so it answers the decision as it stands. That is the
-        //   held request asked again after the policy, the definition or
-        //   an agent it names moved. Another request that cannot be judged
+        //   compare. All that can be told of it is its change kind and the
+        //   agents it names, so it answers the decision as it stands when
+        //   those are the held request's: that is the held request asked
+        //   again after the policy, the definition or an agent it names
+        //   moved, or after a read the judgment needs failed. Another
+        //   request of that kind over those agents that cannot be judged
         //   reads the same state, since the two cannot be told apart; it
-        //   holds and writes nothing.
+        //   holds and writes nothing. A request of another kind, or one
+        //   that names other agents, is not the held one and is
+        //   `operation_reused`, whatever the judgment refused it for.
         // - A request that normalizes is compared before the two checks
         //   below are asked again: the held one answers its decision, and
         //   any other is answered by the checks and then
@@ -1824,7 +1874,13 @@ impl IdentityGate {
         };
         let judged = match self.judge(mob, policy, requester, &call.change).await {
             Ok(judged) => judged,
-            Err(refusal) => return held.ok_or(refusal),
+            Err(refusal) => {
+                return match held {
+                    None => Err(refusal),
+                    Some(state) if self.names_the_held_change(&state, &call.change) => Ok(state),
+                    Some(_) => Err(IdentityRefusal::new(IdentityRefusalKind::OperationReused)),
+                };
+            }
         };
         let request = &judged.normalized.request;
         let held = match held {

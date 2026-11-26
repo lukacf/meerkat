@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.19
+
 ### Added
 
 - Python identity results can be narrowed by their `outcome` string. For

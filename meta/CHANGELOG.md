@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.19] - 2026-11-26
+
 ### Added
 
 - Python identity results can be narrowed by their `outcome` string. For

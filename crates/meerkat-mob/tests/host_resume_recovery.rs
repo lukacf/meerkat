@@ -344,8 +344,13 @@ async fn restart_reseeded_fence_counter_never_draws_stale_fence() {
 // What is durable before anyone is answered: the controller's
 // record-before-send event (`PlacedCompletionObligationRecorded`) and the
 // member host's Pending reservation, which the host persists before its
-// runtime accepts the work. The caller's own promise is not durable, so a
-// cold restart switches every pending row to exact cancellation
+// runtime accepts the work. The rows read both after that acceptance, with
+// the member turn parked in its model call: the instant between the
+// reservation and the acceptance is not separated here, and the reservation
+// is still there because only a terminal consumes it.
+//
+// The caller's own promise is not durable, so a cold restart switches every
+// pending row to exact cancellation
 // (`recover_placed_completion_outcome_custody`) and never re-originates
 // work. The work id then reaches exactly one terminal:
 //
@@ -409,6 +414,9 @@ struct OrdinaryPlacedWorkHistory {
         PlacedCompletionObligationEvent,
         PlacedCompletionClosureEvent,
     )>,
+    /// Folded results whose exact acknowledgement the host proved applied:
+    /// the last event of a resolved work's custody.
+    acknowledged: Vec<PlacedCompletionObligationEvent>,
 }
 
 #[cfg(feature = "test-support")]
@@ -448,6 +456,9 @@ async fn ordinary_placed_work_history(
                 obligation,
                 closure,
             } => history.closed.push((obligation, closure)),
+            MobEventKind::PlacedCompletionOutcomeAcknowledged { obligation } => {
+                history.acknowledged.push(obligation);
+            }
             _ => {}
         }
     }
@@ -592,15 +603,27 @@ async fn assert_caller_promise_did_not_survive(caller: HeldCaller) {
     );
 }
 
-/// The host journal's rows of `input_id` for `member`: how many Pending
-/// reservations, its retained terminals, and its cancellation receipts.
+/// The host journal's rows of `input_id` for `member`.
+#[cfg(feature = "test-support")]
+#[derive(Debug, PartialEq, Eq)]
+struct HostRowsOfWork {
+    /// Pending reservations.
+    pending: usize,
+    /// Retained terminals the controller has not yet acknowledged.
+    terminals: Vec<String>,
+    /// Tombstones of terminals the controller acknowledged.
+    acknowledged: usize,
+    /// Cancellation receipts.
+    cancellations: Vec<RecordedTrackedInputCancelKind>,
+}
+
 #[cfg(feature = "test-support")]
 async fn host_rows_of(
     fixture: &support::HostDaemonFixture,
     mob_id: &str,
     member: &AgentIdentity,
     input_id: &str,
-) -> (usize, Vec<String>, Vec<RecordedTrackedInputCancelKind>) {
+) -> HostRowsOfWork {
     let record = fixture.host_binding_record(mob_id).await;
     let pending = record
         .turn_outcome_pending
@@ -618,6 +641,12 @@ async fn host_rows_of(
                 .collect()
         })
         .unwrap_or_default();
+    let acknowledged = record
+        .turn_outcome_acknowledged
+        .get(member.as_str())
+        .map_or(0, |rows| {
+            rows.iter().filter(|row| row.input_id == input_id).count()
+        });
     let cancellations = record
         .tracked_input_cancellations
         .get(member.as_str())
@@ -628,7 +657,12 @@ async fn host_rows_of(
                 .collect()
         })
         .unwrap_or_default();
-    (pending, terminals, cancellations)
+    HostRowsOfWork {
+        pending,
+        terminals,
+        acknowledged,
+        cancellations,
+    }
 }
 
 /// Ordinary placed work still RUNNING when the controller stops cold: the
@@ -690,17 +724,17 @@ async fn cold_controlling_restart_ends_running_ordinary_placed_work_in_one_host_
         history.resolved.is_empty(),
         "no host result is folded for work that was cancelled while running: {history:?}"
     );
-    let (pending, terminals, cancellations) =
-        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
-    assert_eq!(pending, 0, "the host's Pending reservation is consumed");
-    assert!(
-        terminals.is_empty(),
-        "the host journals no result for the cancelled work: {terminals:?}"
-    );
+    let cancelled_on_host = HostRowsOfWork {
+        pending: 0,
+        terminals: Vec::new(),
+        acknowledged: 0,
+        cancellations: vec![RecordedTrackedInputCancelKind::Cancelled],
+    };
     assert_eq!(
-        cancellations,
-        vec![RecordedTrackedInputCancelKind::Cancelled],
-        "the host keeps one cancellation receipt for the work id"
+        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await,
+        cancelled_on_host,
+        "the host consumed the Pending reservation, journalled no result for the cancelled \
+         work, and keeps one cancellation receipt for its id"
     );
     // (3) No second submission: the member host ran the work once.
     assert_eq!(
@@ -710,8 +744,9 @@ async fn cold_controlling_restart_ends_running_ordinary_placed_work_in_one_host_
     );
 
     // Later work proves the lane is live again and still never reruns the
-    // cancelled id: one new Record, one more member turn, and the cancelled
-    // work's single terminal unchanged.
+    // cancelled id. It is sent to its end: the caller's receipt, then the
+    // host's acknowledgement of its folded result, the last event of its
+    // custody.
     gate.release();
     let placed = controlling
         .handle
@@ -725,17 +760,58 @@ async fn cold_controlling_restart_ends_running_ordinary_placed_work_in_one_host_
     .await
     .expect("post-restart ordinary work stays bounded")
     .expect("the placed member serves ordinary work after the restart");
-    let later = ordinary_placed_work_history(&controlling).await;
+    wait_until(
+        "the later ordinary work's result to be acknowledged",
+        || async {
+            !ordinary_placed_work_history(&controlling)
+                .await
+                .acknowledged
+                .is_empty()
+        },
+    )
+    .await;
+
+    // The SECOND read of "exactly one", after the controller and the host
+    // settled the later work: the cancelled work id still has its one
+    // Record, its one cancellation request and its one terminal, the host
+    // cancellation, and no result was ever folded for it. Everything else
+    // in the history belongs to the later work, under another id.
+    let settled = ordinary_placed_work_history(&controlling).await;
     assert_eq!(
-        later.recorded.len(),
+        settled.recorded.len(),
         2,
-        "the later work is its own Record: {later:?}"
+        "the later work is its own Record: {settled:?}"
     );
-    assert_ne!(later.recorded[1].input_id, work.input_id);
+    assert_eq!(settled.recorded[0], work);
+    let later_work = settled.recorded[1].clone();
+    assert_ne!(later_work.input_id, work.input_id);
     assert_eq!(
-        later.closed,
-        vec![(work, PlacedCompletionClosureEvent::HostCancelled)],
-        "the cancelled work keeps its one terminal: {later:?}"
+        settled.cancellation_requested,
+        vec![work.clone()],
+        "only the work in flight at the restart was ever cancelled: {settled:?}"
+    );
+    assert_eq!(
+        settled.closed,
+        vec![(work.clone(), PlacedCompletionClosureEvent::HostCancelled)],
+        "the cancelled work keeps its one terminal, and nothing else is closed: {settled:?}"
+    );
+    assert_eq!(
+        settled.resolved,
+        vec![(
+            later_work.clone(),
+            PlacedCompletionHostOutcomeEvent::InteractionComplete
+        )],
+        "the only result ever folded is the later work's: {settled:?}"
+    );
+    assert_eq!(
+        settled.acknowledged,
+        vec![later_work],
+        "only the later work's result is acknowledged: {settled:?}"
+    );
+    assert_eq!(
+        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await,
+        cancelled_on_host,
+        "the host's rows of the cancelled work are unchanged by the later work"
     );
     assert_eq!(
         streams.load(Ordering::SeqCst),
@@ -777,8 +853,10 @@ async fn cold_controlling_restart_folds_the_result_of_ordinary_placed_work_its_h
     wait_until(
         "the host to journal the finished work's terminal",
         || async {
-            let (_, terminals, _) = host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
-            !terminals.is_empty()
+            !host_rows_of(&fixture, &mob_id, &member, &work.input_id)
+                .await
+                .terminals
+                .is_empty()
         },
     )
     .await;
@@ -831,18 +909,87 @@ async fn cold_controlling_restart_folds_the_result_of_ordinary_placed_work_its_h
         history.closed.is_empty(),
         "work the host had finished is not closed as cancelled: {history:?}"
     );
-    let (pending, _, cancellations) =
-        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
-    assert_eq!(pending, 0, "the host's Pending reservation is consumed");
-    assert!(
-        !cancellations.contains(&RecordedTrackedInputCancelKind::Cancelled),
-        "the host did not cancel work it had finished: {cancellations:?}"
+    // The host answered the cancellation of work it had finished from the
+    // terminal it retained: it keeps NO cancellation receipt for the id, of
+    // any kind. Its one terminal row is either still retained or already
+    // moved to its acknowledgement tombstone.
+    let host = host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
+    assert_eq!(
+        host.pending, 0,
+        "the host's Pending reservation is consumed: {host:?}"
+    );
+    assert_eq!(
+        host.cancellations,
+        Vec::new(),
+        "the host keeps no cancellation receipt for work it had finished: {host:?}"
+    );
+    assert_eq!(
+        host.terminals.len() + host.acknowledged,
+        1,
+        "the host holds the finished work's one terminal, retained or acknowledged: {host:?}"
     );
     // (3) No second submission: the member host ran the work once.
     assert_eq!(
         streams.load(Ordering::SeqCst),
         1,
         "the member host never ran the finished work a second time"
+    );
+
+    // The SECOND read of "exactly one", after the custody's last event: the
+    // host proved it applied the exact acknowledgement of the folded
+    // result. Nothing was added for the work id but that acknowledgement.
+    wait_until(
+        "the finished ordinary work's result to be acknowledged",
+        || async {
+            !ordinary_placed_work_history(&controlling)
+                .await
+                .acknowledged
+                .is_empty()
+        },
+    )
+    .await;
+    let settled = ordinary_placed_work_history(&controlling).await;
+    assert_eq!(
+        settled.recorded,
+        vec![work.clone()],
+        "still one Record: {settled:?}"
+    );
+    assert_eq!(
+        settled.cancellation_requested,
+        vec![work.clone()],
+        "still one cancellation request: {settled:?}"
+    );
+    assert_eq!(
+        settled.resolved,
+        vec![(
+            work.clone(),
+            PlacedCompletionHostOutcomeEvent::InteractionComplete
+        )],
+        "still exactly one terminal, the work's result: {settled:?}"
+    );
+    assert!(
+        settled.closed.is_empty(),
+        "nothing was closed as cancelled afterwards: {settled:?}"
+    );
+    assert_eq!(
+        settled.acknowledged,
+        vec![work.clone()],
+        "the result is acknowledged once: {settled:?}"
+    );
+    assert_eq!(
+        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await,
+        HostRowsOfWork {
+            pending: 0,
+            terminals: Vec::new(),
+            acknowledged: 1,
+            cancellations: Vec::new(),
+        },
+        "the host keeps one acknowledgement tombstone for the work id and nothing else"
+    );
+    assert_eq!(
+        streams.load(Ordering::SeqCst),
+        1,
+        "the member host ran the finished work once, to the end"
     );
 
     fixture.shutdown().await;

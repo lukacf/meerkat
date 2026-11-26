@@ -567,6 +567,130 @@ fn a_host_that_never_lists_is_told_of_a_decision_open_at_the_gateways_start() {
     assert!(again.is_empty(), "and no later list: {again:?}");
 }
 
+/// The id of the mob the rows' host creates beside its launch mob.
+const SECOND_MOB: &str = "gateway-decisions-second";
+
+/// How long a row waits before it says that no further notice came.
+const QUIET: Duration = Duration::from_millis(500);
+
+/// A host with two mobs keeps one set of decisions and has one connection.
+/// The host creates its second mob and its gateway ends; a decision is held
+/// while no gateway runs; the gateway that starts again on the same state
+/// serves both mobs and pushes the decision at its start. The host is told
+/// once, not once for each mob, and the notice names no mob. The host's
+/// list is the host's whichever of its mobs the request names: the first
+/// list writes its own notice, and a list that names the other mob, or
+/// none, writes no further one. A list that names a mob the host does not
+/// have is refused and writes nothing.
+#[test]
+fn a_host_with_two_mobs_is_told_of_a_held_decision_once_whichever_mob_a_list_names() {
+    let state = tempfile::tempdir().expect("state dir");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let mut first = Gateway::ready(scratch.path(), Some(state.path()), json!({}));
+    let created = first.rpc(
+        "meta/mobs/create",
+        json!({ "mob_config": format!(
+            "[mob]\nid = \"{SECOND_MOB}\"\n\n[profiles.default]\nmodel = \"gpt-5.5\"\n"
+        ) }),
+    );
+    assert_eq!(
+        created["result"]["mob"]["mob_id"],
+        json!(SECOND_MOB),
+        "the host has a second mob: {created}"
+    );
+    first.kill();
+
+    let owner = decisions_of(state.path());
+    let held = hold(&owner, "build-two-mobs", "team:owners");
+    let mut gateway = Gateway::ready(scratch.path(), Some(state.path()), json!({}));
+
+    let notice = gateway
+        .next_notice(Duration::from_mins(1))
+        .expect("the gateway notices the open decision on its own");
+    assert_eq!(notice["decision_id"], json!(held.decision_id.to_string()));
+    assert_eq!(notice["event"], json!("held"));
+    assert!(
+        notice.get("mob_id").is_none() && notice.get("mob").is_none(),
+        "a notice names no mob: {notice}"
+    );
+    let second_push = gateway.next_notice(QUIET);
+    assert!(
+        second_push.is_none(),
+        "the host is told once, not once for each of its mobs: {second_push:?}"
+    );
+
+    let (mobs, during) = gateway.call("meta/mobs/list", json!({}));
+    let mut served: Vec<&str> = mobs["result"]["mobs"]
+        .as_array()
+        .expect("the mobs of the host")
+        .iter()
+        .filter_map(|mob| mob["mob_id"].as_str())
+        .collect();
+    served.sort_unstable();
+    assert_eq!(
+        served,
+        ["gateway-decisions-second", "gateway-decisions-test"],
+        "the gateway that started again serves both mobs: {mobs}"
+    );
+    assert!(during.is_empty(), "{during:?}");
+
+    let (under_the_second, at_the_first_list) =
+        gateway.call("meta/decisions/list", json!({ "mob_id": SECOND_MOB }));
+    assert!(
+        under_the_second["error"].is_null(),
+        "a list that names the host's second mob is answered: {under_the_second}"
+    );
+    assert_eq!(
+        decision_ids(&under_the_second["result"]["decisions"]),
+        [held.decision_id.to_string()],
+        "the list is the host's, whichever mob it names"
+    );
+    assert_eq!(
+        at_the_first_list.len(),
+        1,
+        "the host's first list writes its own notice: {at_the_first_list:?}"
+    );
+    assert_eq!(
+        at_the_first_list[0]["decision_id"],
+        json!(held.decision_id.to_string())
+    );
+    assert_eq!(at_the_first_list[0]["event"], json!("held"));
+    assert!(
+        at_the_first_list[0].get("mob_id").is_none() && at_the_first_list[0].get("mob").is_none(),
+        "a notice names no mob: {at_the_first_list:?}"
+    );
+
+    for params in [json!({ "mob_id": "gateway-decisions-test" }), json!({})] {
+        let (answer, more) = gateway.call("meta/decisions/list", params.clone());
+        assert!(answer["error"].is_null(), "{params}: {answer}");
+        assert_eq!(
+            decision_ids(&answer["result"]["decisions"]),
+            [held.decision_id.to_string()],
+            "{params}"
+        );
+        assert!(
+            more.is_empty(),
+            "a list under the other mob, or under none, writes no further notice ({params}): {more:?}"
+        );
+    }
+
+    let (foreign, refused_with) = gateway.call(
+        "meta/decisions/list",
+        json!({ "mob_id": "a-mob-this-host-does-not-have" }),
+    );
+    assert_eq!(
+        foreign["error"]["data"]["kind"],
+        json!("foreign_mob_target"),
+        "{foreign}"
+    );
+    assert!(
+        refused_with.is_empty(),
+        "a refused list writes no notice: {refused_with:?}"
+    );
+    let last = gateway.next_notice(QUIET);
+    assert!(last.is_none(), "and nothing follows: {last:?}");
+}
+
 #[test]
 fn the_presenter_records_the_channel_message_references() {
     let state = tempfile::tempdir().expect("state dir");

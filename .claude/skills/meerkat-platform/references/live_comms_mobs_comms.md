@@ -48,8 +48,10 @@ require_peer_auth = true                     # default true
   with `auth = "none"`.
 - The in-process registry is namespaced by realm id, so agents in different
   realms cannot see or message each other over `inproc`.
-- Signed TCP and UDS envelopes are capped at 1 MiB. Messages and requests wait
-  up to 30 s for an ACK; lifecycle notices and responses are not ACKed.
+- Signed TCP and UDS envelopes are capped at 1 MiB. Messages, requests and
+  lifecycle notices wait up to 30 s for an ACK. A lifecycle notice is ACKed
+  once the receiving consumer takes it: a handoff, not durable admission or a
+  reply. Responses are not ACKed.
 - A participant name is claimed only while unbound. A second live claim is
   refused (`NameOccupied`, surfaced by mobs as `ParticipantNameOccupied`) even
   for the same key. One live mob per mob id per process: its supervisor holds

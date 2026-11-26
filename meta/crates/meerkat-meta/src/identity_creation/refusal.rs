@@ -496,10 +496,10 @@ impl IdentityRefusalKind {
             }
             Self::ReservedKey { .. } => "The request names a reserved label key: use another key.",
             Self::AuthorityFieldNeedsApproval { .. } => {
-                "This change would give the agent a set of authority labels it does not have \
-                 now, which only a human decision does: `key` names one of the labels it would \
-                 carry after the change. Leave the agent's authority labels out of the change, \
-                 or ask under a rule that requires approval."
+                "This change would give an agent a set of authority labels it does not have \
+                 now, which only a human decision does: `key` names one of the labels that \
+                 agent would carry after the change. Leave authority labels out of the \
+                 change, or ask under a rule that requires approval."
             }
             Self::AuthorityFieldInvalid { .. } => {
                 "The authority field is not declared, or its value is not one the host allows."

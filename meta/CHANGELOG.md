@@ -175,14 +175,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - A request that normalizes and is not the held one is refused as before:
     by the owner's rule, by the host's check, or `operation_reused`.
 
-  Under the `request_id` of a decision that has ended, every request now
-  answers how it ended, where one that was refused for a reason of its own
-  was answered that refusal. One case is not cured: a retry that still
-  normalizes, but to another normalized form than the one held (a peer the
-  peer rules now give under another rule, for one), is still refused
-  `operation_reused`; `meta/identity/operation` reads the decision. A
-  retry of a change that committed is unchanged. The RPC reference states
-  these limits under "Requests, operations and retries".
+  Under the `request_id` of a decision that ended without its change
+  (rejected, expired, withdrawn, or refused when it was carried out),
+  every request now answers how it ended, where one that was refused for a
+  reason of its own was answered that refusal. One case is not cured: a
+  retry that still normalizes, but to another normalized form than the one
+  held (a peer the peer rules now give under another rule, for one), is
+  still refused `operation_reused`; `meta/identity/operation` reads the
+  decision. A retry of a change that committed is unchanged, and a
+  decision that was approved and carried out is such a change. The RPC
+  reference states these limits under "Requests, operations and retries".
 
 ### Upgrade notes
 

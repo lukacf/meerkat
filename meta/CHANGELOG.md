@@ -180,6 +180,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   would have waited 30 minutes by default. The wrapper's own checks and
   rewrites are unchanged.
 
+- The gateway's sentence for the refusal `authority_field_needs_approval`
+  of a change of an agent (its `detail`) says what `key` names. The `key`
+  is the first, by name, of the authority labels the agent would carry
+  after the change. On an update that can be a label the request neither
+  sets nor removes: when an agent carries two authority labels and an
+  update takes one of them off, `key` names the one that stays. The
+  sentence was "This label is an authority field, which only a human
+  decision sets: leave it out, or ask under a rule that requires
+  approval.", which told a caller to leave out a label it may never have
+  named. It is now "This change would give the agent a set of authority
+  labels it does not have now, which only a human decision does: `key`
+  names one of the labels it would carry after the change. Leave the
+  agent's authority labels out of the change, or ask under a rule that
+  requires approval." Only the text changed: the kind, its token, `key`
+  and which label it names, `retryable` and the rules that decide the
+  refusal are as they were.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

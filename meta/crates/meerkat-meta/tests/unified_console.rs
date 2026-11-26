@@ -1930,8 +1930,10 @@ fn stable_members_of_a_declaration_read(result: &Value, which: &str) -> Result<V
 ///   no value outside its vocabulary;
 /// - each read's convergence block is valid by itself: it names the
 ///   identity as it was asked for, its condition is the one Core derives
-///   from its decision, and its status is of no later revision than the
-///   durable one beside it.
+///   from its decision, and neither its status's revision nor its active
+///   revision is above the durable one beside it (Core sets the active
+///   revision to the durable revision of that moment or to an earlier
+///   one, never past it).
 ///
 /// Nothing orders the two blocks. Not by time: the observation time is the
 /// host's wall clock, which may be set back. Not by revision: a read that
@@ -1973,6 +1975,16 @@ fn declaration_reads_agree(earlier: &Value, later: &Value, alias: &str) -> Resul
                 "the {which} read's convergence block is of revision {:?}, above the durable \
                  desired revision {}",
                 block.desired_intent_revision, read.desired_intent_revision
+            ));
+        }
+        if block
+            .active_intent_revision
+            .is_some_and(|revision| revision > read.desired_intent_revision)
+        {
+            return Err(format!(
+                "the {which} read's convergence block has the active revision {:?}, above the \
+                 durable desired revision {}",
+                block.active_intent_revision, read.desired_intent_revision
             ));
         }
     }
@@ -2086,7 +2098,7 @@ fn the_comparison_of_two_declaration_reads_accepts_two_moments_and_refuses_each_
     );
 
     type Break = fn(&mut Value, &mut Value);
-    let breaks: [(&str, Break, &str); 16] = [
+    let breaks: [(&str, Break, &str); 17] = [
         (
             "another mob in the later read",
             |_, later| later["mob_id"] = json!("mob-other"),
@@ -2175,7 +2187,13 @@ fn the_comparison_of_two_declaration_reads_accepts_two_moments_and_refuses_each_
         (
             "a status of a revision above the durable one",
             |_, later| later["convergence"]["desired_intent_revision"] = json!(3),
-            "above the durable desired revision 2",
+            "convergence block is of revision Some(3), above the durable desired revision 2",
+        ),
+        (
+            "an active revision above the durable one",
+            |earlier, _| earlier["convergence"]["active_intent_revision"] = json!(3),
+            "convergence block has the active revision Some(3), above the durable desired \
+             revision 2",
         ),
         (
             "an observation time that is no time",

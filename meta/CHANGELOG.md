@@ -144,6 +144,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   control character in either is replaced by `?`. The verdicts are
   unchanged.
 
+- A change of an agent that waits for a person's decision answers that
+  decision when the same request is sent again under its `request_id`,
+  also after the launch's identity policy, the mob's definition or the
+  host's own check has turned against it. The request was judged again as
+  a new one before it was compared with the held one, so the retry
+  answered the new refusal (`change_denied`, `profile_unknown`,
+  `validation_refused` and so on) while `meta/identity/operation` still
+  read `pending_decision`. Only `stale_spec` and `identity_unknown`
+  already answered the decision. Now the held request answers
+  `pending_decision` with its decision, as the operation's read does; what
+  the policy and the mob say by then is asked when the decision is carried
+  out, as before. Three things follow.
+  Another request under the `request_id` of a held change that cannot be
+  normalized (a profile the mob does not define, for one) also reads the
+  held decision, where it was answered its own refusal: without a
+  normalized form it cannot be told apart from the held request. Nothing
+  is held or written for it. Another request that normalizes is refused as
+  before: by the owner's rule, by the host's check, or `operation_reused`.
+  And under the `request_id` of a decision that has ended, every request
+  now answers how it ended, where one that was refused for a reason of its
+  own was answered that refusal. One case is not cured: a retry that still
+  normalizes, but to another normalized form than the one held (a peer the
+  peer rules now give under another rule, for one), is still refused
+  `operation_reused`; `meta/identity/operation` reads the decision. A
+  retry of a change that committed is unchanged.
+
 ### Upgrade notes
 
 - Type checkers can now report mistakes that a `str` annotation

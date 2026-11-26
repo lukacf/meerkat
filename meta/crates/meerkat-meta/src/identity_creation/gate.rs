@@ -1796,35 +1796,41 @@ impl IdentityGate {
         if let Some(receipt) = Self::receipt(mob, &call.operation_id).await? {
             return self.replayed(mob, policy, requester, call, &receipt).await;
         }
-        // An operation a decision holds, or held, goes through every check
-        // below like any request, and is then only compared: the request
-        // the decision holds answers the decision as it stands, and any
-        // other request under the operation, of whatever change kind, is
-        // `operation_reused`. Nothing is held or committed beside the
-        // decision. A request that no longer normalizes because the agent
-        // moved since it was held is the same request asked again.
+        // An operation a decision holds, or held, answers that decision as
+        // it stands to the request the decision holds, and
+        // `operation_reused` to any other request under it, of whatever
+        // change kind. Nothing is held or committed beside the decision.
+        //
+        // The request is judged first, because only a normalized request
+        // can be compared with the held one. But the judgment is of the
+        // mob, the definition and the policy as they are now, and the held
+        // request was judged when it was held: what the judgment says now
+        // is asked when the decision is carried out, and it never answers
+        // the held request asked again.
+        // - A request the judgment refuses now has no normalized form to
+        //   compare, so it answers the decision as it stands. That is the
+        //   held request asked again after the policy, the definition or
+        //   an agent it names moved. Another request that cannot be judged
+        //   reads the same state, since the two cannot be told apart; it
+        //   holds and writes nothing.
+        // - A request that normalizes is compared before the two checks
+        //   below are asked again: the held one answers its decision, and
+        //   any other is answered by the checks and then
+        //   `operation_reused`. A decision that ended answers for good
+        //   here, whatever is asked under it.
         let held = match &self.decisions {
             Some(decisions) => decisions.held(mob, &call.operation_id).await?,
             None => None,
         };
         let judged = match self.judge(mob, policy, requester, &call.change).await {
             Ok(judged) => judged,
-            Err(refusal) => {
-                return match held {
-                    Some(state)
-                        if matches!(
-                            refusal.kind,
-                            IdentityRefusalKind::StaleSpec { .. }
-                                | IdentityRefusalKind::IdentityUnknown
-                        ) =>
-                    {
-                        Ok(state)
-                    }
-                    _ => Err(refusal),
-                };
-            }
+            Err(refusal) => return held.ok_or(refusal),
         };
         let request = &judged.normalized.request;
+        let held = match held {
+            Some(state) if self.same_as_held(&state, request).is_ok() => return Ok(state),
+            held => held,
+        };
         let adopts_or_creates = matches!(
             request.action,
             RequestAction::Adopt { .. } | RequestAction::Create { .. }
@@ -1835,9 +1841,8 @@ impl IdentityGate {
         if let Some(hooks) = &self.hooks {
             hooks.validate(request)?;
         }
-        if let Some(state) = held {
-            self.same_as_held(&state, request)?;
-            return Ok(state);
+        if held.is_some() {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::OperationReused));
         }
         self.refuse_while_owning_mobs(mob, requester, &call.operation_id, request)
             .await?;

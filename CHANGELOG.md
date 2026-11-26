@@ -6745,6 +6745,16 @@ them.
   Retire such members before the member that seated them, or restart the
   host. Affects 0.7.29 through this release (the refused scheduled delivery
   by a run on this release's code; the rest read from the source).
+  Added 2026-11-26, after the release: a restart of the host is not the
+  only end of this refusal, and stopping and resuming the mob is not one
+  by itself. Read from the source of 0.9.15 and 0.9.18, and not run: the
+  refusal ends when the mob next builds that member's session again, and
+  the member then owns its own work. That happens at a restart of the
+  host. It also happens without a restart when the member is woken after
+  it was released or after its idle runtime was torn down, and when a
+  resume of the mob finds the member's session no longer running. A
+  resume that finds the member's session still running keeps it as it
+  is, and the refusal with it. The advice above is unchanged.
 
 - A turn that asks for a reasoning effort level its session's route refuses
   is answered with the typed refusal and makes no provider request. Through

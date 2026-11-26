@@ -171,23 +171,39 @@ export function readerPackagesFor(paths, inventory, options = {}) {
 // row is reported in states, each read from the files and none assumed:
 //   planned              the inventory names the row for the changed paths;
 //   built                a lane of the plan compiles its target (the planner
-//                        says which, or that the push does);
+//                        says which, or that the push does). It is the
+//                        plan's own view: another workflow may compile the
+//                        same target, and the report does not look there;
 //   executed             a test the row names carries no ignore attribute;
 //   ignored, not executed
-//                        every test the row names is ignored, and no file
-//                        gives evidence that something runs it;
-//   separately executed  every test the row names is ignored, and for each
-//                        one a tracked file both carries an ignored-run flag
-//                        and names the test: the evidence is that file and
-//                        its two lines, never a lane's name. It shows that
-//                        a runner selects the test, not that a CI lane of
-//                        the plan runs that runner;
+//                        every test the row names is ignored, and no runner
+//                        that asks for ignored tests was FOUND for it by
+//                        the two rules below. That is a statement about the
+//                        search, not that no runner exists;
+//   separately executed  every test the row names is ignored, and each one
+//                        has evidence in a tracked file: a file that both
+//                        carries an ignored-run flag and names the test
+//                        (ignoredRunEvidence), or a cargo test command that
+//                        asks for ignored tests of the row's whole target
+//                        or package (targetRunEvidence). The evidence is
+//                        the file and its lines, never a lane's name. It
+//                        shows that a runner selects the test, not that a
+//                        CI lane of the plan runs that runner;
 //   unproven             every test the row names is ignored and a runner is
-//                        claimed but not shown for each of them: the ignore
-//                        reason names a lane (`lane:<name>`), or only some of
-//                        the tests have evidence, or the evidence could not
-//                        be read. Such a row is reported neither as run nor
-//                        as not run.
+//                        claimed or possible but not shown for each of
+//                        them: the ignore reason names a lane
+//                        (`lane:<name>`), or only some of the tests have
+//                        evidence, or a command asks for ignored tests and
+//                        the text does not say whether it reaches the row
+//                        (no package, a filter, a value held elsewhere), or
+//                        the evidence could not be read. Such a row is
+//                        reported neither as run nor as not run.
+// Limits of a textual rule. A test is paired with a flag per file, not per
+// command: a file that asks for ignored tests of something else and names
+// the test on another line is credited. An ignore inside `cfg_attr` holds
+// on some builds only and is read as not ignored. A test that a macro
+// generates, or that lives in a file the inventory row does not list, is
+// not found.
 // The functions are pure: the planner (scripts/ci-cargo-lanes.mjs) reads the
 // files and passes their text.
 
@@ -354,6 +370,7 @@ export function ignoredRunEvidence(name, files) {
   const skipped = new RegExp(`--skip(?:[ =]+|['"]?,\\s*)['"]?(?:[A-Za-z0-9_]+::)*${escaped}(?![A-Za-z0-9_])`);
   const evidence = [];
   for (const { path, text } of files) {
+    if (!String(text).includes(name)) continue;
     const lines = String(text).split(/\r?\n/);
     const flags = [];
     const selectors = [];
@@ -371,6 +388,7 @@ export function ignoredRunEvidence(name, files) {
     }
     evidence.push({
       path,
+      covers: "test",
       flag_line: best[0] + 1,
       flag: lines[best[0]].trim().slice(0, 160),
       selector_line: best[1] + 1,
@@ -380,29 +398,209 @@ export function ignoredRunEvidence(name, files) {
   return evidence.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
+// The commands of a file that hold an ignored-run flag: each flag line with
+// the lines a trailing backslash joins to it, as one text.
+function flagCommands(text) {
+  const lines = String(text).split(/\r?\n/);
+  const commands = [];
+  let last = -1;
+  lines.forEach((line, index) => {
+    if (index <= last || !line.includes("ignored") || COMMENT_LINE.test(line) || !hasIgnoredRunFlag(line)) return;
+    let first = index;
+    while (first > 0 && /\\\s*$/.test(lines[first - 1]) && !COMMENT_LINE.test(lines[first - 1])) first -= 1;
+    last = index;
+    while (last < lines.length - 1 && /\\\s*$/.test(lines[last])) last += 1;
+    commands.push({ line: first + 1, flag_line: index + 1, flag: line.trim(), text: lines.slice(first, last + 1).map((part) => part.replace(/\\\s*$/, " ").trim()).join(" ") });
+  });
+  return commands;
+}
+
+// A file's commands are read once, however many rows ask.
+const FLAG_COMMANDS = new WeakMap();
+function flagCommandsOf(file) {
+  let commands = FLAG_COMMANDS.get(file);
+  if (!commands) {
+    commands = flagCommands(file.text);
+    FLAG_COMMANDS.set(file, commands);
+  }
+  return commands;
+}
+
+// The words of a command: quotes, brackets and the commas of an argument
+// list removed, `--option=value` split.
+function commandWords(text) {
+  return text
+    .replace(/["'`[\]()]/g, " ")
+    .replace(/,(?=\s|$)/g, " ")
+    .replace(/(^|\s)(--?[A-Za-z][A-Za-z0-9-]*)=/g, "$1$2 ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// The options of cargo test, cargo nextest run and the test binary that take
+// a value. A value option this list does not know leaves its value as a
+// bare word, which is read as a test filter: the command then proves
+// nothing (see targetRunEvidence).
+const VALUE_OPTIONS = new Set([
+  ..."-p --package --test --bin --example --bench --features -F --profile --cargo-profile --target --target-dir --manifest-path".split(" "),
+  ..."-j --jobs --build-jobs --color --message-format --config -Z --partition -E --filter-expr --filterset --test-threads".split(" "),
+  ..."--retries --status-level --final-status-level --failure-output --success-output --no-tests --run-ignored --exclude".split(" "),
+  ..."--tool-config-file --config-file --archive-file --workspace-remap --format --logfile --skip --show-progress --max-fail".split(" "),
+]);
+
+// A command read as `cargo test` or `cargo nextest run`: the packages and
+// targets it selects and whatever narrows it to some tests. Null when the
+// text holds no such subcommand (a test binary run directly, an argument
+// list built over several lines).
+function cargoTestCommand(text) {
+  const words = commandWords(text);
+  const start = words.findIndex((word, index) => word === "test" || (word === "run" && words[index - 1] === "nextest"));
+  if (start < 0) return null;
+  const nextest = words[start] === "run";
+  const command = { packages: [], workspace: false, excluded: [], tests: [], bins: [], examples: [], flags: new Set(), features: [], narrowed: [], unresolved: false };
+  const lists = { "-p": command.packages, "--package": command.packages, "--exclude": command.excluded, "--test": command.tests, "--bin": command.bins, "--example": command.examples };
+  for (let index = start + 1; index < words.length; index += 1) {
+    const word = words[index];
+    // Another command of the same line, or a redirection, ends this one.
+    if (/^(?:&&|\|\||\||;|\d*[<>].*)$/.test(word)) break;
+    if (word === "--") continue;
+    // A value the text does not hold (a variable, a substitution).
+    if (/[${}]/.test(word)) {
+      command.unresolved = true;
+      continue;
+    }
+    if (VALUE_OPTIONS.has(word)) {
+      const value = words[index + 1];
+      index += 1;
+      if (value === undefined || /[${}]/.test(value)) {
+        command.unresolved = true;
+        continue;
+      }
+      if (lists[word]) lists[word].push(value);
+      else if (word === "--features" || word === "-F") command.features.push(...value.split(","));
+      else if (["-E", "--filter-expr", "--filterset", "--skip", "--partition"].includes(word)) command.narrowed.push(word);
+      else if (word === "--profile" && nextest) command.narrowed.push("a nextest profile");
+      continue;
+    }
+    if (word.startsWith("-")) {
+      if (word === "--workspace" || word === "--all") command.workspace = true;
+      else if (word === "--exact") command.narrowed.push(word);
+      else command.flags.add(word.replace(/;$/, ""));
+      if (word.endsWith(";")) break;
+      continue;
+    }
+    command.narrowed.push("a test filter");
+  }
+  return command;
+}
+
+// Evidence that a runner asks for ignored tests of a row's WHOLE target or
+// package, which names no test function: in each file (`{ path, text }`), a
+// `cargo test` or `cargo nextest run` command that holds an ignored-run flag,
+// names the row's package (`-p`, or `--workspace` without excluding it) and
+// selects its target (`--test <name>`, `--lib`, `--bin <name>`,
+// `--example <name>`, a kind-wide or all-targets selector, or no target
+// selector at all), with nothing that narrows it to some tests and with the
+// row's features. Such a command covers every test of the row: `covering`.
+// A command the text cannot settle goes to `unclear` with the reason, and
+// gives no credit: one that names the target and no package; one for the
+// package with a filter, a nextest profile, a partition, features the row
+// needs and the command does not name, or a value the text does not hold;
+// and a flag outside any cargo test command in a file that selects the
+// target by name on another line. A command for another package, another
+// target, or without the flag is told apart and is neither.
+export function targetRunEvidence({ package: pkg, target, features = [] }, files) {
+  const colon = target.indexOf(":");
+  const kind = colon < 0 ? target : target.slice(0, colon);
+  const name = colon < 0 ? null : target.slice(colon + 1);
+  const option = { test: "--test", bin: "--bin", example: "--example" }[kind] ?? null;
+  const kindWide = { test: "--tests", bin: "--bins", example: "--examples", lib: "--lib" }[kind] ?? null;
+  const covering = [];
+  const unclear = [];
+  for (const file of files) {
+    const { path, text } = file;
+    const commands = flagCommandsOf(file);
+    if (commands.length === 0) continue;
+    // The file selects the row's target by name on some line that is no
+    // comment.
+    let named = null;
+    const namesTarget = () => {
+      if (named === null) {
+        named = false;
+        if (option !== null && String(text).includes(name)) {
+          const selector = new RegExp(`${option}(?:=|["',\\s]+)["']?${name.replace(/[^A-Za-z0-9_]/g, "\\$&")}(?![A-Za-z0-9_-])`, "g");
+          for (let match = selector.exec(text); match !== null && !named; match = selector.exec(text)) {
+            const from = text.lastIndexOf("\n", match.index) + 1;
+            named = !COMMENT_LINE.test(text.slice(from, match.index + 1));
+          }
+        }
+      }
+      return named;
+    };
+    for (const command of commands) {
+      const item = { path, line: command.line, flag_line: command.flag_line, command: command.text.slice(0, 200) };
+      const parsed = cargoTestCommand(command.text);
+      if (parsed === null) {
+        if (namesTarget()) unclear.push({ ...item, why: `an ignored-run flag outside a cargo test command, in a file that selects ${option} ${name}` });
+        continue;
+      }
+      const explicit = option !== null && { test: parsed.tests, bin: parsed.bins, example: parsed.examples }[kind].includes(name);
+      const selectors = parsed.tests.length + parsed.bins.length + parsed.examples.length + ["--lib", "--bins", "--tests", "--examples", "--benches", "--all-targets", "--doc"].filter((flag) => parsed.flags.has(flag)).length;
+      const selects =
+        explicit || (kindWide !== null && parsed.flags.has(kindWide)) || parsed.flags.has("--all-targets") || (selectors === 0 && kind !== "example" && kind !== "build");
+      if (!selects) continue;
+      const reaches = parsed.packages.includes(pkg) || (parsed.workspace && !parsed.excluded.includes(pkg));
+      if (!reaches) {
+        // Another package's run is told apart; a run that names the target
+        // and no package cannot be.
+        if (parsed.packages.length === 0 && !parsed.workspace && explicit) unclear.push({ ...item, why: `selects ${option} ${name} and names no package` });
+        continue;
+      }
+      const reasons = [...new Set(parsed.narrowed)];
+      if (parsed.unresolved) reasons.push("a value the text does not hold");
+      const missing = parsed.flags.has("--all-features") ? [] : features.filter((feature) => !parsed.features.includes(feature));
+      if (missing.length > 0) reasons.push(`without the row's features ${missing.join(",")}`);
+      if (reasons.length > 0) unclear.push({ ...item, why: `narrowed or unsettled: ${reasons.join("; ")}` });
+      else covering.push({ ...item, covers: explicit || (kindWide !== null && parsed.flags.has(kindWide) && kind === "lib") ? "target" : "package" });
+    }
+  }
+  const byPlace = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
+  return { covering: covering.sort(byPlace), unclear: unclear.sort(byPlace) };
+}
+
 const LANE_CLAIM = /(?:^|[^A-Za-z0-9_])lane:([A-Za-z0-9_-]+)/;
 
 // The execution state of a reader row from its test state and the evidence
 // of its ignored tests: `evidenceOf(name)` gives the evidence list of one
-// ignored test, or null when the evidence could not be read.
-export function readerExecution(state, evidenceOf) {
+// ignored test, or null when the evidence could not be read; `whole` is the
+// evidence for the row's whole target or package (targetRunEvidence). A
+// covering command credits every ignored test of the row; an unclear one
+// credits none and leaves a test without evidence of its own unproven.
+export function readerExecution(state, evidenceOf, whole = { covering: [], unclear: [] }) {
   if (!state.judged) {
-    return { execution: "not judged", tests: state.tests.length, ignored: 0, ignored_tests: [], unknown: state.unknown };
+    return { execution: "not judged", tests: state.tests.length, ignored: 0, ignored_tests: [], unclear_runners: [], unknown: state.unknown };
   }
+  const covering = whole.covering.map((item) => ({
+    path: item.path,
+    covers: item.covers,
+    flag_line: item.flag_line,
+    flag: item.command.slice(0, 160),
+    selector_line: item.line,
+    selector: item.command.slice(0, 160),
+  }));
   const ignoredTests = state.tests
     .filter((test) => test.ignored === "always")
     .map((test) => {
-      const evidence = evidenceOf(test.name);
+      const own = evidenceOf(test.name);
+      const evidence = [...(own ?? []), ...covering];
       const claimed = LANE_CLAIM.exec(test.reason ?? "")?.[1] ?? null;
       const execution =
-        evidence === null
-          ? "unproven"
-          : evidence.length > 0
-            ? "separately executed"
-            : claimed !== null
-              ? "unproven"
-              : "ignored, not executed";
-      return { name: test.name, reason: test.reason, source: test.source, line: test.line, claimed_lane: claimed, execution, evidence: evidence ?? [] };
+        evidence.length > 0
+          ? "separately executed"
+          : own === null || claimed !== null || whole.unclear.length > 0
+            ? "unproven"
+            : "ignored, not executed";
+      return { name: test.name, reason: test.reason, source: test.source, line: test.line, claimed_lane: claimed, execution, evidence };
     });
   const count = (execution) => ignoredTests.filter((test) => test.execution === execution).length;
   let execution;
@@ -411,5 +609,14 @@ export function readerExecution(state, evidenceOf) {
   else if (count("separately executed") === ignoredTests.length) execution = "separately executed";
   else if (count("ignored, not executed") === ignoredTests.length) execution = "ignored, not executed";
   else execution = "unproven";
-  return { execution, tests: state.tests.length, ignored: ignoredTests.length, ignored_tests: ignoredTests, unknown: [] };
+  return {
+    execution,
+    tests: state.tests.length,
+    ignored: ignoredTests.length,
+    ignored_tests: ignoredTests,
+    // The commands that ask for ignored tests and may or may not reach the
+    // row: what leaves it unproven.
+    unclear_runners: ignoredTests.length > 0 ? whole.unclear : [],
+    unknown: [],
+  };
 }

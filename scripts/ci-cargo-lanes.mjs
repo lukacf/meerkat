@@ -92,10 +92,13 @@
 // like its code. Planning a reader's target is not running its tests: a
 // test marked `#[ignore]` is built and skipped. The plan reports, and only
 // reports, what happens to each reader selection (reader_states): the lane
-// that compiles its target and, from the tests' own attributes, whether
-// they are executed, ignored and run by nothing, ignored and selected with
-// an ignored-run flag by a file that is cited, or unproven (see
-// scripts/ci-non-rust-readers.mjs). A pull request names the rows it
+// of this workflow's plan that compiles its target and, from the tests' own
+// attributes, whether they are executed, ignored with no runner found,
+// ignored and selected with an ignored-run flag by a file that is cited
+// (by the test's name, or by a cargo test command for its whole target or
+// package), or unproven (see scripts/ci-non-rust-readers.mjs). Another
+// workflow may build the same target; the report does not look there. A
+// pull request names the rows it
 // leaves to the push accordingly (deferred_to_push's reader_rows,
 // reader_rows_not_executed, reader_rows_separately_executed and
 // reader_rows_unproven hold the same labels the one list held).
@@ -299,6 +302,7 @@ import {
   readerPackagesFor,
   readerSelectionsFor,
   readerTestState,
+  targetRunEvidence,
   WHOLE_CHECKOUT,
 } from "./ci-non-rust-readers.mjs";
 import {
@@ -1897,23 +1901,47 @@ export function compiledInDocKeys(entries, ownerOf) {
 export const LIVE_ONLY_FEATURES = ["integration-real-tests", "openai-live-e2e"];
 
 // Which lane compiles a reader selection's target, as the report says it.
+// It is this plan's view, of this workflow's lanes: another workflow may
+// compile the same target (a product's own CI builds its test targets on a
+// pull request), and the report does not look there.
 export const BUILT_BY_A_READER_ROW = "a reader row of this plan";
 export const BUILT_BY_ANOTHER_LANE = "another lane of this plan";
-export const BUILT_ON_THE_PUSH = "the push (left to it)";
-export const BUILT_BY_NO_LANE = "no CI lane";
+export const BUILT_ON_THE_PUSH = "this plan's push (left to it)";
+export const BUILT_BY_NO_LANE = "no lane of this workflow";
 // An example program without tests: no lane runs it, and the plan does not
 // know which lane compiles it.
 export const BUILT_NOT_KNOWN = "not known to this plan (an example program)";
 
-// The tracked files that name one of `names` as a whole word, documentation
-// and the reader inventory left out: the files an ignored test's runner
-// could be in. Null when git cannot be asked, so that a failed search is
-// never read as "no runner".
-function trackedFilesNaming(names) {
-  if (names.length === 0) return [];
+// The files of the rule itself: its fixtures hold ignored-run commands that
+// run nothing.
+const READER_STATE_RULE_FILES = [
+  "scripts/ci-cargo-lanes.mjs",
+  "scripts/ci-cargo-lanes-selftest.mjs",
+  "scripts/ci-non-rust-readers.mjs",
+  "scripts/ci-non-rust-readers-selftest.mjs",
+];
+
+// The tracked files that hold an ignored-run flag word, documentation, the
+// reader inventory and the rule's own files left out: the files a runner of
+// ignored tests could be in. Null when git cannot be asked, so that a
+// failed search is never read as "no runner".
+export function trackedIgnoredRunFiles() {
   const found = spawnSync(
     "git",
-    ["grep", "-l", "-I", "-F", "-w", ...names.flatMap((name) => ["-e", name]), "--", ".", ":(exclude)*.md", ":(exclude)*.mdx", `:(exclude)${INVENTORY_PATH}`],
+    [
+      "grep",
+      "-l",
+      "-I",
+      "-E",
+      "-e",
+      "--ignored|--include-ignored|--run-ignored|run_ignored",
+      "--",
+      ".",
+      ":(exclude)*.md",
+      ":(exclude)*.mdx",
+      `:(exclude)${INVENTORY_PATH}`,
+      ...READER_STATE_RULE_FILES.map((path) => `:(exclude)${path}`),
+    ],
     { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   );
   if (found.status === 1) return [];
@@ -1924,12 +1952,12 @@ function trackedFilesNaming(names) {
 // The report of the reader selections of a plan (the states are defined in
 // scripts/ci-non-rust-readers.mjs): each row the inventory names for the
 // changed paths, the lane that compiles its target, and what happens to the
-// tests it names, read from their sources: executed; ignored and executed
-// by nothing; ignored and executed by a runner of their own, with the file
-// and lines that show it; or unproven. It selects nothing and changes no
-// row. A row of scope "package" (code every test of the package reaches)
-// is not judged test by test.
-export function readerStates({ notes, inventory, byName, readSource = null, filesNaming = trackedFilesNaming }) {
+// tests it names, read from their sources: executed; ignored with no runner
+// found; ignored and selected by a runner of their own, with the file and
+// lines that show it; or unproven. It selects nothing and changes no row. A
+// row of scope "package" (code every test of the package reaches) is not
+// judged test by test.
+export function readerStates({ notes, inventory, byName, readSource = null, runnerFiles = trackedIgnoredRunFiles }) {
   const read =
     readSource ??
     ((path) => {
@@ -1973,18 +2001,17 @@ export function readerStates({ notes, inventory, byName, readSource = null, file
       const text = read(path);
       return text === null ? [] : [{ path, text }];
     });
-    judged.push({ row, state: readerTestState(selection.tests, sources), sources: sources.map((source) => source.path) });
+    judged.push({ row, state: readerTestState(selection.tests, sources), sources: sources.map((source) => source.path), features: selection.features ?? [] });
   }
-  const ignoredNames = [
-    ...new Set(judged.flatMap(({ state }) => (state?.judged ? state.tests.filter((test) => test.ignored === "always").map((test) => test.name) : []))),
-  ].sort();
-  const naming = filesNaming(ignoredNames);
-  const files = new Map();
-  for (const path of naming ?? []) {
+  // The files a runner could be in are read once, and only when a row holds
+  // an ignored test.
+  const anyIgnored = judged.some(({ state }) => state?.judged && state.tests.some((test) => test.ignored === "always"));
+  const found = anyIgnored ? runnerFiles() : [];
+  const files = (found ?? []).flatMap((path) => {
     const text = read(path);
-    if (text !== null) files.set(path, text);
-  }
-  return judged.map(({ row, state, sources }) => {
+    return text === null ? [] : [{ path, text }];
+  });
+  return judged.map(({ row, state, sources, features }) => {
     if (state === null) {
       return {
         ...row,
@@ -1993,10 +2020,15 @@ export function readerStates({ notes, inventory, byName, readSource = null, file
         why: "library, binary or build-script code: every test of the package reaches it",
       };
     }
+    // A test's own sources saying how to run it are no runner.
     const own = new Set(sources);
-    const evidenceOf = (name) =>
-      naming === null ? null : ignoredRunEvidence(name, [...files].filter(([path]) => !own.has(path)).map(([path, text]) => ({ path, text })));
-    const { execution: byTests, tests, ignored, ignored_tests: ignoredTests, unknown } = readerExecution(state, evidenceOf);
+    const searched = files.filter((file) => !own.has(file.path));
+    const evidenceOf = (name) => (found === null ? null : ignoredRunEvidence(name, searched));
+    const whole =
+      found === null || !state.judged || !state.tests.some((test) => test.ignored === "always")
+        ? { covering: [], unclear: [] }
+        : targetRunEvidence({ package: row.package, target: row.target, features }, searched);
+    const { execution: byTests, tests, ignored, ignored_tests: ignoredTests, unclear_runners: unclear, unknown } = readerExecution(state, evidenceOf, whole);
     // A row no CI lane builds (a live-provider reader) executes nothing in
     // CI, whatever its tests say; what a runner of their own does with its
     // ignored tests is still reported. An example program the plan gives no
@@ -2015,6 +2047,7 @@ export function readerStates({ notes, inventory, byName, readSource = null, file
       tests,
       ignored,
       ...(ignoredTests.length > 0 ? { ignored_tests: ignoredTests } : {}),
+      ...(unclear.length > 0 ? { unclear_runners: unclear } : {}),
       ...(unknown.length > 0 ? { unknown } : {}),
     };
   });
@@ -3840,10 +3873,14 @@ function deferredSummary(deferred) {
   if (deferred.feature_check_jobs > 0) parts.push(`${deferred.feature_check_jobs} feature-combination jobs`);
   if (deferred.integration_suites.length > 0) parts.push(`integration suites ${deferred.integration_suites.join(", ")}`);
   if (deferred.reader_rows.length > 0) parts.push(`reader rows ${deferred.reader_rows.join(", ")}`);
-  // Rows the push builds and does not run are said so: every test they name
-  // is marked ignore (see reader_states for the tests and the evidence).
+  // Rows the push builds whose named tests are all marked ignore are said
+  // so, by what the search for a runner found (see reader_states for the
+  // tests and the evidence): "found", because the search reads tracked
+  // files by a textual rule and proves no absence.
   if (deferred.reader_rows_not_executed?.length > 0) {
-    parts.push(`reader rows it builds and no lane runs (every test they name is ignored) ${deferred.reader_rows_not_executed.join(", ")}`);
+    parts.push(
+      `reader rows it builds whose every named test is ignored and for which no runner asking for ignored tests was found ${deferred.reader_rows_not_executed.join(", ")}`,
+    );
   }
   if (deferred.reader_rows_separately_executed?.length > 0) {
     parts.push(
@@ -3987,6 +4024,7 @@ function githubOutput(result) {
           ignored: row.ignored ?? 0,
           execution: row.execution,
           evidence: [...new Set((row.ignored_tests ?? []).flatMap((test) => test.evidence.map((item) => `${item.path}:${item.flag_line},${item.selector_line}`)))],
+          ...(row.unclear_runners?.length > 0 ? { unclear: row.unclear_runners.map((item) => `${item.path}:${item.flag_line}`) } : {}),
         })),
     ),
   );

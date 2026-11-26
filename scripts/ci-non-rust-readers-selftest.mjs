@@ -18,6 +18,7 @@ import {
   readerSelectionsFor,
   readerTestState,
   rustTestAttributes,
+  targetRunEvidence,
 } from "./ci-non-rust-readers.mjs";
 
 const inventory = loadNonRustReaders();
@@ -289,6 +290,7 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
     assert.deepEqual(evidence, [
       {
         path: "scripts/sdk-lane",
+        covers: "test",
         flag_line: 4,
         flag: "--ignored",
         selector_line: 3,
@@ -328,6 +330,123 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
       [report.execution, report.ignored_tests.map((test) => test.execution)],
       ["unproven", ["ignored, not executed", "separately executed"]],
     );
+  }
+
+  // A RUNNER THAT NAMES NO TEST: a cargo test command that asks for ignored
+  // tests of the row's whole target, or of its whole package, covers every
+  // test of the row. The evidence is the command, with its file and lines.
+  {
+    const row = { package: "sdk", target: "test:contract" };
+    const places = (text, of = row) => {
+      const found = targetRunEvidence(of, [{ path: "scripts/lane", text }]);
+      return [found.covering.map((item) => [item.line, item.flag_line, item.covers]), found.unclear.map((item) => item.line)];
+    };
+    // The target selector, in the shapes a lane writes it.
+    for (const text of [
+      "cargo test -p sdk --test contract --locked -- --ignored\n",
+      "./scripts/repo-cargo nextest run -p sdk --test contract --run-ignored all --no-fail-fast\n",
+      'lane = "nextest run -p sdk --test contract --run-ignored ignored-only --test-threads=1"\n',
+      'args = ["test", "--package", "sdk", "--test", "contract", "--", "--include-ignored"]\n',
+      "cargo test --package=sdk --test=contract -- --ignored --nocapture 2>&1 | tee lane.log\n",
+    ]) {
+      assert.deepEqual(places(text), [[[1, 1, "target"]], []], text.trim());
+    }
+    assert.deepEqual(places("set -e\ncargo test -p sdk \\\n  --test contract -- \\\n  --ignored\n"), [[[2, 4, "target"]], []], "a command over several lines");
+    assert.deepEqual(targetRunEvidence(row, [{ path: "scripts/lane", text: "set -e\ncargo test -p sdk --test contract -- --ignored\n" }]).covering, [
+      { path: "scripts/lane", line: 2, flag_line: 2, command: "cargo test -p sdk --test contract -- --ignored", covers: "target" },
+    ]);
+    // The package-wide run: no target selector, every test target, every
+    // target, or the workspace.
+    for (const text of [
+      "cargo test -p sdk -- --ignored\n",
+      "cargo nextest run -p sdk --run-ignored all\n",
+      "cargo test -p sdk --tests -- --include-ignored\n",
+      "cargo test -p sdk --all-targets --all-features -- --ignored\n",
+      "cargo test --workspace -- --ignored\n",
+    ]) {
+      assert.deepEqual(places(text), [[[1, 1, "package"]], []], text.trim());
+    }
+    // TOLD APART, no evidence and nothing unclear: another package, another
+    // target, the library only, the flag in another command, the package
+    // excluded, a comment, no flag, git's own flag.
+    for (const text of [
+      "cargo test -p other --test contract -- --ignored\n",
+      "cargo test -p sdk --test another -- --ignored\n",
+      "cargo test -p sdk --lib -- --ignored\n",
+      "cargo test -p sdk --test contract\ncargo test -p other -- --ignored\n",
+      "cargo test --workspace --exclude sdk -- --ignored\n",
+      "# cargo test -p sdk --test contract -- --ignored\n",
+      "cargo test -p sdk --test contract -- --nocapture\n",
+      "git status --porcelain --ignored && cargo test -p sdk --test contract\n",
+    ]) {
+      assert.deepEqual(places(text), [[], []], text.trim());
+    }
+    // NOT TOLD APART, no credit and the row unproven: the target and no
+    // package, a package the text does not hold, a filter, a nextest
+    // profile, an unknown value, and a flag on a line of its own in a file
+    // that selects the target.
+    for (const text of [
+      "cargo test --test contract -- --ignored\n",
+      'cargo test -p "${PACKAGE}" --test contract -- --ignored\n',
+      "cargo test -p sdk --test contract -- --ignored --exact one_test\n",
+      "cargo nextest run -p sdk --test contract --run-ignored all -E 'test(one)'\n",
+      "cargo nextest run -p sdk --test contract --profile live --run-ignored all\n",
+      "cargo test -p sdk --test contract $EXTRA -- --ignored\n",
+      "cargo test -p sdk --test contract -- --ignored one_test\n",
+    ]) {
+      assert.deepEqual(places(text), [[], [1]], text.trim());
+    }
+    assert.deepEqual(places('command = ["cargo", "test", "-p", "sdk", "--test", "contract", "--",\n    "--ignored"]\n'), [[], [2]], "an argument list over two lines");
+    assert.deepEqual(places('ARGS = ["--exact", name, "--ignored"]\n'), [[], []], "a flag in a file that does not select the target says nothing of it");
+    // The features a row needs: a command without them may compile the
+    // tests out.
+    const featured = { ...row, features: ["python"] };
+    assert.deepEqual(places("cargo test -p sdk --test contract -- --ignored\n", featured), [[], [1]]);
+    assert.deepEqual(places("cargo test -p sdk --features python,other --test contract -- --ignored\n", featured), [[[1, 1, "target"]], []]);
+    assert.deepEqual(places("cargo test -p sdk --all-features --test contract -- --ignored\n", featured), [[[1, 1, "target"]], []]);
+    // A library row: --lib names its target; a test target's run is not it.
+    const library = { package: "sdk", target: "lib" };
+    assert.deepEqual(places("cargo test -p sdk --lib -- --ignored\n", library), [[[1, 1, "target"]], []]);
+    assert.deepEqual(places("cargo test -p sdk -- --ignored\n", library), [[[1, 1, "package"]], []]);
+    assert.deepEqual(places("cargo test -p sdk --test contract -- --ignored\n", library), [[], []]);
+
+    // The row's state: a covering command credits EVERY ignored test of the
+    // row, which no test's own evidence did; an unclear one credits none
+    // and leaves the row unproven, not "not executed".
+    const second = '#[test]\n#[ignore]\nfn runs_the_other_script() {}\n';
+    const two = stateOf(["runs_the_other_script", "runs_the_sdk_script"], ignored, second);
+    const whole = (text) => targetRunEvidence(row, [{ path: "scripts/lane", text }]);
+    const covered = readerExecution(two, none, whole("cargo test -p sdk --test contract -- --ignored\n"));
+    assert.deepEqual(
+      [covered.execution, covered.ignored_tests.map((test) => [test.execution, test.evidence]), covered.unclear_runners],
+      [
+        "separately executed",
+        ["runs_the_other_script", "runs_the_sdk_script"].map(() => [
+          "separately executed",
+          [
+            {
+              path: "scripts/lane",
+              covers: "target",
+              flag_line: 1,
+              flag: "cargo test -p sdk --test contract -- --ignored",
+              selector_line: 1,
+              selector: "cargo test -p sdk --test contract -- --ignored",
+            },
+          ],
+        ]),
+        [],
+      ],
+    );
+    const unsettled = readerExecution(two, none, whole("cargo test --test contract -- --ignored\n"));
+    assert.deepEqual(
+      [unsettled.execution, unsettled.ignored_tests.map((test) => [test.execution, test.evidence]), unsettled.unclear_runners.map((item) => [item.path, item.line, item.why])],
+      ["unproven", [["unproven", []], ["unproven", []]], [["scripts/lane", 1, "selects --test contract and names no package"]]],
+    );
+    assert.equal(readerExecution(two, none, whole("cargo test -p other --test contract -- --ignored\n")).execution, "ignored, not executed", "another package's run is no runner of the row");
+    // In a target with plain tests too, the covering command credits the
+    // ignored one.
+    const part = readerExecution(stateOf(null, `${plain}${ignored}`), none, whole("cargo test -p sdk -- --ignored\n"));
+    assert.deepEqual([part.execution, part.ignored_tests.map((test) => [test.name, test.execution, test.evidence[0].covers])], ["executed in part", [["runs_the_sdk_script", "separately executed", "package"]]]);
   }
 
   // THE MIXED FILE: a target with a plain and an ignored test is executed

@@ -66,6 +66,15 @@ NAMES_THE_WORKSPACE = re.compile(r"--workspace(?!-remap(\s|$))")
 # report line says was built.
 _BACKENDS = ("library_mode_reference", "console_acceptance_fixture", "memory_console_reference",
              "workgraph_console_reference", "mcp_apps_gateway_fixture")
+# The incident pack's two binaries, built in the same compile for
+# console-acceptance: an example and a bin of the same package.
+_INCIDENT_EXAMPLE = "incident_command_center"
+_INCIDENT_BIN = "mcp_fixture"
+_BACKENDS_BUILD = ("./scripts/repo-cargo build -p meerkat-meta "
+                   + " ".join(f"--example {name}" for name in (*_BACKENDS, _INCIDENT_EXAMPLE))
+                   + f" --bin {_INCIDENT_BIN} --timings")
+INCIDENT_DIGESTS = "Record the incident pack binaries' digests"
+INCIDENT_VERIFY = "Unpack and verify the incident pack's binaries"
 _EXTENSION_STATE = "extension-state,announcement-test-faults,console-test-faults"
 COMPILE_PATHS = {
     "rust-unit-build": (
@@ -88,9 +97,8 @@ COMPILE_PATHS = {
     ),
     "console-backends": (
         "Build console acceptance backends",
-        "./scripts/repo-cargo build -p meerkat-meta " + " ".join(f"--example {name}" for name in _BACKENDS)
-        + " --timings",
-        "meerkat-meta examples " + ", ".join(_BACKENDS) + ", default features",
+        _BACKENDS_BUILD,
+        "meerkat-meta examples " + ", ".join((*_BACKENDS, _INCIDENT_EXAMPLE)) + f", bin {_INCIDENT_BIN}, default features",
     ),
 }
 MEASURE_BEFORE = "Compile statistics, before"
@@ -419,7 +427,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual([use for use in reference_uses if use in setup_order], setup_order)
         jobs = rust_jobs(meta)
         self.assertEqual(sorted(jobs), sorted(["test-python", "console-backends", "console-fixtures",
-                                               "console-acceptance", "flow-editor", "rust-unit-build",
+                                               "flow-editor", "rust-unit-build",
                                                "rust-examples", "rust-conformance", "rust-integration",
                                                "rust-features-check", "rust-extension-state",
                                                "rust-extension-state-lib", "rust-voice", "rust-voice-lib",
@@ -474,7 +482,7 @@ class CiWorkflowTests(unittest.TestCase):
                 else:
                     self.assertRegex(line, r"^make (test-python|e2e-live) CARGO=\.\./scripts/repo-cargo$")
         self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
-        self.assertEqual(len(commands), 25, commands)
+        self.assertEqual(len(commands), 24, commands)
         self.assertNotIn("repo-cargo", INSTALLER_WORKFLOW.read_text())
 
     def test_the_no_workspace_rule_passes_only_the_archive_remap_flag(self):
@@ -866,22 +874,23 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertNotIn("run e2e:voice:live", block)
 
     def test_console_backends_are_built_once_from_fresh_bundles(self):
-        """console-backends builds the five acceptance backends after `run
-        build` (they embed crates/meerkat-meta/console-dist), packs exactly
-        those five (an artifact keeps no file mode) and hands them to console
-        and every console-browser leg, which run them from
-        META_EXAMPLE_BIN_DIR and compile nothing."""
+        """console-backends builds the five acceptance backends and the
+        incident pack's two binaries after `run build` (they embed
+        crates/meerkat-meta/console-dist), packs exactly those seven (an
+        artifact keeps no file mode; the bin sits beside the examples'
+        directory) and hands them to console and every console-browser leg,
+        which run them from META_EXAMPLE_BIN_DIR and compile nothing."""
         examples = ["library_mode_reference", "console_acceptance_fixture", "memory_console_reference",
                     "workgraph_console_reference", "mcp_apps_gateway_fixture"]
         workflow = load(CI_WORKFLOW)
         backends = workflow["jobs"]["console-backends"]
         runs = [step.get("run", "") for step in steps_of(backends)]
-        build = runs.index("./scripts/repo-cargo build -p meerkat-meta "
-                           + " ".join(f"--example {name}" for name in examples) + " --timings")
+        build = runs.index(_BACKENDS_BUILD)
         self.assertLess(runs.index("npm --prefix console run build --silent"), build)
         pack = next(run for run in runs if run.startswith("tar "))
         self.assertEqual(pack, 'tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" '
-                         + " ".join(examples))
+                         + " ".join([*examples, _INCIDENT_EXAMPLE])
+                         + ' -C "${CARGO_TARGET_DIR}/debug" ' + _INCIDENT_BIN)
         upload = next(step for step in steps_of(backends) if uses_of(step) == "actions/upload-artifact")
         self.assertEqual(upload["with"]["name"], "console-backends")
         self.assertIs(upload["with"]["overwrite"], True)
@@ -981,18 +990,129 @@ class CiWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(kept, console)
 
-    def test_the_acceptance_pack_runs_the_binaries_built_through_the_root_wrapper(self):
+    def test_the_acceptance_pack_runs_the_binaries_console_backends_built(self):
+        """console-acceptance compiles nothing: on console-backends' own
+        condition it waits for that job, fetches this run's archive, unpacks
+        only the pack's two binaries and checks each against the digest
+        console-backends published as a job output, before the acceptance
+        step runs them from META_EXAMPLE_BIN_DIR. The bundles are still built
+        before that step, and no job waits for console-acceptance but the
+        gate."""
+        workflow = load(CI_WORKFLOW)
+        job = workflow["jobs"]["console-acceptance"]
+        backends = workflow["jobs"]["console-backends"]
+        self.assertEqual(job["needs"], ["changes", "console-backends"])
+        self.assertEqual(job["if"], backends["if"])
         acceptance = job_block("console-acceptance")
+        self.assertNotIn("repo-cargo", acceptance)
+        self.assertNotIn(SETUP_RUST, [uses_of(step) for step in steps_of(job)])
+        fetch = next(step for step in steps_of(job) if uses_of(step) == "actions/download-artifact")
+        self.assertEqual(fetch["with"], {"name": "console-backends", "path": "${{ runner.temp }}/console-backends"})
         order = [
-            "- run: npm --prefix console run build --silent\n",
-            "./scripts/repo-cargo build -p meerkat-meta --example incident_command_center --bin mcp_fixture\n",
+            "- name: Fetch the console acceptance backends\n",
+            f"- name: {INCIDENT_VERIFY}\n",
             'echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"\n',
-            "run: examples/001-incident-command-center-pack/topology_examples.sh\n",
+            "- run: npm --prefix console run build --silent\n",
+            "      - name: Stock incident topology acceptance\n"
+            "        run: examples/001-incident-command-center-pack/topology_examples.sh\n"
+            "      - name: Upload incident topology screenshots\n"
+            "        if: always()\n",
         ]
         positions = [acceptance.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
         script = (ROOT / "examples/001-incident-command-center-pack/topology_examples.sh").read_text()
         self.assertIn("for required in incident_command_center mcp_fixture; do", script)
+        # The digests travel as job outputs, not in the archive they describe.
+        self.assertEqual(backends["outputs"], {
+            f"{name}_sha256": f"${{{{ steps.incident_digests.outputs.{name} }}}}"
+            for name in (_INCIDENT_EXAMPLE, _INCIDENT_BIN)
+        })
+        digests = next(step for step in steps_of(backends) if step.get("name") == INCIDENT_DIGESTS)
+        self.assertEqual(digests["id"], "incident_digests")
+        verify = next(step for step in steps_of(job) if step.get("name") == INCIDENT_VERIFY)
+        self.assertEqual(verify["env"], {
+            f"BUILT_{name.upper()}_SHA256": f"${{{{ needs.console-backends.outputs.{name}_sha256 }}}}"
+            for name in (_INCIDENT_EXAMPLE, _INCIDENT_BIN)
+        })
+        waiters = sorted(name for name, other in workflow["jobs"].items()
+                         if "console-acceptance" in (other.get("needs") or []))
+        self.assertEqual(waiters, ["gate"])
+
+    def test_the_acceptance_job_refuses_a_binary_console_backends_did_not_build(self):
+        """The pack and digest steps of console-backends and the unpack step
+        of console-acceptance, run as written on stand-in files: the digests
+        the first job publishes admit exactly the files it packed. A changed
+        file, a missing digest and a digest of the wrong form each fail the
+        step before it names the binaries' directory."""
+        workflow = load(CI_WORKFLOW)
+        backends = workflow["jobs"]["console-backends"]
+        pack = next(step["run"] for step in steps_of(backends) if step.get("run", "").startswith("tar "))
+        digests = next(step["run"] for step in steps_of(backends) if step.get("name") == INCIDENT_DIGESTS)
+        verify = next(step["run"] for step in steps_of(workflow["jobs"]["console-acceptance"])
+                      if step.get("name") == INCIDENT_VERIFY)
+        names = (_INCIDENT_EXAMPLE, _INCIDENT_BIN)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            debug = root / "target" / "debug"
+            (debug / "examples").mkdir(parents=True)
+            for name in (*_BACKENDS, _INCIDENT_EXAMPLE):
+                (debug / "examples" / name).write_text(f"example {name}\n")
+            (debug / _INCIDENT_BIN).write_text(f"bin {_INCIDENT_BIN}\n")
+            for built in (*(debug / "examples").iterdir(), debug / _INCIDENT_BIN):
+                built.chmod(0o755)
+            base = {"PATH": os.environ["PATH"], "CARGO_TARGET_DIR": str(root / "target")}
+            produced = root / "produced"
+            produced.mkdir()
+            output = root / "output"
+            for script in (pack, digests):
+                subprocess.run(["bash", "-e", "-c", script], check=True, capture_output=True, text=True,
+                               env={**base, "RUNNER_TEMP": str(produced), "GITHUB_OUTPUT": str(output)})
+            published = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(sorted(published), sorted(names))
+            listed = subprocess.run(["tar", "-tf", str(produced / "console-backends.tar")], check=True,
+                                    capture_output=True, text=True).stdout.split()
+            self.assertEqual(sorted(listed), sorted([*_BACKENDS, *names]))
+
+            def unpack(label, digests_given, spoil=None):
+                temp = root / label
+                (temp / "console-backends").mkdir(parents=True)
+                shutil.copy(produced / "console-backends.tar", temp / "console-backends" / "console-backends.tar")
+                if spoil:
+                    other = root / f"{label}-other"
+                    other.mkdir()
+                    for name in names:
+                        source = debug / "examples" / name if name == _INCIDENT_EXAMPLE else debug / name
+                        (other / name).write_text(f"another {name}\n" if name == spoil else source.read_text())
+                    subprocess.run(["tar", "-C", str(other), "-cf",
+                                    str(temp / "console-backends" / "console-backends.tar"), *names], check=True)
+                environment = root / f"{label}-env"
+                environment.touch()
+                env = {**base, "RUNNER_TEMP": str(temp), "GITHUB_ENV": str(environment)}
+                env.update({f"BUILT_{name.upper()}_SHA256": value for name, value in digests_given.items()})
+                result = subprocess.run(["bash", "-e", "-c", verify], env=env, capture_output=True, text=True)
+                return result, environment.read_text(), temp / "console-backends" / "bin"
+
+            result, named, bin_dir = unpack("same", published)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(named, f"META_EXAMPLE_BIN_DIR={bin_dir}\n")
+            self.assertEqual(sorted(path.name for path in bin_dir.iterdir()), sorted(names))
+            for name in names:
+                self.assertTrue(os.access(bin_dir / name, os.X_OK), name)
+                self.assertIn(f"console-backends built {name} sha256 {published[name]}\n", result.stdout)
+                self.assertIn(f"console-acceptance unpacked {name} sha256 {published[name]}\n", result.stdout)
+            for label, given, spoil in (
+                ("changed-bin", published, _INCIDENT_BIN),
+                ("changed-example", published, _INCIDENT_EXAMPLE),
+                ("no-digest", {**published, _INCIDENT_BIN: ""}, None),
+                ("no-digests", {name: "" for name in names}, None),
+                ("short-digest", {**published, _INCIDENT_EXAMPLE: published[_INCIDENT_EXAMPLE][:63]}, None),
+                ("swapped", dict(zip(names, reversed([published[name] for name in names]))), None),
+            ):
+                with self.subTest(case=label):
+                    result, named, _ = unpack(label, given, spoil)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(named, "")
+                    self.assertIn("is not the file console-backends built in this run", result.stdout)
 
     def test_the_flow_editor_jobs_split_its_make_target(self):
         """flow-editor-contracts runs the checks that need neither the binary
@@ -2111,7 +2231,9 @@ class CiWorkflowTests(unittest.TestCase):
              {"rust-unit-build": "failure", "rust-unit": "skipped"}, every, 1),
             ("the unit legs skipped behind a build that passed", {"rust-unit": "skipped"}, every, 1),
             ("the browser legs skipped behind failed backends",
-             {"console-backends": "failure", "console-browser": "skipped", "console": "skipped"}, every, 1),
+             {"console-backends": "failure", "console-browser": "skipped", "console": "skipped",
+              "console-acceptance": "skipped"}, every, 1),
+            ("the acceptance job skipped behind backends that passed", {"console-acceptance": "skipped"}, every, 1),
             ("a skipped job of a running lane", {"flow-editor-contracts": "skipped"}, console_only, 1),
             ("a failed job in a skipped lane", {"test-python": "failure"}, console_only, 1),
             ("lanes missing: classification failed", all_skipped, {}, 1),

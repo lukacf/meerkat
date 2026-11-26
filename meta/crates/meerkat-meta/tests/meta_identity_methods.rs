@@ -4165,10 +4165,15 @@ async fn under_an_ended_decision_every_request_answers_how_it_ended() {
 
     let held = asked_create(&family, &mob, &host, "r-1", scout()).await;
     assert_eq!(held.token(), "pending_decision", "{held:?}");
+    // Of the host, its operator withdraws a held change.
     family
-        .withdraw(&mob, &host, WithdrawRequest::new(operation.clone()))
+        .withdraw(
+            &mob,
+            &ChangeRequester::host_operator("ops"),
+            WithdrawRequest::new(operation.clone()),
+        )
         .await
-        .expect("the host withdraws the held create");
+        .expect("the host's operator withdraws the held create");
 
     let configured = match family
         .read(&mob, &host, IdentityRead::Get(GetAgent::new(HOST_A)))

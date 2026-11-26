@@ -1799,10 +1799,14 @@ host's rules, the mob's definition or the host's own check would refuse it
 as a new request now: the rules and the mob are asked again when the
 decision is carried out, and the host's own check is asked only when a
 change is asked or planned, never when a decision is carried out. A request
-of the held change's kind that names the same agents and can no longer be
-normalized, or for which a read failed, answers the held decision too: it
-cannot be told from the held request, and nothing is held or written for
-it. Any other request that cannot be normalized, of another change kind or
+that can no longer be normalized, or for which a read failed, is compared
+with the held request by its change kind and the agents it names only:
+nothing else of it can be compared. Where both are the held request's, it
+is answered the held decision and is not judged as a new request, whatever
+its other parameters are: they may differ from the held request's (another
+profile, other peers, other instructions), and the answer does not say
+that the two requests are the same. Nothing is held or written for it. Any
+other request that cannot be normalized, of another change kind or
 naming other agents, is `operation_reused`, and so is one under a decision
 whose held request this gateway cannot read. A request that is normalized
 and is not the held one is answered by the owner's rule

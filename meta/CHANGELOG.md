@@ -29,8 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - A request of the held change's kind that names the same agents and
     cannot be normalized (a profile the mob does not define, for one), or
     for which a read failed, reads the held decision, where it was answered
-    its own refusal or the failed read. Without a normalized form it cannot
-    be told from the held request. Nothing is held or written for it.
+    its own refusal or the failed read. Only its change kind and the agents
+    it names are compared: its other parameters may differ from the held
+    request's, and it is still answered the held decision, not judged as a
+    new request. Nothing is held or written for it.
   - A request of another change kind, or one that names other agents, that
     cannot be normalized is refused `operation_reused`, where it was
     answered its own refusal. This includes two refusals that answered the

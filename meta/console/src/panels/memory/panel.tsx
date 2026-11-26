@@ -180,6 +180,14 @@ export interface MemoryPanelProps {
     verdict: MemoryQuarantineVerdict,
     rationale: string | undefined,
   ) => Promise<MemoryQuarantineDecideResult>;
+  /// Retire an active record of a shared scope
+  /// (meta/agent_memory/forget_in_scope). Passed only when the caller is
+  /// advertised the method on a mutable console; absent, shared records
+  /// stay read-only here. Rejects with the transport's typed error.
+  onRemoveSharedRecord?: (realm: string, record: MemoryFullRecord) => Promise<void>;
+  /// Blank the content of a retired record (meta/agent_memory/purge), under
+  /// the same conditions.
+  onPurgeRecord?: (realm: string, record: MemoryFullRecord) => Promise<void>;
 }
 
 /// The not-set-up state (A3.7): what Memory would show, and how to turn it on.
@@ -246,6 +254,8 @@ export function MemoryPanel({
   onLoadEvidence,
   onOpenGating,
   onDecideQuarantine,
+  onRemoveSharedRecord,
+  onPurgeRecord,
 }: MemoryPanelProps): React.JSX.Element {
   const nameOf = useNameOf();
   const now = useNow();
@@ -268,6 +278,24 @@ export function MemoryPanel({
         const result = await onDecideQuarantine(realm, record, verdict, rationale);
         setDecisionNotice(quarantineDecisionSummary(result));
         onSelectRecord(realm, result.successor?.memory_id ?? record.id);
+      }
+    : undefined;
+  // After a removal or a purge the Biography is read again, so it shows the
+  // record as the store now holds it.
+  const removeShared = onRemoveSharedRecord
+    ? async (record: MemoryFullRecord): Promise<void> => {
+        if (!detail) return;
+        const realm = detail.realm;
+        await onRemoveSharedRecord(realm, record);
+        onSelectRecord(realm, record.id);
+      }
+    : undefined;
+  const purgeRecord = onPurgeRecord
+    ? async (record: MemoryFullRecord): Promise<void> => {
+        if (!detail) return;
+        const realm = detail.realm;
+        await onPurgeRecord(realm, record);
+        onSelectRecord(realm, record.id);
       }
     : undefined;
   const [filter, setFilter] = React.useState<MemoryRecordsFilter>({});
@@ -684,6 +712,8 @@ export function MemoryPanel({
       onLoadEvidence={onLoadEvidence}
       onDecideQuarantine={decideQuarantine}
       decisionNotice={decisionNotice}
+      onRemoveShared={removeShared}
+      onPurgeRecord={purgeRecord}
     />
   ) : detailLoading ? (
     <div className="memory-drawer-loading">

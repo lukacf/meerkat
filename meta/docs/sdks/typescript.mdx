@@ -835,7 +835,7 @@ draft.registerTool("read_mail", async (args, requester) => {
 });
 ```
 
-For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and withdraw them from the agent with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context, and it is not an erasure of the record: the bundled store keeps its text (see [`meta/agent_memory/forget`](/api/rpc#meta%2Fagent_memory%2Fforget)).
+For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and withdraw them from the agent with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context, and it is not an erasure of the record: the bundled store keeps its text until it is purged with `handle.purgeAgentMemory`, a call of its own that a release before it does not have (see [`meta/agent_memory/forget`](/api/rpc#meta%2Fagent_memory%2Fforget)).
 
 `recallAgentMemory` selects records and does not list them: `"contextual"`
 (the default) returns the active records that match the query, `"always"`
@@ -863,6 +863,8 @@ const newest = await handle.recallAgentMemory("scout", {
   maxEntries: 64,
 });
 ```
+
+A record of a shared scope is retired with `handle.forgetAgentMemoryInScope({ kind: "mob", key: mobId }, memoryId, { realm })` (or `{ kind: "realm" }`), and the content of a retired record is blanked for good with `handle.purgeAgentMemory({ kind: "identity", key: identity }, memoryId, { realm })`, which answers `{ memoryId, purged, purgedIds }`. The memory steward's write limit is `agentMemory({ steward: { writeScopes: "all" | "identity" | "own_identity" } })`. See [Removing and purging records](/concepts/memory#removing-and-purging-records) and [Where the memory steward writes](/concepts/memory#where-the-memory-steward-writes).
 
 ## Type definitions
 

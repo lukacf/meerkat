@@ -621,6 +621,35 @@ export function parseAgentMemoryForgetResult(raw: unknown): AgentMemoryForgetRes
   };
 }
 
+/**
+ * Result of purging the content of a tombstoned memory record. `purged` is
+ * false when nothing was purged: the id is unknown, is a record of another
+ * scope, or was purged before. `purgedIds` names every record whose content
+ * was blanked: the record and the earlier versions it replaced.
+ */
+export interface AgentMemoryPurgeResult {
+  readonly memoryId: string;
+  readonly purged: boolean;
+  readonly purgedIds: readonly string[];
+}
+
+export function parseAgentMemoryPurgeResult(raw: unknown): AgentMemoryPurgeResult {
+  const d = asRecord(raw);
+  const memoryId = requiredStringField(d, "memory_id", "agent_memory_purge_result");
+  if (typeof d.purged !== "boolean") {
+    throw new Error("agent_memory_purge_result.purged must be a boolean");
+  }
+  const purgedIds = d.purged_ids ?? [];
+  if (!Array.isArray(purgedIds) || purgedIds.some((id) => typeof id !== "string")) {
+    throw new Error("agent_memory_purge_result.purged_ids must be an array of strings");
+  }
+  return {
+    memoryId,
+    purged: d.purged,
+    purgedIds: purgedIds as string[],
+  };
+}
+
 /** Result of meta/agent_memory/update: the superseding record's id. */
 export interface AgentMemoryUpdateResult {
   readonly memoryId: string;

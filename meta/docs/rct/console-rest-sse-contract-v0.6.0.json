@@ -154,6 +154,8 @@
         "note": "Methods of the request doors that are not part of this contract's method list and are launch_mob_only.",
         "prefix": "meta/console/voice/",
         "of_this_contract": [
+          "meta/agent_memory/forget_in_scope",
+          "meta/agent_memory/purge",
           "meta/capabilities",
           "meta/console/list_identities",
           "meta/fork_member",
@@ -2851,6 +2853,79 @@
                 -32601
               ],
               "note": "-32043 is a typed refusal (data.kind memory_quarantine_review_refused, data.reason not_found | content_mismatch | not_quarantined | gate_pending | successor_conflict | secret_detected | stale_update); nothing was written. gate_pending refuses a release while a live gated promotion owns the record; an operator tombstone invalidates the promotion instead."
+            }
+          ],
+          "mob_scope": "launch_mob_only",
+          "member_params": [
+            "identity"
+          ]
+        },
+        "meta/agent_memory/forget_in_scope": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "scope",
+              "memory_id"
+            ],
+            "optional_fields": [
+              "realm"
+            ],
+            "note": "scope names a shared memory scope: {kind: \"mob\", key: <mob id>} or {kind: \"realm\"}. An identity's own record is retired with meta/agent_memory/forget. The removal is recorded as made by the signed-in person on the connection. It needs mob.memory.delete for the mob's scope and an unscoped agent.memory.delete grant for the realm's."
+          },
+          "success": {
+            "required_fields": [
+              "memory_id",
+              "deleted"
+            ],
+            "note": "deleted is false for an unknown id, a record of another scope, or a record already tombstoned: the call never confirms an id in a scope the request did not name."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32603,
+                -32601
+              ],
+              "note": "-32602 for a scope the call does not reach (identity, operator) or a malformed one; -32601 when agent memory is not configured."
+            }
+          ],
+          "mob_scope": "launch_mob_only"
+        },
+        "meta/agent_memory/purge": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "memory_id"
+            ],
+            "optional_fields": [
+              "identity",
+              "scope",
+              "realm"
+            ],
+            "note": "Exactly one of identity (an identity's own record, as meta/agent_memory/forget names it) and scope ({kind: \"mob\", key: <mob id>} or {kind: \"realm\"}) is given; both or neither is -32602. It needs agent.memory.admin: on the identity for an identity's record, as an unscoped grant for a record of a shared scope. The purge is recorded as made by the signed-in person on the connection."
+          },
+          "success": {
+            "required_fields": [
+              "memory_id",
+              "purged",
+              "purged_ids"
+            ],
+            "note": "purged is false, and purged_ids empty, for an unknown id, a record of another scope, or a record purged before, and for a request that names an agent the caller may not know of (one private to another person; on a Console that can identify a person, one the Console does not know, for a caller who is not an admin), which is answered as a name no agent holds. purged_ids lists every record whose content was blanked, newest first: the record and the earlier versions it replaced. A purged record's meta/memory/panel/record answer carries purged: true."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32603,
+                -32601
+              ],
+              "note": "-32602 with data {kind: \"record_not_tombstoned\", memory_id, status} when the record is not tombstoned (forget it first); -32602 with no data when the request is malformed; -32601 when agent memory is not configured."
             }
           ],
           "mob_scope": "launch_mob_only",

@@ -55,10 +55,10 @@ use super::staged::{
     validate_batch,
 };
 
+pub(crate) mod purge;
 mod set_aside;
 
 pub(crate) use set_aside::SetAsideOutcome;
-#[cfg(test)]
 pub(crate) use set_aside::set_aside_scope_key;
 
 /// Per-scope retention floors (§7.3): exceeded floors WARN the steward via
@@ -2809,6 +2809,30 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
         true
     }
 
+    async fn purge_authored(
+        &self,
+        scope: &MemoryScope,
+        memory_id: &str,
+        author: MemoryAuthor,
+    ) -> Result<
+        crate::identity_first::agent_memory::AgentMemoryPurgeResult,
+        crate::identity_first::agent_memory::AgentMemoryPurgeError,
+    > {
+        let memory_id = memory_id.trim().to_string();
+        if memory_id.is_empty() {
+            return Err(
+                AgentMemoryError::InvalidRecord("memory_id must not be empty".to_string()).into(),
+            );
+        }
+        let store = self.clone();
+        let scope = scope.clone();
+        run_blocking(move || store.purge_in_scope_blocking(&scope, &memory_id, &author)).await?
+    }
+
+    fn supports_purge(&self) -> bool {
+        true
+    }
+
     fn as_taintable(&self) -> Option<Arc<dyn TaintableStore>> {
         Some(Arc::new(self.clone()))
     }
@@ -4034,6 +4058,10 @@ impl crate::memory::distiller::TombstoneSource for SqliteAgentMemoryStore {
     /// these" list (§8.4). The mechanical backstop for exact recreation is
     /// the staged validator's content-hash check; this list closes the
     /// paraphrase gap at the prompt level.
+    ///
+    /// A purged row is left out: the list names a record by its title, and
+    /// a purged row has none, so it would take a place from a title and
+    /// say nothing. `limit` counts the rows that still hold text.
     async fn recent_tombstones(
         &self,
         scope: &MemoryScope,
@@ -4045,12 +4073,14 @@ impl crate::memory::distiller::TombstoneSource for SqliteAgentMemoryStore {
         run_blocking(move || {
             store.with_realm_conn(scope.realm(), |conn| {
                 let mut statement = conn
-                    .prepare(
+                    .prepare(&format!(
                         "SELECT title, kind, tombstoned_at_ms FROM records \
                          WHERE scope_kind = ?1 AND scope_key = ?2 \
                            AND status_kind = 'tombstoned' AND tombstoned_at_ms >= ?3 \
+                           AND {} \
                          ORDER BY tombstoned_at_ms DESC LIMIT ?4",
-                    )
+                        purge::ROW_NOT_PURGED_SQL
+                    ))
                     .map_err(sql_err)?;
                 let rows = statement
                     .query_map(
@@ -4256,7 +4286,13 @@ fn apply_batch_tx(
 }
 
 /// The §10.1 gate's verdict for one whole batch (see [`apply_batch_tx`]),
-/// with the quarantined-write warn and timeline event when it fires.
+/// with the log line and timeline event that say what the verdict did.
+///
+/// Only a create or an update can land quarantined. A batch that holds
+/// neither (a forget's tombstone, a retier, a rank) is applied at once,
+/// whatever the author's session: it is logged as applied, and no
+/// quarantined write is reported for it. The verdict returned is the gate's
+/// either way; the audit rows keep it.
 fn batch_quarantine_reason(
     batch: &StagedMutationBatch,
     gate: Option<&dyn LlmWriteGate>,
@@ -4275,6 +4311,22 @@ fn batch_quarantine_reason(
     let quarantine =
         gate.and_then(|gate| gate.quarantine_reason(&batch.author, batch.kind, &evidence));
     if let Some(reason) = quarantine.as_deref() {
+        let lands_quarantined = batch
+            .ops
+            .iter()
+            .any(|op| matches!(op, StagedOp::Create { .. } | StagedOp::Supersede { .. }));
+        if !lands_quarantined {
+            let applied: Vec<&'static str> = batch.ops.iter().map(StagedOp::kind_str).collect();
+            tracing::info!(
+                realm = %batch.realm,
+                author = ?batch.author,
+                reason,
+                applied = ?applied,
+                "agent memory: LLM-authored change applied at once (the write gate fired, but \
+                 only a create or an update lands quarantined)"
+            );
+            return quarantine;
+        }
         tracing::warn!(
             realm = %batch.realm,
             author = ?batch.author,
@@ -4408,6 +4460,17 @@ fn review_in_tx(
     else {
         return Ok(Err(QuarantineReviewRefusal::NotFound));
     };
+    // A purged record holds no content to decide over, and a release that
+    // was committed before the purge can no longer be compared with it: the
+    // successor kept the text the origin lost. It is not awaiting review,
+    // whatever digest the request carries, so this is answered before the
+    // content binding and before the replay evidence is read.
+    if purge::is_purged(&origin) {
+        return Ok(Err(QuarantineReviewRefusal::NotQuarantined {
+            status: origin.status.kind_str(),
+            released_as: release_successor_on_record(conn, &origin.id)?,
+        }));
+    }
     if content_hash(&origin.title, &origin.body) != request.expected_content_hash {
         return Ok(Err(QuarantineReviewRefusal::ContentMismatch));
     }
@@ -4584,6 +4647,42 @@ fn review_replay(
             released_as,
         }),
     })
+}
+
+/// The successor a committed review released `origin_id` as, read from the
+/// origin's own tombstone row and nothing else: the name the review wrote
+/// down, with none of [`recorded_review`]'s checks of the successor row. A
+/// row that is not a review of this origin, or does not read as one, names
+/// none.
+fn release_successor_on_record(
+    conn: &Connection,
+    origin_id: &str,
+) -> Result<Option<String>, AgentMemoryError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT detail FROM audit \
+             WHERE memory_id = ?1 AND op_kind = 'tombstone' ORDER BY audit_id DESC",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![origin_id], |row| row.get::<_, String>(0))
+        .map_err(sql_err)?;
+    for row in rows {
+        let detail = row.map_err(sql_err)?;
+        let Ok(detail) = serde_json::from_str::<serde_json::Value>(&detail) else {
+            continue;
+        };
+        let Some(review) = detail
+            .get("review")
+            .and_then(|review| serde_json::from_value::<ReviewAudit>(review.clone()).ok())
+        else {
+            continue;
+        };
+        if review.origin == origin_id {
+            return Ok(review.successor);
+        }
+    }
+    Ok(None)
 }
 
 /// The committed review that tombstoned `origin`, read from its own audit
@@ -5481,6 +5580,8 @@ mod tests {
     use super::*;
     use crate::identity_first::agent_memory::{AgentMemorySelection, markdown_import_file_path};
     use std::error::Error;
+
+    mod forget_log;
 
     fn identity() -> Result<AgentIdentity, Box<dyn Error>> {
         AgentIdentity::parse("identity:luka").map_err(|err| {

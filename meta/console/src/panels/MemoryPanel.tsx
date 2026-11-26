@@ -4,6 +4,7 @@
 
 import * as model from "./memory/model";
 import * as quarantine from "./memory/quarantine";
+import * as removal from "./memory/removal";
 import * as viz from "./memory/viz-model";
 import * as words from "./memory/words";
 
@@ -12,6 +13,7 @@ export type { MemoryPanelProps } from "./memory/panel";
 export { MemoryLiveStrip } from "./memory/live-strip";
 export * from "./memory/model";
 export * from "./memory/quarantine";
+export * from "./memory/removal";
 export * from "./memory/words";
 
 /// The pure helpers, for the node test lane (MemoryPanel.test.ts).
@@ -75,6 +77,10 @@ export const __memoryTest = {
   quarantineRationaleProblem: quarantine.quarantineRationaleProblem,
   quarantineDecisionSummary: quarantine.quarantineDecisionSummary,
   quarantineDecisionErrorText: quarantine.quarantineDecisionErrorText,
+  memoryScopeParam: removal.memoryScopeParam,
+  isPurgedRecord: removal.isPurgedRecord,
+  canRemoveSharedRecord: removal.canRemoveSharedRecord,
+  canPurgeRecord: removal.canPurgeRecord,
   // Display helpers
   verdictTone: model.verdictTone,
   formatSize: words.formatSize,

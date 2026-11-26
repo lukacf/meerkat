@@ -166,6 +166,7 @@ from .types import (
     MemberRunStopReceipt,
     AgentMemoryForgetResult,
     AgentMemoryManifestResult,
+    AgentMemoryPurgeResult,
     AgentMemoryRecallResult,
     AgentMemoryRecord,
     AgentMemoryRecordMeta,
@@ -4494,12 +4495,73 @@ class MobHandle:
         *,
         realm: str | None = None,
     ) -> AgentMemoryForgetResult:
-        """Delete a durable memory record for an identity-scoped agent."""
+        """Withdraw a record from the identity's future recall and injection.
+
+        The bundled SQLite store retains the record's text until it is purged.
+        """
         params: dict[str, Any] = {"identity": identity, "memory_id": memory_id}
         if realm is not None:
             params["realm"] = realm
         raw = await self._runtime._rpc("meta/agent_memory/forget", params)
         return AgentMemoryForgetResult.from_dict(raw)
+
+    async def forget_agent_memory_in_scope(
+        self,
+        scope_kind: str,
+        memory_id: str,
+        *,
+        scope_key: str | None = None,
+        realm: str | None = None,
+    ) -> AgentMemoryForgetResult:
+        """Retire a memory record of a shared scope.
+
+        ``scope_kind`` is ``"mob"`` (``scope_key`` is the mob id) or
+        ``"realm"`` (no key). The record is tombstoned: no longer recalled,
+        injected or listed to agents; its text stays in the store until it
+        is purged. ``deleted`` is false for an unknown id, a record of
+        another scope, or a record already tombstoned. An identity's own
+        records are retired with :meth:`forget_agent_memory`.
+        """
+        scope: dict[str, Any] = {"kind": scope_kind}
+        if scope_key is not None:
+            scope["key"] = scope_key
+        params: dict[str, Any] = {"scope": scope, "memory_id": memory_id}
+        if realm is not None:
+            params["realm"] = realm
+        raw = await self._runtime._rpc("meta/agent_memory/forget_in_scope", params)
+        return AgentMemoryForgetResult.from_dict(raw)
+
+    async def purge_agent_memory(
+        self,
+        scope_kind: str,
+        memory_id: str,
+        *,
+        scope_key: str | None = None,
+        realm: str | None = None,
+    ) -> AgentMemoryPurgeResult:
+        """Blank the content of a tombstoned memory record, for good.
+
+        ``scope_kind`` is ``"identity"`` (``scope_key`` is the identity),
+        ``"mob"`` (the mob id) or ``"realm"`` (no key). The record must be
+        tombstoned first (forget it); a record in any other state is
+        refused. Its title, description, body and tags are blanked, and so
+        are the earlier versions it replaced; the rows stay, tombstoned.
+        Copies made from the record (a promotion, a derived record), any
+        proposal made from it and session transcripts are not touched.
+        """
+        params: dict[str, Any] = {"memory_id": memory_id}
+        if scope_kind == "identity":
+            # An identity's record is named as forget names it.
+            params["identity"] = scope_key
+        else:
+            scope: dict[str, Any] = {"kind": scope_kind}
+            if scope_key is not None:
+                scope["key"] = scope_key
+            params["scope"] = scope
+        if realm is not None:
+            params["realm"] = realm
+        raw = await self._runtime._rpc("meta/agent_memory/purge", params)
+        return AgentMemoryPurgeResult.from_dict(raw)
 
     async def update_agent_memory(
         self,

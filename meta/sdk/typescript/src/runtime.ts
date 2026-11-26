@@ -210,6 +210,7 @@ import {
   parseAgentMemoryRecord,
   parseAgentMemoryRecallResult,
   parseAgentMemoryForgetResult,
+  parseAgentMemoryPurgeResult,
   parseAgentMemoryUpdateResult,
   parseAgentMemoryManifestResult,
   parseMemoryStoreInfo,
@@ -315,6 +316,7 @@ import {
   type AgentMemoryRecord,
   type AgentMemoryRecordMeta,
   type AgentMemoryForgetResult,
+  type AgentMemoryPurgeResult,
   type AgentMemoryUpdateResult,
   type MemoryStoreInfo,
   type MemoryIndexResult,
@@ -678,6 +680,26 @@ export interface RecallAgentMemoryOptions {
 
 export interface ForgetAgentMemoryOptions {
   readonly realm?: string;
+}
+
+/**
+ * A shared memory scope: a mob's by its key (the mob id), or the realm's
+ * own scope. The scopes `forgetAgentMemoryInScope` removes from.
+ */
+export type AgentMemorySharedScopeRef =
+  | { readonly kind: "mob"; readonly key: string }
+  | { readonly kind: "realm" };
+
+/**
+ * The memory scope a purge names: an identity's scope by its key, or a
+ * shared scope.
+ */
+export type AgentMemoryScopeRef =
+  | { readonly kind: "identity"; readonly key: string }
+  | AgentMemorySharedScopeRef;
+
+function agentMemoryScopeWire(scope: AgentMemoryScopeRef): Record<string, unknown> {
+  return scope.kind === "realm" ? { kind: "realm" } : { kind: scope.kind, key: scope.key };
 }
 
 export interface UpdateAgentMemoryOptions {
@@ -5164,6 +5186,57 @@ export class MobHandle {
     if (options.realm !== undefined) params.realm = options.realm;
     return parseAgentMemoryForgetResult(
       await this._runtime._rpc("meta/agent_memory/forget", params),
+    );
+  }
+
+  /**
+   * Retire a memory record of a shared scope: `{ kind: "mob", key }` (the
+   * mob id) or `{ kind: "realm" }`. The record is tombstoned: no longer
+   * recalled, injected or listed to agents; its text stays in the store
+   * until it is purged. `deleted` is false for an unknown id, a record of
+   * another scope, or a record already tombstoned. An identity's own
+   * records are retired with `forgetAgentMemory`.
+   */
+  async forgetAgentMemoryInScope(
+    scope: AgentMemorySharedScopeRef,
+    memoryId: string,
+    options: ForgetAgentMemoryOptions = {},
+  ): Promise<AgentMemoryForgetResult> {
+    const params: Record<string, unknown> = {
+      scope: agentMemoryScopeWire(scope),
+      memory_id: memoryId,
+    };
+    if (options.realm !== undefined) params.realm = options.realm;
+    return parseAgentMemoryForgetResult(
+      await this._runtime._rpc("meta/agent_memory/forget_in_scope", params),
+    );
+  }
+
+  /**
+   * Blank the content of a tombstoned memory record, for good. The scope is
+   * `{ kind: "identity", key }`, `{ kind: "mob", key }` or
+   * `{ kind: "realm" }`. The record must be tombstoned first (forget it); a
+   * record in any other state is refused. Its title, description, body and
+   * tags are blanked, and so are the earlier versions it replaced; the rows
+   * stay, tombstoned. Copies made from the record (a promotion, a derived
+   * record), any proposal made from it and session transcripts are not
+   * touched.
+   */
+  async purgeAgentMemory(
+    scope: AgentMemoryScopeRef,
+    memoryId: string,
+    options: ForgetAgentMemoryOptions = {},
+  ): Promise<AgentMemoryPurgeResult> {
+    const params: Record<string, unknown> = { memory_id: memoryId };
+    // An identity's record is named as forget names it.
+    if (scope.kind === "identity") {
+      params.identity = scope.key;
+    } else {
+      params.scope = agentMemoryScopeWire(scope);
+    }
+    if (options.realm !== undefined) params.realm = options.realm;
+    return parseAgentMemoryPurgeResult(
+      await this._runtime._rpc("meta/agent_memory/purge", params),
     );
   }
 

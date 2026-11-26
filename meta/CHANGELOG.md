@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Memory operator controls: a limit on where the memory steward writes, a
+supported removal of a record from shared memory, and a purge of a retired
+record's content. Review your access rules before upgrading (the Upgrade
+entry on memory access rules), and see the two Breaking entries on the
+memory steward.
+
+### Breaking
+
+- Rust API of `meerkat-meta`: `StewardConfig` gains the public field
+  `write_scopes`. A host that builds `StewardConfig` with a struct literal
+  that names every field must add it; one that ends in
+  `..StewardConfig::default()` compiles as before.
+- Behaviour only, with no setting: a dream writes only into a scope it
+  covers. A create into any other scope is dropped and recorded in the
+  dream run's skips. An op that refers to a record the same reply declared,
+  when that declaring op was dropped, is dropped on its own instead of
+  failing the whole group.
+
+### Upgrade
+
+- Review your access rules before upgrading. Two actions that
+  patterns in an existing configuration can already match now reach a
+  method. A rule that grants `agent.memory.admin`, `agent.memory.*`,
+  `agent.*` or `*` now grants the purge of a retired record's content on
+  the Console, which cannot be undone; a rule that grants `mob.memory.*`,
+  `mob.*` or `*` now grants the removal of a record from a mob's shared
+  memory; and a grant of `agent.memory.delete` with no agent named now
+  also removes a realm-scoped record on the Console. Narrow such a rule,
+  or add a deny rule for `agent.memory.admin` or `mob.memory.delete`,
+  where the people it names should not hold the action. Administrators
+  hold all of them. Nothing else is to do for an existing configuration.
+  Before going back to an earlier release, remove the access action
+  `mob.memory.delete` from the access rules and the steward key
+  `agent_memory.steward.write_scopes` from the configuration: every
+  release from 0.9.9 to 0.9.18, 0.9.17 and 0.9.18 among them, knows
+  neither, and refuses an access rule that names an action it does not
+  know and a steward block that holds a key it does not support. The
+  step holds for the access file as it stands on disk, with the rules a
+  Console edit saved to it: an earlier gateway does not start on a file
+  in which a rule names `mob.memory.delete`, so remove the action there
+  before going back. The memory database takes no new form: this change
+  adds no migration and no column, and a purged record is the row it
+  was, tombstoned or superseded, with its text emptied as the Added
+  entry on the purge describes; 0.9.16, 0.9.17 and 0.9.18 read it as
+  that record, with empty text. On those releases a purged record that
+  is tombstoned is listed again among the recent tombstones the memory
+  steward and the distiller are shown, as a line with no title that
+  takes a place in the list's limit, and a quarantine review that names
+  a record released and then purged is answered `content_mismatch`, or
+  with a store error when the request carries the content digest of an
+  empty record, where a gateway with this change answers
+  `not_quarantined`; neither returns the blanked text. A purge cannot
+  be undone on any release: going back does not bring the blanked text
+  back.
+
 ### Added
 
 - Python identity results can be narrowed by their `outcome` string. For
@@ -36,6 +91,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   placed on another host and the limit on a placed member's stored spec
   does not arise there; a Rust host that embeds Meta and binds a member
   host through the mob handle holds such specs.
+
+- `agent_memory.steward.write_scopes` limits where the memory steward
+  writes. `"all"` (the default) sets no limit. With `"identity"` the
+  steward changes nothing in a mob or realm scope: no create, promotion,
+  supersede, tombstone, retier or rank there; an accepted mob proposal is
+  held, no promotion is staged for approval, a promotion staged before the
+  limit is expired when its approval arrives, a quarantined record there is
+  left for an operator's review, and a retired agent's record it would
+  promote is kept. `"own_identity"` adds that a create or supersede in an
+  identity's scope must name source records that are all in that scope.
+  Every op the limit stops is named in the dream run's skips. The limit is
+  not a privacy boundary between the identities of one gateway: a dream's
+  prompt still holds the records of every identity it covers, and
+  `"own_identity"` checks only the sources the model declares. TypeScript
+  `steward.writeScopes`, Python `steward={"write_scopes": ...}`. A gateway
+  older than the key refuses it as an unsupported steward field.
+- `meta/agent_memory/forget_in_scope` retires a record of a shared
+  scope, `{"scope": {"kind": "mob", "key": "<mob id>"}, "memory_id"}` or
+  `{"scope": {"kind": "realm"}, "memory_id"}`, and answers forget's
+  `{memory_id, deleted}`. It is the call that removes a record from the
+  mob's shared memory. From a host the author is the application; on the
+  Console it is the signed-in person, the call needs the new access action
+  `mob.memory.delete` for a mob record and an unscoped
+  `agent.memory.delete` grant for a realm record, and the memory panel
+  offers it as Remove. TypeScript `handle.forgetAgentMemoryInScope`, Python
+  `handle.forget_agent_memory_in_scope`. A removal does not bind the memory
+  steward beyond its existing guard (the exact title and body, seven days):
+  while the steward may write the scope, a removed record can come back in
+  other words. Set `write_scopes` to `"identity"` to keep it out.
+- `meta/agent_memory/purge` blanks the content of a retired
+  (tombstoned) record, named as `{"identity", "memory_id"}` for an
+  identity's record or `{"scope": {"kind": "mob", "key"} | {"kind":
+  "realm"}, "memory_id"}` for a shared one, and answers `{memory_id, purged,
+  purged_ids}`. A record that is not retired is refused (`-32602`, with
+  `data.kind` `record_not_tombstoned`). It blanks the title, description,
+  body, tags and the verification claim's text of the record and of every
+  earlier version it replaced, sets their content digest column to a fixed
+  value, and blanks the rationale text (the op's and a reviewer's) in their
+  own audit rows; the rows stay, tombstoned or superseded as they were, and
+  one audit row per record blanked records the purge. The record's id is
+  kept, and an id made by the store was derived from the title and body
+  the record was created with. A purged record is left out of the lists
+  of recent tombstones that the memory steward and the distiller are
+  shown: they name a retired record by its title, and it has none.
+  A quarantine review that names a purged record is refused as a record
+  that is not awaiting review (`not_quarantined`), whatever content
+  digest it carries; a repeat of a release committed before the purge,
+  answered `already_released` until then, is refused the same way.
+  It does not touch copies that are records
+  of their own (a released, promoted or derived record), proposals, staged
+  batches, the steward's notes about the record, session transcripts, or
+  the bytes left in the database file and its `-wal` file; see "Removing
+  and purging records" in the memory concepts page. A person's
+  operator-scoped record can be neither removed nor purged by these calls.
+  On the Console the
+  purge needs `agent.memory.admin`, which mapped to no method before; the
+  memory panel offers it as Purge content to a caller who holds that grant;
+  and on a Console that can identify a person, a caller who is not an
+  admin purges nothing in the scope of an agent the Console does not know
+  (one that ended before the Console read who it was private to may have
+  been private): the request is answered as for a name no agent holds, as
+  the memory reads answer it. The host call purges in the scope of an
+  identity whether or not it is still registered: it is the operator's
+  door to the memory of an agent that was removed. A record of a member
+  that is private to a person and is not a registered agent lies under
+  its owner and its name and is purged under the member's name: on the
+  Console by the person it is private to and by an access administrator,
+  where the access rules allow them `agent.memory.admin` on that member,
+  and from a host by the application; any other caller's request for it
+  blanks nothing and answers `purged: false`. Once such a member has
+  ended and the Console holds nothing about it, the person it was private
+  to is answered as for a name no agent holds: they can still read the
+  retired record in the memory panel and cannot purge it there; an access
+  administrator can. TypeScript
+  `handle.purgeAgentMemory`, Python `handle.purge_agent_memory`; Rust
+  `IdentityRuntime::purge_agent_memory`, whose refusal is
+  `AgentMemoryPurgeError::NotTombstoned`.
+- Console contract v0.6.0
+  (`docs/rct/console-rest-sse-contract-v0.6.0.json`) lists
+  `meta/agent_memory/forget_in_scope` and `meta/agent_memory/purge`, each
+  as a method the Console serves for the launch mob alone
+  (`launch_mob_only`). The contract version stays `0.6.0` and no entry
+  the document already had changes. A client detects the two methods
+  through the methods the gateway advertises in `meta/capabilities`; it
+  does not infer them from the version `0.6.0`, and it does not probe by
+  trying a destructive call.
 
 ### Fixed
 
@@ -144,6 +285,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   control character in either is replaced by `?`. The verdicts are
   unchanged.
 
+- A forget made while the write gate fires for its author (a tainted
+  session, or `llm_writes = "quarantined"`) was logged as "LLM-authored
+  write landing quarantined" and reported on the timeline as a quarantined
+  write, although a forget is applied at once and nothing of it lands
+  quarantined. The store now logs that the change was applied at once,
+  naming what was applied, and reports no quarantined write for it; the
+  same holds for a retier or a rank. A create or an update that lands
+  quarantined is logged and reported as before.
+
 ### Upgrade notes
 
 - Type checkers can now report mistakes that a `str` annotation
@@ -179,6 +329,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   default_timeout`). Without that forward a `delegate` of a Meta member
   would have waited 30 minutes by default. The wrapper's own checks and
   rewrites are unchanged.
+
+- `meta/agent_memory/forget` retires a record of a member that is
+  private to a person and is not a registered agent, under the member's
+  name. Such a member's memory lies under its owner and its name; the call
+  asked for a registered agent of that name before, so nothing retired
+  such a record but the member's own `memory` tool, and a note of a
+  private member that had ended could be neither retired nor purged. From
+  a host the application now retires it, whether or not the member still
+  exists. On the Console the person it is private to, while the Console
+  knows the member, and an access administrator retire it, where the
+  access rules allow them `agent.memory.delete` on that member. Any other
+  request is answered as before, as a request for a member that holds no
+  such record, and retires nothing; so is the owner's once the member has
+  ended and the Console holds nothing about it.
+- A note that was set aside from a plain member name is reached
+  under that name by `meta/agent_memory/purge`, and by
+  `meta/agent_memory/forget` where it is not retired yet: from a host by
+  the application, on the Console by an access administrator alone. For
+  anybody else the request changes nothing and is answered as for a
+  record that is not there.
 
 ## [0.9.18] - 2026-11-22
 

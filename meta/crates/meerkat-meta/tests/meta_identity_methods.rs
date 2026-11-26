@@ -4086,20 +4086,21 @@ async fn a_held_change_asked_again_after_the_hosts_check_turned_against_it_answe
     let _ = runtime.shutdown().await;
 }
 
-/// What the answer above costs. A request that the judgment refuses cannot
-/// be compared with the request a decision holds: there is no normalized
-/// form of it to compare. Under an operation a decision holds, such a
-/// request answers the decision as it stands, whichever request it is: here
-/// another create, of a profile the mob does not define, under the id of a
-/// held create reads that create's `pending_decision` and not
-/// `profile_unknown` (and not `operation_reused`, which only a request that
-/// normalizes can be told). Nothing is held or written for it: the
-/// operation reads its one decision, and the other name is free. Under a
-/// fresh id the same request is refused `profile_unknown`.
+/// What the answer above costs. A request that the judgment refuses has no
+/// normalized form, so it cannot be compared with the request a decision
+/// holds; all that can be told of it is its change kind and the agents it
+/// names. Under an operation a decision holds, a request of the held
+/// change's kind that names the held change's agents and cannot be judged
+/// answers the decision as it stands: here another create of `scout`, of a
+/// profile the mob does not define, under the id of the held create of
+/// `scout` reads that create's `pending_decision` and not
+/// `profile_unknown`. Nothing is held or written for it: the operation
+/// reads its one decision and no agent was created. Under a fresh id the
+/// same request is refused `profile_unknown`.
 ///
 /// RED before a request under a held operation answered the held state.
 #[tokio::test(flavor = "multi_thread")]
-async fn another_request_under_a_held_id_that_cannot_be_judged_reads_the_held_decision() {
+async fn a_request_of_the_held_kind_and_agents_that_cannot_be_judged_reads_the_held_decision() {
     let temp = tempfile::tempdir().unwrap();
     let (runtime, _asked, _fail_next_session) =
         launch_with(temp.path(), &fresh_mob_id(), false, true).await;
@@ -4109,7 +4110,7 @@ async fn another_request_under_a_held_id_that_cannot_be_judged_reads_the_held_de
     let host = ChangeRequester::host("ops");
     let operation = OperationId::for_request(&host.recorded(), "r-1").expect("a request id");
     let scout = || json!([{"name": "scout", "profile": "worker"}]);
-    let unjudged = || json!([{"name": "other", "profile": "no-such-profile"}]);
+    let unjudged = || json!([{"name": "scout", "profile": "no-such-profile"}]);
 
     let decision_id = decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await);
     let fresh = asked_create(&family, &mob, &host, "r-2", unjudged()).await;
@@ -4119,7 +4120,8 @@ async fn another_request_under_a_held_id_that_cannot_be_judged_reads_the_held_de
     assert_eq!(
         other.token(),
         "pending_decision",
-        "a request the judgment refuses, under a held id, reads the held decision: {other:?}"
+        "a request of the held kind and agents that the judgment refuses reads the held \
+         decision: {other:?}"
     );
     assert_eq!(decision_of(&other), decision_id, "{other:?}");
     assert_eq!(
@@ -4129,10 +4131,124 @@ async fn another_request_under_a_held_id_that_cannot_be_judged_reads_the_held_de
     );
     assert!(
         family
-            .read(&mob, &host, IdentityRead::Get(GetAgent::new("other")))
+            .read(&mob, &host, IdentityRead::Get(GetAgent::new("scout")))
             .await
             .is_err(),
-        "nothing was created or held for the other request"
+        "nothing was created for either request"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A request that the judgment refuses, under an operation a decision
+/// holds, is not answered the held decision when what it asks already
+/// shows it is another request: another change kind, or other agents. It
+/// is `operation_reused`, as any other request under the id is. Under the
+/// id of a held create of `scout`: a create of another agent that cannot
+/// be judged, an archive of an agent with a digest that is no longer its
+/// spec's, and an archive of a name no agent holds. Each is refused by its
+/// own cause under a fresh id (`profile_unknown`, `stale_spec`,
+/// `identity_unknown`). The held request still answers its decision.
+///
+/// RED before the held state was answered only to a request of the held
+/// change's kind and agents: all three read the held create's
+/// `pending_decision` (the last two also before any of this, when
+/// `stale_spec` and `identity_unknown` answered the held state to any
+/// request under the id).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_of_another_kind_or_other_agents_that_cannot_be_judged_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "r-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+    let digest_of = |name: &'static str| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest.clone(),
+                other => panic!("a get answers {name}: {other:?}"),
+            }
+        }
+    };
+
+    let made = asked_create(
+        &family,
+        &mob,
+        &host,
+        "r-0",
+        json!([{"name": "alpha", "profile": "worker"}]),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let decision_id = decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await);
+    // A digest that is a spec's, and not the spec of the agent it is sent
+    // for: the configured agent's, sent for the created one.
+    let stale = digest_of(HOST_A).await;
+    assert_ne!(stale, digest_of("alpha").await, "the two specs differ");
+
+    let mut wrong = Vec::new();
+    for (what, cause, change) in [
+        (
+            "a create of another agent that cannot be judged",
+            "profile_unknown",
+            create_of(json!([{"name": "other", "profile": "no-such-profile"}])),
+        ),
+        (
+            "an archive of an agent with a stale digest",
+            "stale_spec",
+            IdentityChangeSpec::Archive(agent_ref("alpha", &stale)),
+        ),
+        (
+            "an archive of a name no agent holds",
+            "identity_unknown",
+            IdentityChangeSpec::Archive(agent_ref("nobody", &stale)),
+        ),
+    ] {
+        let fresh = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(
+                    OperationId::for_request(&host.recorded(), &format!("fresh-{cause}"))
+                        .expect("a request id"),
+                    change.clone(),
+                ),
+            )
+            .await;
+        match fresh.refusal() {
+            Some(refusal) if refusal.kind_token() == cause => {}
+            _ => wrong.push(format!(
+                "{what}, under a fresh id, answers {} and not {cause}",
+                fresh.to_json()
+            )),
+        }
+        let under = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(operation.clone(), change),
+            )
+            .await;
+        match under.refusal() {
+            Some(refusal) if refusal.kind_token() == "operation_reused" => {}
+            _ => wrong.push(format!(
+                "{what}, under the held id, answers {}",
+                under.to_json()
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert_eq!(
+        decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await),
+        decision_id,
+        "the held request still answers its decision"
     );
     let _ = runtime.shutdown().await;
 }

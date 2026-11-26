@@ -3753,16 +3753,19 @@ for (const path of [
     assert.equal(scripts.length + argvTest.length, connectItems.length, "no other file is cited for the Connect row");
     assert.deepEqual(connect.deferred_to_push.reader_rows_not_executed, [], "no Connect row is named as without a runner");
     assert.deepEqual(live.deferred_to_push.reader_rows_not_executed, [], "no live row is named as without a runner");
-    // The notice says what is shown, and says it of the tests, not of the
-    // row: no lane of the plan runs the row's ignored tests, though a script
-    // or a lane table selects them. (The plan may run other tests of the
-    // same target: on a push, a reader row runs this library's.)
+    // The notice says only what the planner knows, and says it of the tests,
+    // not of the row: the plan's reader lanes do not run the row's ignored
+    // tests; a script or a lane table selects them; whether and where that
+    // selector runs is not shown (the evidence is a file, not the job that
+    // runs it, which could be a step of this workflow). The plan may run
+    // other tests of the same target: on a push, a reader row runs this
+    // library's.
     const connectLines = outputs(["--event", "pull_request", "--", connectPath]);
     assert.match(
       connectLines.deferred_to_push,
-      /(^|; )reader rows whose ignored tests no lane of this plan runs, though a script or lane table selects them connect:lib($|;)/,
+      /(^|; )reader rows whose ignored tests the reader lanes of this plan do not run; a script or lane table selects them, and its run is not shown connect:lib($|;)/,
     );
-    assert.doesNotMatch(connectLines.deferred_to_push, /does not run/, "the notice does not say that the row is not run");
+    assert.doesNotMatch(connectLines.deferred_to_push, /no lane of this plan|it builds and does not run/, "the notice claims nothing of other lanes, and nothing of the row");
     assert.deepEqual(
       planFor([connectPath]).reader_rows.map((row) => `${row.name} | ${row.test_flags}`),
       ["reader connect:lib | --lib"],

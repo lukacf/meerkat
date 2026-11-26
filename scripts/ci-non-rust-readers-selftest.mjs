@@ -282,8 +282,10 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
     );
   }
 
-  // SEPARATELY EXECUTED: credited only on a file that holds an ignored-run
-  // flag AND the test's own name; the evidence is the file and both lines.
+  // SELECTED, RUN NOT SHOWN: credited only on a file that holds an
+  // ignored-run flag AND the test's own name; the evidence is the file,
+  // both lines and how they are paired. The state says that a file selects
+  // the test, never that something runs that file.
   {
     const lane = { path: "scripts/sdk-lane", text: "#!/bin/sh\nset -e\ncargo test -p x --test sdk -- --exact runs_the_sdk_script \\\n  --ignored\n" };
     const evidence = ignoredRunEvidence("runs_the_sdk_script", [lane]);
@@ -291,17 +293,44 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
       {
         path: "scripts/sdk-lane",
         covers: "test",
+        pairing: "command",
         flag_line: 4,
         flag: "--ignored",
         selector_line: 3,
         selector: "cargo test -p x --test sdk -- --exact runs_the_sdk_script \\",
       },
     ]);
-    assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], ignored), () => evidence).execution, "separately executed");
+    assert.equal(readerExecution(stateOf(["runs_the_sdk_script"], ignored), () => evidence).execution, "selected, run not shown");
+    // HOW THE FLAG AND THE NAME ARE PAIRED is part of the evidence. On one
+    // line; in one command; or only in one file: a lane table whose entry
+    // names the test and whose command builder holds the flag, beside the
+    // flag of a command for something else. For a pairing per file the
+    // first flag line and the number of flag lines are cited, not the
+    // nearest line, which may be another command's.
+    const pairingOf = (text) => ignoredRunEvidence("runs_the_sdk_script", [{ path: "lanes/table", text }]).map((item) => [item.pairing, item.flag_line, item.selector_line, item.flag_lines]);
+    assert.deepEqual(pairingOf("cargo test -- --exact runs_the_sdk_script --ignored\n"), [["line", 1, 1, undefined]]);
+    assert.deepEqual(pairingOf("cargo test -- --exact runs_the_sdk_script \\\n  --nocapture \\\n  --ignored\n"), [["command", 3, 1, undefined]]);
+    const table = [
+      "fn command(entry) {", //                              1
+      '    args.push("--ignored");', //                       2: the builder's flag
+      "}",
+      'Entry { test_name: "some_other_test" },',
+      'Entry { test_name: "runs_the_sdk_script" },', //       5: the entry
+      'let raw = ["-p", "tool", "--test", "resume", "--",',
+      '    "--ignored",', //                                  7: another command's flag, the nearest
+      "];",
+    ].join("\n");
+    assert.deepEqual(pairingOf(table), [["file", 2, 5, 2]], "the first flag line of the file, and how many it has");
+    // A name in a comparison, in a script whose flag runs another test, is
+    // such a pairing per file too, and says so.
+    const sibling = 'SELECTOR = "its_own_test"\nassert original == "runs_the_sdk_script"\nos.execve(binary, [binary, "--exact", SELECTOR, "--ignored"], env)\n';
+    assert.deepEqual(pairingOf(sibling), [["file", 3, 2, 1]]);
     // No credit for a file with the flag and ANOTHER test's name, for one
     // that names the test and asks for no ignored test, for a longer name
     // that only contains it, for a lane's name, for a runner that skips
-    // the test, or for a comment that names the test or the flag.
+    // the test (on one line, or as the next item of an argument list
+    // written one item a line), or for a comment that names the test or
+    // the flag.
     for (const text of [
       "cargo test -- --exact some_other_test --ignored\n",
       "cargo test -- --exact runs_the_sdk_script\n",
@@ -309,11 +338,49 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
       "# lane: sdk (ignored tests)\ncargo test -p x --test sdk -- --ignored\n",
       "cargo test -p x --test sdk -- --ignored --skip runs_the_sdk_script\n",
       "cargo test -p x --test sdk -- --ignored --skip=sdk::runs_the_sdk_script\n",
+      'let args = [\n    "--ignored",\n    "--skip",\n    "runs_the_sdk_script",\n];\n',
+      'let args = [\n    "--ignored",\n    "--skip",\n\n    // not this one\n    "sdk::runs_the_sdk_script",\n];\n',
       "# runs_the_sdk_script is not run here\ncargo test -p x --test sdk -- --ignored\n",
       "// to run it: cargo test -- --ignored\nconst NAME: &str = \"runs_the_sdk_script\";\n",
     ]) {
       assert.deepEqual(ignoredRunEvidence("runs_the_sdk_script", [{ path: "scripts/other", text }]), [], text.trim());
     }
+    // An item after `--skip` on the line above is skipped; the item after
+    // that is a selector again.
+    assert.equal(ignoredRunEvidence("runs_the_sdk_script", [{ path: "scripts/other", text: 'let args = [\n    "--ignored",\n    "--skip",\n    "some_other_test",\n    "runs_the_sdk_script",\n];\n' }]).length, 1);
+  }
+
+  // A FILE THAT ONLY ASSERTS A RUNNER'S ARGUMENTS (a test of a launcher's
+  // argument list, a check of a recorded one) issues no command. It is
+  // evidence of a claim, marked, and never credits a test by itself: a test
+  // named only there is UNPROVEN. Beside a file that issues the command,
+  // the credit is the issuing file's.
+  {
+    const asserting = {
+      path: "scripts/test_launchers.py",
+      text: 'CASES = [("late", "runs_the_sdk_script")]\n\ndef test_argv(self):\n    self.assertEqual(actual["argv"], ["--exact", selector, "--ignored", "--quiet"])\n',
+    };
+    const runner = { path: "scripts/launcher.py", text: 'SELECTOR = "runs_the_sdk_script"\nos.execve(binary, [binary, "--exact", SELECTOR, "--ignored"], env)\n' };
+    const marks = (files) => ignoredRunEvidence("runs_the_sdk_script", files).map((item) => [item.path, item.pairing, item.asserted ?? false]);
+    assert.deepEqual(marks([asserting]), [["scripts/test_launchers.py", "file", true]]);
+    assert.deepEqual(marks([runner, asserting]), [
+      ["scripts/launcher.py", "file", false],
+      ["scripts/test_launchers.py", "file", true],
+    ]);
+    const state = stateOf(["runs_the_sdk_script"], ignored);
+    const alone = readerExecution(state, (name) => ignoredRunEvidence(name, [asserting]));
+    assert.deepEqual([alone.execution, alone.ignored_tests[0].execution, alone.ignored_tests[0].evidence.length], ["unproven", "unproven", 1], "the asserting file alone credits nothing");
+    assert.equal(readerExecution(state, (name) => ignoredRunEvidence(name, [runner, asserting])).execution, "selected, run not shown");
+    // The true runner no longer carries the literal name (it takes it from
+    // elsewhere) and only the asserting file does: unproven, not credit.
+    const indirect = { path: "scripts/launcher.py", text: "SELECTOR = cases.SELECTOR\nos.execve(binary, [binary, \"--exact\", SELECTOR, \"--ignored\"], env)\n" };
+    assert.equal(readerExecution(state, (name) => ignoredRunEvidence(name, [indirect, asserting])).execution, "unproven");
+    // Other shapes of a statement about arguments: a Rust assertion, a
+    // membership check. A file that both asserts and issues is an issuer.
+    for (const line of ['assert_eq!(argv, ["--exact", name, "--ignored"]);', 'ok = "--exact" in argv and "--ignored" in argv', 'expect(argv).toContain("--ignored");']) {
+      assert.deepEqual(marks([{ path: "scripts/check", text: `NAME = "runs_the_sdk_script"\n${line}\n` }]), [["scripts/check", "file", true]], line);
+    }
+    assert.deepEqual(marks([{ path: "scripts/both", text: `${asserting.text}${runner.text}` }]), [["scripts/both", "file", false]]);
   }
 
   // UNPROVEN: a runner is claimed and not shown. The ignore reason names a
@@ -328,7 +395,7 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
     const report = readerExecution(stateOf(["runs_the_other_script", "runs_the_sdk_script"], ignored, second), some);
     assert.deepEqual(
       [report.execution, report.ignored_tests.map((test) => test.execution)],
-      ["unproven", ["ignored, not executed", "separately executed"]],
+      ["unproven", ["ignored, not executed", "selected, run not shown"]],
     );
   }
 
@@ -398,6 +465,9 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
     }
     assert.deepEqual(places('command = ["cargo", "test", "-p", "sdk", "--test", "contract", "--",\n    "--ignored"]\n'), [[], [2]], "an argument list over two lines");
     assert.deepEqual(places('ARGS = ["--exact", name, "--ignored"]\n'), [[], []], "a flag in a file that does not select the target says nothing of it");
+    // A statement of a runner's arguments (a test of a launcher) is no
+    // command: it never covers, and leaves the row unproven.
+    assert.deepEqual(places('assert argv == ["cargo", "test", "-p", "sdk", "--test", "contract", "--", "--ignored"]\n'), [[], [1]], "an asserted command covers nothing");
     // The features a row needs: a command without them may compile the
     // tests out.
     const featured = { ...row, features: ["python"] };
@@ -420,13 +490,14 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
     assert.deepEqual(
       [covered.execution, covered.ignored_tests.map((test) => [test.execution, test.evidence]), covered.unclear_runners],
       [
-        "separately executed",
+        "selected, run not shown",
         ["runs_the_other_script", "runs_the_sdk_script"].map(() => [
-          "separately executed",
+          "selected, run not shown",
           [
             {
               path: "scripts/lane",
               covers: "target",
+              pairing: "command",
               flag_line: 1,
               flag: "cargo test -p sdk --test contract -- --ignored",
               selector_line: 1,
@@ -446,7 +517,7 @@ const has = (rows, pkg, target) => rows.some((row) => row.package === pkg && row
     // In a target with plain tests too, the covering command credits the
     // ignored one.
     const part = readerExecution(stateOf(null, `${plain}${ignored}`), none, whole("cargo test -p sdk -- --ignored\n"));
-    assert.deepEqual([part.execution, part.ignored_tests.map((test) => [test.name, test.execution, test.evidence[0].covers])], ["executed in part", [["runs_the_sdk_script", "separately executed", "package"]]]);
+    assert.deepEqual([part.execution, part.ignored_tests.map((test) => [test.name, test.execution, test.evidence[0].covers])], ["executed in part", [["runs_the_sdk_script", "selected, run not shown", "package"]]]);
   }
 
   // THE MIXED FILE: a target with a plain and an ignored test is executed

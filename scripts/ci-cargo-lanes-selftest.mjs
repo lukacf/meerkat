@@ -59,6 +59,7 @@ import {
   BUILT_NOT_KNOWN,
   BUILT_ON_THE_PUSH,
   nameLeftReadersByState,
+  readerReport,
   readerRows,
   readerStates,
   trackedIgnoredRunFiles,
@@ -2250,7 +2251,7 @@ for (const path of [
     const left = [...deferred.reader_rows];
     nameLeftReadersByState(deferred, states);
     assert.deepEqual(
-      [...deferred.reader_rows, ...deferred.reader_rows_not_executed, ...deferred.reader_rows_separately_executed, ...deferred.reader_rows_unproven].sort(),
+      [...deferred.reader_rows, ...deferred.reader_rows_not_executed, ...deferred.reader_rows_selected_elsewhere, ...deferred.reader_rows_unproven].sort(),
       left.sort(),
       "every label left to the push stays in exactly one list",
     );
@@ -2266,7 +2267,7 @@ for (const path of [
     const pr = report({ deferToPush: true, source: ignored });
     assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "ignored, not executed"]);
     assert.deepEqual(
-      [pr.rows, pr.deferred.reader_rows, pr.deferred.reader_rows_not_executed, pr.deferred.reader_rows_separately_executed, pr.deferred.reader_rows_unproven],
+      [pr.rows, pr.deferred.reader_rows, pr.deferred.reader_rows_not_executed, pr.deferred.reader_rows_selected_elsewhere, pr.deferred.reader_rows_unproven],
       [[], [], ["sdk:test:contract"], [], []],
     );
     assert.deepEqual(pr.state.ignored_tests, [
@@ -2288,17 +2289,18 @@ for (const path of [
     assert.deepEqual([key(row), row.rows], [["sdk:test:contract", true, BUILT_BY_A_READER_ROW, "ignored, not executed"], ["--test contract -E test(/(^|::)(runs_the_sdk_script)$/)"]]);
   }
 
-  // SEPARATELY EXECUTED: a file other than the test's own sources asks for
+  // SELECTED, RUN NOT SHOWN: a file other than the test's own sources asks for
   // ignored tests and names the test. The evidence is that file and its
   // lines.
   {
     const pr = report({ deferToPush: true, source: ignored, files: lane });
-    assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "separately executed"]);
-    assert.deepEqual([pr.deferred.reader_rows, pr.deferred.reader_rows_separately_executed], [[], ["sdk:test:contract"]]);
+    assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "selected, run not shown"]);
+    assert.deepEqual([pr.deferred.reader_rows, pr.deferred.reader_rows_selected_elsewhere], [[], ["sdk:test:contract"]]);
     assert.deepEqual(pr.state.ignored_tests[0].evidence, [
       {
         path: "scripts/sdk-lane",
         covers: "test",
+        pairing: "line",
         flag_line: 1,
         flag: "cargo test -p sdk --test contract -- --exact runs_the_sdk_script --ignored",
         selector_line: 1,
@@ -2308,6 +2310,74 @@ for (const path of [
     // The test's own source saying how to run it is no runner.
     const own = `// cargo test -p sdk --test contract -- --exact runs_the_sdk_script --ignored\nconst HOW: &str = "runs_the_sdk_script --ignored";\n${ignored}`;
     assert.equal(report({ deferToPush: true, source: own, search: () => ["sdk/tests/contract.rs"] }).state.execution, "ignored, not executed");
+    // AN EVIDENCE FILE THAT IS THE ROW'S OWN INPUT (a fixture script under
+    // the path the row reads, which the ignored test itself launches) is
+    // marked: the test and its evidence name each other. The state is the
+    // same; a file elsewhere carries no mark.
+    const launcher = 'SELECTOR = "runs_the_sdk_script"\nos.execve(binary, [binary, "--exact", SELECTOR, "--ignored"], env)\n';
+    const circular = report({ deferToPush: true, source: ignored, files: { "sdk/python/fixtures/launch.py": launcher, "scripts/sdk-lane": lane["scripts/sdk-lane"] } });
+    assert.deepEqual(key(circular), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "selected, run not shown"]);
+    assert.deepEqual(
+      circular.state.ignored_tests[0].evidence.map((item) => [item.path, item.pairing, item.row_input ?? false]),
+      [
+        ["scripts/sdk-lane", "line", false],
+        ["sdk/python/fixtures/launch.py", "file", true],
+      ],
+    );
+    // A FILE THAT ONLY ASSERTS A RUNNER'S ARGUMENTS never credits alone:
+    // when the launcher takes the name from elsewhere and only a test of
+    // its argument list holds the literal, the row is unproven, and it is
+    // named among the rows with no runner shown.
+    const asserting = 'CASES = [("late", "runs_the_sdk_script")]\nself.assertEqual(actual["argv"], ["--exact", selector, "--ignored"])\n';
+    const indirect = 'SELECTOR = cases.SELECTOR\nos.execve(binary, [binary, "--exact", SELECTOR, "--ignored"], env)\n';
+    const claimedOnly = report({ deferToPush: true, source: ignored, files: { "scripts/launch.py": indirect, "scripts/test_launch.py": asserting } });
+    assert.deepEqual(key(claimedOnly), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "unproven"]);
+    assert.deepEqual(
+      [claimedOnly.deferred.reader_rows_selected_elsewhere, claimedOnly.deferred.reader_rows_unproven, claimedOnly.state.ignored_tests[0].evidence.map((item) => [item.path, item.asserted])],
+      [[], ["sdk:test:contract"], [["scripts/test_launch.py", true]]],
+    );
+    const withRunner = report({ deferToPush: true, source: ignored, files: { "scripts/launch.py": launcher, "scripts/test_launch.py": asserting } });
+    assert.equal(withRunner.state.execution, "selected, run not shown", "beside the file that issues the command, the credit is that file's");
+  }
+
+  // THE REPORT NEVER FAILS THE PLAN. It runs inside the classification every
+  // lane waits for; when it throws, the rows and the labels left to the
+  // push are exactly what readerRows planned, and the report says that it
+  // is unavailable, with every row unproven.
+  {
+    const notes = [];
+    const deferred = { reader_rows: [], reader_rows_not_executed: [], reader_rows_selected_elsewhere: [], reader_rows_unproven: [] };
+    const selections = [{ package: "sdk", target: "test:contract", scope: "target", tests: ["runs_the_sdk_script"], features: [], paths: ["sdk/python/x.py"], reads: ["sdk/python/"] }];
+    const rows = readerRows({
+      selections,
+      result: { main_unit_shards: [], unit_packages: [], unit_shards: [], integration_suites: [] },
+      byName,
+      heavyChain: new Set(["sdk"]),
+      deferToPush: true,
+      deferred,
+      compiledInDocs: new Set(),
+      unified: new Map([["sdk", new Set()]]),
+      notes,
+    });
+    const before = JSON.stringify([rows, deferred]);
+    const failed = readerReport({
+      notes,
+      inventory,
+      byName,
+      deferred,
+      states: () => {
+        throw new Error("a defect in the report\nwith a second line");
+      },
+    });
+    assert.equal(JSON.stringify([rows, deferred]), before, "the rows and every list of labels are untouched");
+    assert.deepEqual(deferred.reader_rows, ["sdk:test:contract"], "the label is left to the push in the one list, as without the report");
+    assert.deepEqual(
+      [failed.unavailable, failed.rows.map((row) => [row.label, row.planned, row.built, row.execution, row.why])],
+      ["report unavailable: a defect in the report", [["sdk:test:contract", true, BUILT_ON_THE_PUSH, "unproven", "report unavailable: a defect in the report"]]],
+    );
+    // Without an error the same call moves the label by its state.
+    const worked = readerReport({ notes, inventory, byName, deferred, states: (input) => readerStates({ ...input, readSource: (path) => (path === "sdk/tests/contract.rs" ? ignored : null), runnerFiles: () => [] }) });
+    assert.deepEqual([worked.unavailable, deferred.reader_rows, deferred.reader_rows_not_executed], [null, [], ["sdk:test:contract"]]);
   }
 
   // A RUNNER THAT NAMES NO TEST: a command that asks for ignored tests of
@@ -2320,8 +2390,8 @@ for (const path of [
       ["cargo nextest run -p sdk --run-ignored all\n", "package"],
     ]) {
       const pr = report({ deferToPush: true, source: ignored, files: { "scripts/sdk-lane": text } });
-      assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "separately executed"], text.trim());
-      assert.deepEqual([pr.deferred.reader_rows, pr.deferred.reader_rows_not_executed, pr.deferred.reader_rows_separately_executed], [[], [], ["sdk:test:contract"]]);
+      assert.deepEqual(key(pr), ["sdk:test:contract", true, BUILT_ON_THE_PUSH, "selected, run not shown"], text.trim());
+      assert.deepEqual([pr.deferred.reader_rows, pr.deferred.reader_rows_not_executed, pr.deferred.reader_rows_selected_elsewhere], [[], [], ["sdk:test:contract"]]);
       assert.deepEqual(
         pr.state.ignored_tests[0].evidence.map((item) => [item.path, item.covers, item.flag_line, item.selector_line, item.selector]),
         [["scripts/sdk-lane", covers, 1, 1, text.trim()]],
@@ -2384,7 +2454,7 @@ for (const path of [
     const live = report({ deferToPush: false, source: plain, features: ["integration-real-tests"] });
     assert.deepEqual([key(live), live.rows], [["sdk:test:contract", true, BUILT_BY_NO_LANE, "not executed"], []]);
     const laneRun = report({ deferToPush: false, source: ignored, features: ["integration-real-tests"], files: lane });
-    assert.deepEqual(key(laneRun), ["sdk:test:contract", true, BUILT_BY_NO_LANE, "separately executed"]);
+    assert.deepEqual(key(laneRun), ["sdk:test:contract", true, BUILT_BY_NO_LANE, "selected, run not shown"]);
   }
 
   // Library code is reached by every test of its package and is not judged
@@ -3611,14 +3681,16 @@ for (const path of [
     assert.ok(planFor(["docs/index.mdx"], ["--event", "pull_request"]).reader_states.every((row) => row.execution === "executed"));
 
     // The live targets and Connect's fixture rows are ignored too, and a
-    // runner of their own selects them: they are never reported as "ignored,
-    // not executed" on the attribute alone. Each ignored test is credited
-    // only with a file that asks for ignored tests and names it (the live
-    // lane table, a fixture script); a test with no such file leaves its row
-    // unproven.
+    // script or a lane table selects them: they are never reported as
+    // "ignored, not executed" on the attribute alone, and never as run. Each
+    // ignored test is credited only with a file that ISSUES an ignored-run
+    // flag and names it (the live lane table, a fixture script); a file that
+    // only asserts a launcher's arguments is cited, marked, and credits
+    // nothing; a test with no issuing file leaves its row unproven.
     const liveRows = ["mcp-server:test:live_mcp_matrix", "rest:test:live_rest_matrix", "rpc:test:live_rpc_regression", "rpc:test:live_smoke_rpc"];
+    const connectPath = "connect/scripts/fixtures/r5_canonical_g_predecessor.py";
     const live = planFor(["tests/fixtures/live_smoke/support.rs"], ["--event", "pull_request"]);
-    const connect = planFor(["connect/scripts/fixtures/r5_canonical_g_predecessor.py"], ["--event", "pull_request"]);
+    const connect = planFor([connectPath], ["--event", "pull_request"]);
     for (const [plan, labels, where] of [
       [live, liveRows, /^tests\/integration\/src\/e2e_lanes\.rs$/],
       [connect, ["connect:lib"], /^connect\/scripts\/fixtures\/[a-z0-9_]+\.py$/],
@@ -3627,30 +3699,120 @@ for (const path of [
         const row = plan.reader_states.find((state) => state.label === label);
         assert.ok(row, `${label} is planned`);
         assert.ok(row.tests > 0 && row.ignored === row.tests, `${label}: every test it names is ignored`);
-        assert.ok(["separately executed", "unproven"].includes(row.execution), `${label} is ${row.execution}`);
+        assert.ok(["selected, run not shown", "unproven"].includes(row.execution), `${label} is ${row.execution}`);
         for (const test of row.ignored_tests) {
+          const issuing = test.evidence.filter((item) => !item.asserted);
           assert.equal(
             test.execution,
-            test.evidence.length > 0 ? "separately executed" : test.claimed_lane || row.unclear_runners?.length > 0 ? "unproven" : "ignored, not executed",
+            issuing.length > 0
+              ? "selected, run not shown"
+              : test.claimed_lane || row.unclear_runners?.length > 0 || test.evidence.length > 0
+                ? "unproven"
+                : "ignored, not executed",
             `${label}: ${test.name}`,
           );
-          // Every file that asks for ignored tests and names the test is
-          // cited (a test of a fixture script's argv is one, beside the
-          // script): the runner's own file is among them.
-          assert.ok(test.evidence.length === 0 || test.evidence.some((item) => where.test(item.path)), `${label}: ${test.name} is selected in its runner's file`);
+          // Every file that holds an ignored-run flag and names the test is
+          // cited; the file that issues the command for it is among them.
+          assert.ok(issuing.length === 0 || issuing.some((item) => where.test(item.path)), `${label}: ${test.name} is selected in its runner's file`);
           for (const item of test.evidence) {
             assert.ok(item.flag_line > 0 && item.selector_line > 0 && item.selector.includes(test.name), `${label}: ${test.name} cites its lines in ${item.path}`);
+            assert.ok(["line", "command", "file"].includes(item.pairing), `${label}: ${test.name} says how the flag and the name are paired in ${item.path}`);
+            assert.equal(item.flag_lines > 0, item.pairing === "file", `${label}: ${test.name}: a pairing per file counts the file's flag lines`);
           }
         }
         assert.equal(
-          row.execution === "separately executed",
-          row.ignored_tests.every((test) => test.evidence.length > 0),
-          `${label}: credited exactly when every test has its evidence`,
+          row.execution === "selected, run not shown",
+          row.ignored_tests.every((test) => test.evidence.some((item) => !item.asserted)),
+          `${label}: credited exactly when every test has a file that issues its command`,
         );
       }
     }
+    const itemsOf = (plan, labels) => labels.flatMap((label) => plan.reader_states.find((state) => state.label === label).ignored_tests.flatMap((test) => test.evidence));
+    // The lane table names a test in an entry and holds the flag in its
+    // command builder: the pairing is per file, and the evidence says so
+    // and cites one line, the file's first flag line, for every test (not
+    // the nearest flag, which is another command's for half of them).
+    const liveItems = itemsOf(live, liveRows);
+    assert.ok(liveItems.length > 0, "the live rows have evidence");
+    for (const item of liveItems) {
+      assert.deepEqual(
+        [item.path, item.pairing, item.flag_lines > 1, item.flag_line, item.row_input ?? false, item.asserted ?? false],
+        ["tests/integration/src/e2e_lanes.rs", "file", true, liveItems[0].flag_line, false, false],
+        item.selector,
+      );
+    }
+    // A Connect fixture script is the row's own input (the ignored test
+    // launches it, and it runs that same test): marked as such. The test of
+    // the launchers' argument lists is marked as asserting, and is never
+    // the only evidence of a credited test.
+    const connectItems = itemsOf(connect, ["connect:lib"]);
+    const scripts = connectItems.filter((item) => item.path.startsWith("connect/scripts/fixtures/"));
+    const argvTest = connectItems.filter((item) => item.path === "connect/scripts/test_native_fixture_stack.py");
+    assert.ok(scripts.length > 0 && scripts.every((item) => item.row_input === true && !item.asserted), "the fixture scripts are the row's own input");
+    assert.ok(argvTest.length > 0 && argvTest.every((item) => item.asserted === true && !item.row_input), "the test of the launchers' arguments only asserts");
+    assert.equal(scripts.length + argvTest.length, connectItems.length, "no other file is cited for the Connect row");
     assert.deepEqual(connect.deferred_to_push.reader_rows_not_executed, [], "no Connect row is named as without a runner");
     assert.deepEqual(live.deferred_to_push.reader_rows_not_executed, [], "no live row is named as without a runner");
+    // The notice says what is shown: a script or a lane table selects the
+    // tests; no lane of the plan runs it.
+    const connectLines = outputs(["--event", "pull_request", "--", connectPath]);
+    assert.match(
+      connectLines.deferred_to_push,
+      /(^|; )reader rows it builds and does not run, whose ignored tests a script or lane table selects \(no lane of this plan runs it\) connect:lib($|;)/,
+    );
+    const [connectLine] = JSON.parse(connectLines.reader_states);
+    assert.deepEqual([connectLine.row, connectLine.execution], ["connect:lib", "selected, run not shown"]);
+    assert.ok(connectLine.evidence.some((place) => place.endsWith("(per file) (row input)")) && connectLine.evidence.some((place) => place.endsWith("(asserted)")), "the log line marks each evidence place");
+
+    // THE REPORT NEVER FAILS THE PLAN, on the real tree: with the report
+    // made to fail (--fail-reader-report) the plan is the same plan in every
+    // other field, the labels left to the push are in the one list as
+    // before the report existed, and the report says that it is unavailable
+    // with every row unproven.
+    const unavailable = "report unavailable: the report was made to fail (--fail-reader-report)";
+    const withoutReport = (plan) => {
+      const copy = JSON.parse(JSON.stringify(plan));
+      delete copy.reader_states;
+      delete copy.reader_states_unavailable;
+      const left = copy.deferred_to_push;
+      if (left) {
+        left.reader_rows = [...left.reader_rows, ...left.reader_rows_not_executed, ...left.reader_rows_selected_elsewhere, ...left.reader_rows_unproven].sort();
+        left.reader_rows_not_executed = [];
+        left.reader_rows_selected_elsewhere = [];
+        left.reader_rows_unproven = [];
+      }
+      return copy;
+    };
+    for (const [paths, event] of [
+      [[sdkPath], "pull_request"],
+      [[sdkPath], "push"],
+      [[connectPath], "push"],
+      [["tests/fixtures/live_smoke/support.rs"], "pull_request"],
+    ]) {
+      const good = planFor(paths, ["--event", event]);
+      const failed = planFor(paths, ["--event", event, "--fail-reader-report"]);
+      assert.deepEqual([good.reader_states_unavailable, failed.reader_states_unavailable], [null, unavailable], `${paths} ${event}`);
+      assert.deepEqual(
+        failed.reader_states.map((row) => [row.label, row.built, row.execution, row.why]),
+        good.reader_states.map((row) => [row.label, row.built, "unproven", unavailable]),
+        `${paths} ${event}: every row is unproven`,
+      );
+      assert.deepEqual(withoutReport(failed), withoutReport(good), `${paths} ${event}: the plan is the same plan`);
+      if (failed.deferred_to_push) {
+        const left = failed.deferred_to_push;
+        assert.deepEqual([left.reader_rows_not_executed, left.reader_rows_selected_elsewhere, left.reader_rows_unproven], [[], [], []], `${paths} ${event}: no label is moved`);
+      }
+    }
+    const failedLines = outputs(["--event", "pull_request", "--fail-reader-report", "--", sdkPath]);
+    assert.equal(failedLines.reader_states, JSON.stringify(unavailable), "the log line says the report is unavailable");
+    assert.match(
+      failedLines.deferred_to_push,
+      /(^|; )reader rows meta:test:reference_app, meta:test:sdk_parity, meta:test:sdk_productization($|;)/,
+      "the notice is the one the plan gave before the report existed",
+    );
+    for (const key of Object.keys(sdkPrLines)) {
+      if (key !== "deferred_to_push" && key !== "reader_states") assert.equal(failedLines[key], sdkPrLines[key], `${key} is the same line`);
+    }
   }
   // An in-crate doc the crate compiles in selects the crate like its code
   // (no reader row: the crate's own lanes run); other in-crate docs select

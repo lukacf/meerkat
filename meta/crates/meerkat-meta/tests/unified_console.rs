@@ -1856,6 +1856,346 @@ async fn member_status_accepts_the_runtime_alias_its_own_surfaces_hand_out()
     Ok(())
 }
 
+/// The members of a read's convergence block that the mob's reconciler
+/// replaces at each of its steps: the status is a point-in-time diagnostic,
+/// written apart from the durable declaration, so two reads made one after
+/// the other may differ in every one of them. The block's `agent_identity`
+/// is not among them.
+const TRANSITIONAL_CONVERGENCE_MEMBERS: [&str; 6] = [
+    "desired_intent_revision",
+    "active_intent_revision",
+    "decision",
+    "condition",
+    "observed_at_ms",
+    "detail",
+];
+
+/// The condition Core derives from a decision. Core derives it from the
+/// decision alone, so a block whose condition is another one was not
+/// projected from one status.
+fn condition_core_derives(
+    decision: Option<meerkat_contracts::wire::WireIdentityReconcileDecision>,
+) -> Result<meerkat_contracts::wire::WireIdentityConvergenceCondition, String> {
+    let decision = match decision {
+        None => None,
+        Some(decision) => Some(
+            serde_json::to_value(decision)
+                .and_then(serde_json::from_value::<meerkat_mob::IdentityReconcileDecision>)
+                .map_err(|error| {
+                    format!("Core does not know the decision {decision:?}: {error}")
+                })?,
+        ),
+    };
+    Ok(meerkat_mob::IdentityConvergenceStatus {
+        identity: MobMemberId::from("any"),
+        intent_revision: None,
+        active_intent_revision: None,
+        lease_epoch: None,
+        decision,
+        observed_at_ms: 0,
+        detail: None,
+    }
+    .to_wire()
+    .condition)
+}
+
+/// A read's `result` with the transitional members taken out of its
+/// convergence block. Each of them must be there to be taken out; whatever
+/// else the result holds, now or later, stays and is compared.
+fn stable_members_of_a_declaration_read(result: &Value, which: &str) -> Result<Value, String> {
+    let mut stable = result.clone();
+    let block = stable
+        .get_mut("convergence")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("the {which} read has no convergence block"))?;
+    for member in TRANSITIONAL_CONVERGENCE_MEMBERS {
+        if block.remove(member).is_none() {
+            return Err(format!(
+                "the {which} read's convergence block has no member {member}"
+            ));
+        }
+    }
+    Ok(stable)
+}
+
+/// Two reads of one member's tool declaration, the `earlier` made before
+/// the `later`, through two doors of the one handler. They are two moments
+/// of a reconcile that may be in progress, so they are not compared whole:
+///
+/// - every member that is stable for a committed revision is EQUAL in the
+///   two: the mob, the identity at both levels, the durable desired
+///   revision, the whole declaration, and any member this test does not
+///   name;
+/// - each read is the public result type, with no member more or less and
+///   no value outside its vocabulary;
+/// - each read's convergence block is valid by itself: it names the
+///   identity as it was asked for, its condition is the one Core derives
+///   from its decision, and its status is of no later revision than the
+///   durable one beside it.
+///
+/// Nothing orders the two blocks. Not by time: the observation time is the
+/// host's wall clock, which may be set back. Not by revision: a read that
+/// finds no status stored yet reports the durable revision in the block,
+/// and the status stored a moment later may be of a pass that read the
+/// revision before it.
+fn declaration_reads_agree(earlier: &Value, later: &Value, alias: &str) -> Result<(), String> {
+    use meerkat_contracts::wire::MobMemberToolDeclarationResult;
+
+    for (which, result) in [("earlier", earlier), ("later", later)] {
+        let read: MobMemberToolDeclarationResult = serde_json::from_value(result.clone())
+            .map_err(|error| format!("the {which} read is not the public result: {error}"))?;
+        if read.agent_identity != alias {
+            return Err(format!(
+                "the {which} read names the identity {:?}, not {alias:?}",
+                read.agent_identity
+            ));
+        }
+        let block = &read.convergence;
+        if block.agent_identity != alias {
+            return Err(format!(
+                "the {which} read's convergence block names the identity {:?}, not {alias:?}",
+                block.agent_identity
+            ));
+        }
+        let derived = condition_core_derives(block.decision)?;
+        if block.condition != derived {
+            return Err(format!(
+                "the {which} read's convergence block pairs the decision {:?} with the \
+                 condition {:?}; Core derives {derived:?}",
+                block.decision, block.condition
+            ));
+        }
+        if block
+            .desired_intent_revision
+            .is_some_and(|revision| revision > read.desired_intent_revision)
+        {
+            return Err(format!(
+                "the {which} read's convergence block is of revision {:?}, above the durable \
+                 desired revision {}",
+                block.desired_intent_revision, read.desired_intent_revision
+            ));
+        }
+    }
+
+    let stable_earlier = stable_members_of_a_declaration_read(earlier, "earlier")?;
+    let stable_later = stable_members_of_a_declaration_read(later, "later")?;
+    if stable_earlier != stable_later {
+        return Err(format!(
+            "the two reads differ in a stable member: earlier {stable_earlier}, later \
+             {stable_later}"
+        ));
+    }
+    Ok(())
+}
+
+/// The tool declaration the round-trip test applies, in its wire form.
+fn tool_declaration_enabling_shell() -> Value {
+    json!({
+        "category_overrides": {
+            "builtins": "inherit",
+            "shell": "enable",
+            "comms": "inherit",
+            "mob": "inherit",
+            "memory": "inherit",
+            "schedule": "inherit",
+            "workgraph": "inherit",
+            "image_generation": "inherit",
+            "web_search": "inherit"
+        },
+        "callback_tools": { "kind": "set", "tools": [] },
+        "execution": { "kind": "unrestricted" },
+        "application_policy": { "kind": "unmanaged" }
+    })
+}
+
+/// The comparison of two reads accepts two moments of one reconcile and
+/// refuses every break it is there for. The accepted pair is the one a main
+/// run printed when the whole results were compared: the earlier read at the
+/// retire decision of the pass under revision 1, the later one at the backoff
+/// of the pass under revision 2. Each refused pair is that pair with one
+/// thing changed, and is refused for that thing.
+#[test]
+fn the_comparison_of_two_declaration_reads_accepts_two_moments_and_refuses_each_break() {
+    let alias = "gate:main:0";
+    let read = |convergence: Value| {
+        json!({
+            "mob_id": "mob-parity",
+            "agent_identity": alias,
+            "desired_intent_revision": 2,
+            "declaration": tool_declaration_enabling_shell(),
+            "convergence": convergence,
+        })
+    };
+    let earlier = read(json!({
+        "agent_identity": alias,
+        "desired_intent_revision": 1,
+        "active_intent_revision": 1,
+        "decision": "retire_member_materialization",
+        "condition": "reconciling",
+        "observed_at_ms": 1_795_653_953_105_u64,
+        "detail": null,
+    }));
+    let later = read(json!({
+        "agent_identity": alias,
+        "desired_intent_revision": 2,
+        "active_intent_revision": 1,
+        "decision": "backoff",
+        "condition": "backoff",
+        "observed_at_ms": 1_795_653_953_143_u64,
+        "detail": "member retirement was durably admitted but has not completed",
+    }));
+
+    assert_eq!(
+        declaration_reads_agree(&earlier, &later, alias),
+        Ok(()),
+        "two moments of one reconcile"
+    );
+    assert_eq!(
+        declaration_reads_agree(&earlier, &earlier, alias),
+        Ok(()),
+        "one moment read twice"
+    );
+    // A status not yet observed: no decision, pending, time zero.
+    let unobserved = read(json!({
+        "agent_identity": alias,
+        "desired_intent_revision": 2,
+        "active_intent_revision": null,
+        "decision": null,
+        "condition": "pending",
+        "observed_at_ms": 0,
+        "detail": null,
+    }));
+    assert_eq!(
+        declaration_reads_agree(&unobserved, &later, alias),
+        Ok(()),
+        "a read before any status, then one after"
+    );
+    // The block of a read that found no status reports the durable
+    // revision; the status stored next may be of the pass under the
+    // revision before, with any wall-clock time. Neither is an order the
+    // product keeps, so neither is refused.
+    assert_eq!(
+        declaration_reads_agree(&unobserved, &earlier, alias),
+        Ok(()),
+        "a read before any status, then the status of an earlier revision"
+    );
+    assert_eq!(
+        declaration_reads_agree(&later, &earlier, alias),
+        Ok(()),
+        "two valid moments, whatever their order"
+    );
+
+    type Break = fn(&mut Value, &mut Value);
+    let breaks: [(&str, Break, &str); 16] = [
+        (
+            "another mob in the later read",
+            |_, later| later["mob_id"] = json!("mob-other"),
+            "differ in a stable member",
+        ),
+        (
+            "another durable revision in the later read",
+            |_, later| later["desired_intent_revision"] = json!(3),
+            "differ in a stable member",
+        ),
+        (
+            "another declaration in the later read",
+            |_, later| later["declaration"]["category_overrides"]["shell"] = json!("disable"),
+            "differ in a stable member",
+        ),
+        (
+            "a member only the later read has",
+            |_, later| later["served_by"] = json!("stdin"),
+            "the later read is not the public result",
+        ),
+        (
+            "the reserved spelling at the top of the later read",
+            |_, later| later["agent_identity"] = json!("mk--gate-main-0"),
+            "the later read names the identity",
+        ),
+        (
+            "the reserved spelling in the earlier read's block",
+            |earlier, _| earlier["convergence"]["agent_identity"] = json!("mk--gate-main-0"),
+            "the earlier read's convergence block names the identity",
+        ),
+        (
+            "a declaration without a member",
+            |earlier, _| {
+                earlier["declaration"]
+                    .as_object_mut()
+                    .expect("a declaration")
+                    .remove("execution");
+            },
+            "the earlier read is not the public result",
+        ),
+        (
+            "a block member this release does not have",
+            |_, later| later["convergence"]["phase"] = json!("draining"),
+            "the later read is not the public result",
+        ),
+        (
+            "a block without its detail",
+            |_, later| {
+                later["convergence"]
+                    .as_object_mut()
+                    .expect("a block")
+                    .remove("detail");
+            },
+            "the later read's convergence block has no member detail",
+        ),
+        (
+            "a block without its observation time",
+            |earlier, _| {
+                earlier["convergence"]
+                    .as_object_mut()
+                    .expect("a block")
+                    .remove("observed_at_ms");
+            },
+            "the earlier read is not the public result",
+        ),
+        (
+            "a condition outside the vocabulary",
+            |earlier, _| earlier["convergence"]["condition"] = json!("settled"),
+            "the earlier read is not the public result",
+        ),
+        (
+            "a decision outside the vocabulary",
+            |_, later| later["convergence"]["decision"] = json!("give_up"),
+            "the later read is not the public result",
+        ),
+        (
+            "a condition its decision does not give",
+            |_, later| later["convergence"]["condition"] = json!("converged"),
+            "Core derives Backoff",
+        ),
+        (
+            "a condition with no decision behind it",
+            |earlier, _| earlier["convergence"]["decision"] = Value::Null,
+            "Core derives Pending",
+        ),
+        (
+            "a status of a revision above the durable one",
+            |_, later| later["convergence"]["desired_intent_revision"] = json!(3),
+            "above the durable desired revision 2",
+        ),
+        (
+            "an observation time that is no time",
+            |_, later| later["convergence"]["observed_at_ms"] = json!("just now"),
+            "the later read is not the public result",
+        ),
+    ];
+    for (what, break_it, reason) in breaks {
+        let (mut earlier, mut later) = (earlier.clone(), later.clone());
+        break_it(&mut earlier, &mut later);
+        match declaration_reads_agree(&earlier, &later, alias) {
+            Ok(()) => panic!("{what}: the comparison accepted it"),
+            Err(refusal) => assert!(
+                refusal.contains(reason),
+                "{what}: refused, but not for it: {refusal}"
+            ),
+        }
+    }
+}
+
 #[tokio::test]
 async fn member_declarations_round_trip_public_aliases_over_the_http_console()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1978,22 +2318,7 @@ async fn member_declarations_round_trip_public_aliases_over_the_http_console()
     );
     assert_no_reserved_member_identity(&read_revision_one, "read_revision_one");
 
-    let declaration = json!({
-        "category_overrides": {
-            "builtins": "inherit",
-            "shell": "enable",
-            "comms": "inherit",
-            "mob": "inherit",
-            "memory": "inherit",
-            "schedule": "inherit",
-            "workgraph": "inherit",
-            "image_generation": "inherit",
-            "web_search": "inherit"
-        },
-        "callback_tools": { "kind": "set", "tools": [] },
-        "execution": { "kind": "unrestricted" },
-        "application_policy": { "kind": "unmanaged" }
-    });
+    let declaration = tool_declaration_enabling_shell();
     let apply = post_console_rpc(
         &app,
         &rpc(
@@ -2047,10 +2372,19 @@ async fn member_declarations_round_trip_public_aliases_over_the_http_console()
     )
     .await;
     let stdin: Value = serde_json::from_str(&stdin_raw)?;
-    assert_eq!(
-        stdin["result"], read_revision_two["result"],
-        "stdin and HTTP must project the shared handler identically"
-    );
+    assert_eq!(stdin["error"], Value::Null, "{stdin:#?}");
+    assert_no_reserved_member_identity(&stdin, "stdin");
+    // The HTTP read was made first and the stdin read second, with a
+    // reconcile of revision 2 possibly in progress between them: the two are
+    // compared member by member, not whole (`declaration_reads_agree`).
+    if let Err(difference) =
+        declaration_reads_agree(&read_revision_two["result"], &stdin["result"], alias)
+    {
+        panic!(
+            "stdin and HTTP must project the shared handler alike: {difference}\nHTTP, read \
+             first: {read_revision_two:#?}\nstdin, read second: {stdin:#?}"
+        );
+    }
 
     let reserved = post_console_rpc(
         &app,
@@ -2093,10 +2427,17 @@ async fn member_declarations_round_trip_public_aliases_over_the_http_console()
         );
     }
     let read_only_read = post_console_rpc(&read_only_app, &read_revision_two_request).await;
-    assert_eq!(
-        read_only_read["result"], read_revision_two["result"],
-        "read-only mode must retain declaration reads"
-    );
+    assert_eq!(read_only_read["error"], Value::Null, "{read_only_read:#?}");
+    if let Err(difference) = declaration_reads_agree(
+        &read_revision_two["result"],
+        &read_only_read["result"],
+        alias,
+    ) {
+        panic!(
+            "read-only mode must retain declaration reads: {difference}\nfirst read: \
+             {read_revision_two:#?}\nread-only read: {read_only_read:#?}"
+        );
+    }
     let read_only_apply = post_console_rpc(
         &read_only_app,
         &rpc(
@@ -2132,7 +2473,15 @@ async fn member_declarations_round_trip_public_aliases_over_the_http_console()
         .runtime
         .build_reference_app_router(decision_state(false));
     let allowed_read = post_console_rpc(&scoped_app, &read_revision_two_request).await;
-    assert_eq!(allowed_read["result"], read_revision_two["result"]);
+    assert_eq!(allowed_read["error"], Value::Null, "{allowed_read:#?}");
+    if let Err(difference) =
+        declaration_reads_agree(&read_revision_two["result"], &allowed_read["result"], alias)
+    {
+        panic!(
+            "a caller allowed to view the member must read its declaration: {difference}\nfirst \
+             read: {read_revision_two:#?}\nallowed read: {allowed_read:#?}"
+        );
+    }
     let denied_other_read = post_console_rpc(
         &scoped_app,
         &rpc(

@@ -10,15 +10,29 @@
 
 mod support;
 
+#[cfg(feature = "test-support")]
+use std::sync::Arc;
+#[cfg(feature = "test-support")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use meerkat_core::HandlingMode;
 use meerkat_mob::AgentIdentity;
+#[cfg(feature = "test-support")]
+use meerkat_mob::MobEventKind;
 use meerkat_mob::MobSessionService as _;
+#[cfg(feature = "test-support")]
+use meerkat_mob::event::{
+    PlacedCompletionClosureEvent, PlacedCompletionHostOutcomeEvent, PlacedCompletionObligationEvent,
+};
+#[cfg(feature = "test-support")]
+use meerkat_mob::runtime::host_actor::RecordedTrackedInputCancelKind;
 use support::{
     HostFixtureOptions, REAL_COMMS_TEST_LOCK, create_controlling_mob,
     scripted_member_client_completing, spawn_host_daemon_fixture,
 };
+#[cfg(feature = "test-support")]
+use support::{StallGate, scripted_member_client_stalling, wait_until};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -314,6 +328,521 @@ async fn restart_reseeded_fence_counter_never_draws_stale_fence() {
         "the respawn tuple must sort above the pre-restart tuple: {:?} !> {:?}",
         (after.generation, after.fence_token),
         (before.generation, before.fence_token)
+    );
+
+    fixture.shutdown().await;
+}
+
+// ===========================================================================
+// Ordinary placed work IN FLIGHT across a cold controlling restart.
+//
+// The rows above restart the controller and then send NEW work. These two
+// hold one ordinary placed work (a `SubmitWork` acknowledged at turn
+// completion, `MemberHandle::internal_turn`) in flight, stop the controller
+// cold, and read what becomes of THAT work id.
+//
+// What is durable before anyone is answered: the controller's
+// record-before-send event (`PlacedCompletionObligationRecorded`) and the
+// member host's Pending reservation, which the host persists before its
+// runtime accepts the work. The caller's own promise is not durable, so a
+// cold restart switches every pending row to exact cancellation
+// (`recover_placed_completion_outcome_custody`) and never re-originates
+// work. The work id then reaches exactly one terminal:
+//
+// - a host CANCELLATION, when the work was still running at the restart
+//   (the first row);
+// - the work's RESULT, when the host had already finished it and answers
+//   the cancellation with the terminal it retained (the second row).
+//
+// Neither row is a statement that ordinary placed work survives a cold
+// restart to its result: the first row pins that it does not.
+// ===========================================================================
+
+/// Counts every stream the member's runtime opens on `inner`. In these rows
+/// one stream is the one model call of one admitted member turn, so the
+/// count is the number of times the member host ran work.
+#[cfg(feature = "test-support")]
+struct StreamCountingClient {
+    inner: Arc<dyn meerkat_client::LlmClient>,
+    streams: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait::async_trait]
+impl meerkat_client::LlmClient for StreamCountingClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        self.inner.project_replay_messages(messages)
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        self.streams.fetch_add(1, Ordering::SeqCst);
+        self.inner.stream(request)
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        self.inner.provider()
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        self.inner.health_check().await
+    }
+}
+
+/// The controller's durable custody of ordinary placed work, as its event
+/// history holds it for this mob, in append order.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Default)]
+struct OrdinaryPlacedWorkHistory {
+    recorded: Vec<PlacedCompletionObligationEvent>,
+    cancellation_requested: Vec<PlacedCompletionObligationEvent>,
+    resolved: Vec<(
+        PlacedCompletionObligationEvent,
+        PlacedCompletionHostOutcomeEvent,
+    )>,
+    closed: Vec<(
+        PlacedCompletionObligationEvent,
+        PlacedCompletionClosureEvent,
+    )>,
+}
+
+#[cfg(feature = "test-support")]
+impl OrdinaryPlacedWorkHistory {
+    /// Terminals of every kind: a folded host result or a closure.
+    fn terminal_count(&self) -> usize {
+        self.resolved.len() + self.closed.len()
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn ordinary_placed_work_history(
+    controlling: &support::ControllingMob,
+) -> OrdinaryPlacedWorkHistory {
+    let mut history = OrdinaryPlacedWorkHistory::default();
+    let events = controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("replay the controlling mob's event history");
+    for event in events {
+        if event.mob_id != controlling.mob_id {
+            continue;
+        }
+        match event.kind {
+            MobEventKind::PlacedCompletionObligationRecorded { obligation } => {
+                history.recorded.push(obligation);
+            }
+            MobEventKind::PlacedCompletionCancellationRequested { obligation } => {
+                history.cancellation_requested.push(obligation);
+            }
+            MobEventKind::PlacedCompletionOutcomeResolved {
+                obligation,
+                outcome,
+            } => history.resolved.push((obligation, outcome)),
+            MobEventKind::PlacedCompletionOutcomeClosed {
+                obligation,
+                closure,
+            } => history.closed.push((obligation, closure)),
+            _ => {}
+        }
+    }
+    history
+}
+
+/// The caller's call of the held work.
+#[cfg(feature = "test-support")]
+type HeldCaller =
+    tokio::task::JoinHandle<Result<meerkat_mob::MemberDeliveryReceipt, meerkat_mob::MobError>>;
+
+/// One placed member on a host daemon whose member turns park on `gate`,
+/// and one ordinary placed work submitted to it and held in flight.
+#[cfg(feature = "test-support")]
+struct HeldOrdinaryPlacedWork {
+    fixture: support::HostDaemonFixture,
+    controlling: support::ControllingMob,
+    member: AgentIdentity,
+    gate: StallGate,
+    /// Streams the member's runtime opened: see [`StreamCountingClient`].
+    streams: Arc<AtomicUsize>,
+    /// The controller's record-before-send event of the held work.
+    work: PlacedCompletionObligationEvent,
+    /// Unanswered while the work is held.
+    caller: HeldCaller,
+}
+
+/// Place one ordinary work and hold it in flight, then read the durable
+/// acceptance while the caller is still unanswered: the controller's one
+/// record-before-send event, and the host's one Pending reservation under
+/// the same work id.
+#[cfg(feature = "test-support")]
+async fn hold_one_ordinary_placed_work(label: &str) -> HeldOrdinaryPlacedWork {
+    let gate = StallGate::new();
+    let streams = Arc::new(AtomicUsize::new(0));
+    let mut options = HostFixtureOptions::named(&format!("{label}-host")).with_member_build();
+    options.member_llm_client = Some(Arc::new(StreamCountingClient {
+        inner: scripted_member_client_stalling(gate.clone()),
+        streams: Arc::clone(&streams),
+    }));
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("member-build fixture");
+    let controlling = create_controlling_mob(label).await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let member = AgentIdentity::from("held-worker");
+    controlling
+        .spawn_placed("worker", member.as_str(), &report.host_id)
+        .await
+        .expect("placed spawn");
+    assert_eq!(
+        streams.load(Ordering::SeqCst),
+        0,
+        "the placed spawn alone runs no member turn"
+    );
+    assert_eq!(
+        ordinary_placed_work_history(&controlling)
+            .await
+            .recorded
+            .len(),
+        0,
+        "no ordinary placed work is recorded before one is submitted"
+    );
+
+    let placed = controlling
+        .handle
+        .member(&member)
+        .await
+        .expect("placed member handle");
+    let caller = tokio::spawn(async move {
+        placed
+            .internal_turn("ordinary placed work held in flight")
+            .await
+    });
+    // The member's runtime accepted the work and is inside its one model
+    // call, parked on the gate.
+    tokio::time::timeout(WAIT, gate.wait_until_entered())
+        .await
+        .expect("the member host starts the held work");
+
+    let history = ordinary_placed_work_history(&controlling).await;
+    assert_eq!(
+        history.recorded.len(),
+        1,
+        "the controller recorded the work once before it sent it: {history:?}"
+    );
+    assert_eq!(
+        history.cancellation_requested.len() + history.terminal_count(),
+        0,
+        "nothing but the Record exists for the held work: {history:?}"
+    );
+    let work = history.recorded[0].clone();
+    assert_eq!(work.agent_identity, member);
+    assert_eq!(work.host_id, report.host_id);
+    let pending = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await
+        .turn_outcome_pending
+        .get(member.as_str())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|row| row.input_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![work.input_id.as_str()],
+        "the host holds exactly one Pending reservation, under the recorded work id"
+    );
+    assert_eq!(
+        streams.load(Ordering::SeqCst),
+        1,
+        "the member host ran the held work once"
+    );
+    assert!(
+        !caller.is_finished(),
+        "the caller is still unanswered while both durable records exist"
+    );
+
+    HeldOrdinaryPlacedWork {
+        fixture,
+        controlling,
+        member,
+        gate,
+        streams,
+        work,
+        caller,
+    }
+}
+
+/// The caller of the held work, after the controller stopped cold: its
+/// promise does not survive, so the call ends with an error, not a receipt.
+#[cfg(feature = "test-support")]
+async fn assert_caller_promise_did_not_survive(caller: HeldCaller) {
+    let answered = tokio::time::timeout(WAIT, caller)
+        .await
+        .expect("the cold stop answers the caller")
+        .expect("the caller task is not cancelled");
+    assert!(
+        answered.is_err(),
+        "the caller's promise must not survive a cold controller stop: {answered:?}"
+    );
+}
+
+/// The host journal's rows of `input_id` for `member`: how many Pending
+/// reservations, its retained terminals, and its cancellation receipts.
+#[cfg(feature = "test-support")]
+async fn host_rows_of(
+    fixture: &support::HostDaemonFixture,
+    mob_id: &str,
+    member: &AgentIdentity,
+    input_id: &str,
+) -> (usize, Vec<String>, Vec<RecordedTrackedInputCancelKind>) {
+    let record = fixture.host_binding_record(mob_id).await;
+    let pending = record
+        .turn_outcome_pending
+        .get(member.as_str())
+        .map_or(0, |rows| {
+            rows.iter().filter(|row| row.input_id == input_id).count()
+        });
+    let terminals = record
+        .turn_outcomes
+        .get(member.as_str())
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row.input_id == input_id)
+                .map(|row| format!("{:?}", row.outcome))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cancellations = record
+        .tracked_input_cancellations
+        .get(member.as_str())
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row.input_id == input_id)
+                .map(|row| row.outcome)
+                .collect()
+        })
+        .unwrap_or_default();
+    (pending, terminals, cancellations)
+}
+
+/// Ordinary placed work still RUNNING when the controller stops cold: the
+/// restarted controller cancels that exact work on its host. The work id
+/// reaches exactly one terminal, a host cancellation and not a result, and
+/// the member host never runs it a second time.
+#[tokio::test(flavor = "multi_thread")]
+#[cfg(feature = "test-support")]
+async fn cold_controlling_restart_ends_running_ordinary_placed_work_in_one_host_cancellation() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let HeldOrdinaryPlacedWork {
+        fixture,
+        controlling,
+        member,
+        gate,
+        streams,
+        work,
+        caller,
+    } = hold_one_ordinary_placed_work("resume-ordinary-cancelled").await;
+    let mob_id = controlling.mob_id.to_string();
+
+    // Stop the controller cold and restart it. The work is still running on
+    // its host: the gate stays closed.
+    let controlling = controlling.crash_restart().await;
+    assert_caller_promise_did_not_survive(caller).await;
+
+    wait_until(
+        "the restarted controller to end the held ordinary work",
+        || async {
+            ordinary_placed_work_history(&controlling)
+                .await
+                .terminal_count()
+                > 0
+        },
+    )
+    .await;
+    let history = ordinary_placed_work_history(&controlling).await;
+
+    // (1) The SAME accepted work id is the one that reaches a terminal: one
+    // Record, never a second one under any id.
+    assert_eq!(
+        history.recorded,
+        vec![work.clone()],
+        "the restart re-originated no work: {history:?}"
+    );
+    assert_eq!(
+        history.cancellation_requested,
+        vec![work.clone()],
+        "cold recovery switched the pending work to exact cancellation, once: {history:?}"
+    );
+    // (2) The terminal's KIND and COUNT: exactly one, and it is a host
+    // cancellation, not a result.
+    assert_eq!(
+        history.closed,
+        vec![(work.clone(), PlacedCompletionClosureEvent::HostCancelled)],
+        "work still running at a cold restart ends in one host cancellation: {history:?}"
+    );
+    assert!(
+        history.resolved.is_empty(),
+        "no host result is folded for work that was cancelled while running: {history:?}"
+    );
+    let (pending, terminals, cancellations) =
+        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
+    assert_eq!(pending, 0, "the host's Pending reservation is consumed");
+    assert!(
+        terminals.is_empty(),
+        "the host journals no result for the cancelled work: {terminals:?}"
+    );
+    assert_eq!(
+        cancellations,
+        vec![RecordedTrackedInputCancelKind::Cancelled],
+        "the host keeps one cancellation receipt for the work id"
+    );
+    // (3) No second submission: the member host ran the work once.
+    assert_eq!(
+        streams.load(Ordering::SeqCst),
+        1,
+        "the member host never ran the cancelled work a second time"
+    );
+
+    // Later work proves the lane is live again and still never reruns the
+    // cancelled id: one new Record, one more member turn, and the cancelled
+    // work's single terminal unchanged.
+    gate.release();
+    let placed = controlling
+        .handle
+        .member(&member)
+        .await
+        .expect("placed member handle after the restart");
+    tokio::time::timeout(
+        WAIT,
+        placed.internal_turn("ordinary placed work after the restart"),
+    )
+    .await
+    .expect("post-restart ordinary work stays bounded")
+    .expect("the placed member serves ordinary work after the restart");
+    let later = ordinary_placed_work_history(&controlling).await;
+    assert_eq!(
+        later.recorded.len(),
+        2,
+        "the later work is its own Record: {later:?}"
+    );
+    assert_ne!(later.recorded[1].input_id, work.input_id);
+    assert_eq!(
+        later.closed,
+        vec![(work, PlacedCompletionClosureEvent::HostCancelled)],
+        "the cancelled work keeps its one terminal: {later:?}"
+    );
+    assert_eq!(
+        streams.load(Ordering::SeqCst),
+        2,
+        "one more member turn ran, for the later work only"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// Ordinary placed work the host FINISHED while the controller was down:
+/// the restarted controller still asks for the exact cancellation, the host
+/// answers with the terminal it retained, and the work id reaches exactly
+/// one terminal, the work's result. The member host ran it once.
+#[tokio::test(flavor = "multi_thread")]
+#[cfg(feature = "test-support")]
+async fn cold_controlling_restart_folds_the_result_of_ordinary_placed_work_its_host_had_finished() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let HeldOrdinaryPlacedWork {
+        fixture,
+        controlling,
+        member,
+        gate,
+        streams,
+        work,
+        caller,
+    } = hold_one_ordinary_placed_work("resume-ordinary-finished").await;
+    let mob_id = controlling.mob_id.to_string();
+
+    // Stop the controller cold FIRST, so nobody is left to fold a terminal,
+    // then let the host finish the work on its own.
+    controlling
+        .handle
+        .crash_stop_preserving_durable_work_for_test()
+        .await
+        .expect("stop the controlling mob cold, keeping its durable custody");
+    assert_caller_promise_did_not_survive(caller).await;
+    gate.release();
+    wait_until(
+        "the host to journal the finished work's terminal",
+        || async {
+            let (_, terminals, _) = host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
+            !terminals.is_empty()
+        },
+    )
+    .await;
+    let stopped = ordinary_placed_work_history(&controlling).await;
+    assert_eq!(
+        (
+            stopped.recorded.len(),
+            stopped.cancellation_requested.len(),
+            stopped.terminal_count()
+        ),
+        (1, 0, 0),
+        "the stopped controller wrote nothing while its host finished the work: {stopped:?}"
+    );
+
+    let controlling = controlling.restart_after_actor_fail_stop().await;
+    wait_until(
+        "the restarted controller to fold the finished ordinary work",
+        || async {
+            ordinary_placed_work_history(&controlling)
+                .await
+                .terminal_count()
+                > 0
+        },
+    )
+    .await;
+    let history = ordinary_placed_work_history(&controlling).await;
+
+    // (1) The SAME accepted work id is the one that reaches a terminal.
+    assert_eq!(
+        history.recorded,
+        vec![work.clone()],
+        "the restart re-originated no work: {history:?}"
+    );
+    assert_eq!(
+        history.cancellation_requested,
+        vec![work.clone()],
+        "cold recovery asks for the exact cancellation even of finished work: {history:?}"
+    );
+    // (2) The terminal's KIND and COUNT: exactly one, and it is the work's
+    // result, not a cancellation.
+    assert_eq!(
+        history.resolved,
+        vec![(
+            work.clone(),
+            PlacedCompletionHostOutcomeEvent::InteractionComplete
+        )],
+        "the host's retained terminal is folded once, as the work's result: {history:?}"
+    );
+    assert!(
+        history.closed.is_empty(),
+        "work the host had finished is not closed as cancelled: {history:?}"
+    );
+    let (pending, _, cancellations) =
+        host_rows_of(&fixture, &mob_id, &member, &work.input_id).await;
+    assert_eq!(pending, 0, "the host's Pending reservation is consumed");
+    assert!(
+        !cancellations.contains(&RecordedTrackedInputCancelKind::Cancelled),
+        "the host did not cancel work it had finished: {cancellations:?}"
+    );
+    // (3) No second submission: the member host ran the work once.
+    assert_eq!(
+        streams.load(Ordering::SeqCst),
+        1,
+        "the member host never ran the finished work a second time"
     );
 
     fixture.shutdown().await;

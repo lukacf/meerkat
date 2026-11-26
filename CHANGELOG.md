@@ -330,6 +330,8 @@ them.
 
 ### Known limitations
 
+- **Competing MCP resumes:** If a plain `meerkat_resume` races a resume that rebuilds the same session (for example, to change its reasoning level or `max_tokens`), the plain resume can succeed, return `-32003` (`session_resume_required`), or return an untyped error: `-32603` (`Runtime not ready: destroyed`) or `-32005` (`request cancelled`). An error does not mean the prompt was not processed. Wait for the other resume to finish, then check `meerkat_history`; resend the prompt only if it is absent.
+
 - On the stock host, a target whose client cannot be built is held. For a buildable target, **no source for supported levels** means the switch is denied. **An existing source that is temporarily unreadable** is different: the switch can take effect without a compatibility verdict. Requests on the target are then refused as retryable until the levels can be read. If the target does not support the held level, requests remain refused until the level or model changes.
 
 ## [0.9.18] - 2026-11-23

@@ -1009,6 +1009,9 @@ class CiWorkflowTests(unittest.TestCase):
         fetch = next(step for step in steps_of(job) if uses_of(step) == "actions/download-artifact")
         self.assertEqual(fetch["with"], {"name": "console-backends", "path": "${{ runner.temp }}/console-backends"})
         order = [
+            # Kept from the job's compiling days until a run shows the
+            # runner's disk holds the archive beside Chromium without it.
+            "- name: Free runner disk\n",
             "- name: Fetch the console acceptance backends\n",
             f"- name: {INCIDENT_VERIFY}\n",
             'echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"\n',

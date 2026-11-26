@@ -2501,6 +2501,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      # Written for the compile this job no longer runs, next to Playwright's
+      # Chromium on the runner's root disk. It stays: the job now holds the
+      # backends' archive there instead, and no run of it has yet shown the
+      # headroom without this step. No step here uses these preinstalled
+      # toolchains.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"

@@ -11,7 +11,11 @@ A second row follows the notice to its end as a host would: with the id the
 notice names it reads the set (:meth:`MobHandle.gating_questions`; a set's
 ``pending_id`` is the decision's id) and answers it
 (:meth:`MobHandle.gating_answer`). The set then leaves the open sets and its
-decision is no longer open.
+decision is no longer open. Its launch names a roster (one long-term agent
+that is never sent anything): a gateway serves and lists the questions of
+its agents only for a launch with a roster. On a launch without one, as the
+first row's, the notice still arrives and ``decisions_list`` returns the
+decision, but ``gating_questions`` returns no set.
 
 The two rows run in the order of this file, and the second one ends the set:
 a seeded directory serves ONE run of this file. The second row leaves a
@@ -80,7 +84,8 @@ gateway started: a question that opens while the host is connected is not
 shown here. The second row answers as the embedding host (the stdio decide
 trusts its host and records the ``approver_id`` it names); it does not show
 that the asking agent receives the answers, since the seeded asker is no
-member of the row's mob. The rows record the calls of the SDK's notice
+agent of the row's roster (``test_question_opens_while_host_is_connected_real_gateway.py``
+shows that, for a question an agent of the launch asks). The rows record the calls of the SDK's notice
 handler only, so a failed wait says that a notice was not observed by the
 handler in time, not that the gateway wrote none.
 """
@@ -96,6 +101,7 @@ from typing import Any
 import pytest
 
 from meerkat_meta.builder import Meta
+from meerkat_meta.identity_first_models import DurableAgentSpec
 from meerkat_meta.runtime import MetaRuntime
 from meerkat_meta.types import GatingQuestionAnswer
 
@@ -111,6 +117,8 @@ _ANSWERED_MARKER_SUFFIX = ".sdk-held-question-answered"
 # The approver the answering row names. The stdio decide trusts its host and
 # records the name it gives; nobody is authenticated by it.
 _ANSWERS_AS = "sdk-held-question-row"
+# The one agent of the answering row's roster. It is not the seeded asker.
+_ROSTER_AGENT = "held-question-row-agent"
 
 # How long the row waits for an observation it expects.
 _WAIT_SECONDS = 30.0
@@ -257,15 +265,34 @@ def _only_the_allow_list_is_inherited(tmp_path: Path, monkeypatch: pytest.Monkey
     assert not not_allowed, f"names outside the allow list would be inherited: {not_allowed}"
 
 
-def _runtime_over(state: Path) -> MetaRuntime:
-    """A runtime whose gateway takes the seeded directory as its state."""
-    return MetaRuntime(
+class _OneAgentRoster:
+    """A roster of one long-term agent: what makes the launch one whose
+    gateway serves and lists its agents' questions. The agent is not the
+    seeded asker and is never sent anything, so no model is asked."""
+
+    async def roster(self, context: dict) -> list[DurableAgentSpec]:
+        return [
+            DurableAgentSpec(
+                identity=_ROSTER_AGENT,
+                profile="default",
+                addressability="addressable",
+                runtime_mode_override="turn_driven",
+            )
+        ]
+
+
+def _runtime_over(state: Path, *, roster: Any | None = None) -> MetaRuntime:
+    """A runtime whose gateway takes the seeded directory as its state,
+    for a launch with ``roster`` when one is given."""
+    builder = (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
         .mob_inline(_MOB_TOML)
         .persistent_state(str(state))
-        ._config
     )
+    if roster is not None:
+        builder = builder.roster(roster)
+    return MetaRuntime(builder._config)
 
 
 @pytest.mark.skipif(
@@ -346,7 +373,9 @@ async def test_the_host_reads_and_answers_the_question_set_its_notice_names(
     _only_the_allow_list_is_inherited(tmp_path, monkeypatch)
 
     notices: list[dict[str, Any]] = []
-    runtime = _runtime_over(state)
+    # A launch with a roster: the gateway serves and lists its agents'
+    # questions only then.
+    runtime = _runtime_over(state, roster=_OneAgentRoster())
     runtime.on_decision_notice(notices.append)
     try:
         await _answered(runtime.connect(), "the gateway's start (connect)", note)

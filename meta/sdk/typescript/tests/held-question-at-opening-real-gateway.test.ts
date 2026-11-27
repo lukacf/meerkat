@@ -12,7 +12,12 @@
  * the notice names it reads the set (`MobHandle.gatingQuestions`; a set's
  * `pendingId` is the decision's id) and answers it
  * (`MobHandle.gatingAnswer`). The set then leaves the open sets and its
- * decision is no longer open.
+ * decision is no longer open. Its launch names a roster (one long-term
+ * agent that is never sent anything): a gateway serves and lists the
+ * questions of its agents only for a launch with a roster. On a launch
+ * without one, as the first row's, the notice still arrives and
+ * `decisionsList` returns the decision, but `gatingQuestions` returns no
+ * set.
  *
  * The pairing and its order
  * -------------------------
@@ -80,7 +85,9 @@
  * that registers late. The second row answers as the embedding host (the
  * stdio decide trusts its host and records the `approverId` it names); it
  * does not show that the asking agent receives the answers, since the seeded
- * asker is no member of the row's mob. The rows record the calls of the
+ * asker is no agent of the row's roster
+ * (`question-opens-while-host-is-connected-real-gateway.test.ts` shows
+ * that, for a question an agent of the launch asks). The rows record the calls of the
  * SDK's notice handler only, so a failed wait says that a notice was not
  * observed by the handler in time, not that the gateway wrote none.
  */
@@ -101,7 +108,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 
 import { Meta } from "../src/index.js";
-import type { MetaRuntime } from "../src/index.js";
+import type { MetaRuntime, RosterProvider } from "../src/index.js";
 
 const gatewayBin = (process.env.META_RPC_GATEWAY_BIN ?? "").trim();
 const seededState = (process.env.META_SDK_HELD_QUESTION_STATE ?? "").trim();
@@ -115,6 +122,8 @@ const ANSWERED_MARKER_SUFFIX = ".sdk-held-question-answered";
 // The approver the answering row names. The stdio decide trusts its host and
 // records the name it gives; nobody is authenticated by it.
 const ANSWERS_AS = "sdk-held-question-row";
+// The one agent of the answering row's roster. It is not the seeded asker.
+const ROSTER_AGENT = "held-question-row-agent";
 
 // How long a row waits for an observation it expects.
 const WAIT_MS = 30_000;
@@ -264,14 +273,36 @@ async function answered<T>(call: Promise<T>, what: string, note: string): Promis
 }
 
 /**
+ * A roster of one long-term agent: what makes the launch one whose gateway
+ * serves and lists its agents' questions. The agent is not the seeded asker
+ * and is never sent anything, so no model is asked.
+ */
+const ONE_AGENT_ROSTER: RosterProvider = {
+  roster: async () => [
+    {
+      identity: ROSTER_AGENT,
+      profile: "default",
+      addressability: "addressable",
+      displayName: null,
+      labels: {},
+      context: null,
+      additionalInstructions: [],
+      runtimeModeOverride: "turn_driven",
+    },
+  ],
+};
+
+/**
  * Run `row` against a gateway that takes the seeded directory as its state
- * and inherits the allow list only. The notices its handler received are
- * handed to the row as they arrive.
+ * and inherits the allow list only, for a launch with `roster` when one is
+ * given. The notices its handler received are handed to the row as they
+ * arrive.
  */
 async function withGatewayOver(
   state: string,
   note: string,
   row: (runtime: MetaRuntime, notices: Notice[]) => Promise<void>,
+  roster?: RosterProvider,
 ): Promise<void> {
   const own = mkdtempSync(join(tmpdir(), "meta-held-question-"));
   const before = { ...process.env };
@@ -295,8 +326,10 @@ async function withGatewayOver(
 
     const mobToml = join(own, "mob.toml");
     writeFileSync(mobToml, MOB_TOML);
+    const builder = Meta.builder().gateway(gatewayBin).mob(mobToml).persistentState(state);
+    if (roster) builder.rosterProvider(roster);
     runtime = await answered(
-      Meta.builder().gateway(gatewayBin).mob(mobToml).persistentState(state).build(),
+      builder.build(),
       "the gateway's start (build)",
       note,
     );
@@ -469,6 +502,8 @@ describe("a question set pending before the gateway starts", { skip }, () => {
         "a further notice was observed by the handler after the answer, " +
           `watched for ${QUIET_MS / 1000} s after the list: ${JSON.stringify(notices)}`,
       );
-    });
+      // A launch with a roster: the gateway serves and lists its agents'
+      // questions only then.
+    }, ONE_AGENT_ROSTER);
   });
 });

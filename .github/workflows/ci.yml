@@ -2525,7 +2525,7 @@ jobs:
           # alone about 14.2 GiB). Two build jobs would still start the two
           # at once. What is known: in every run of these rows that ended
           # and was read, the step after the tests showed the runner's
-          # memory used up and 3.5 to 4.9 GiB in swap at the peak, with no
+          # memory used up and 3.3 to 4.6 GiB in swap at the peak, with no
           # OOM kill counted, and hosted runners were lost in this step. Why
           # they were lost is not established: a lost runner leaves no log.
           # One job lowers what the compile holds at once. It is no promise

@@ -1622,6 +1622,8 @@ jobs:
         env:
           PACKAGES: ${{ matrix.packages }}
           TARGETS: ${{ matrix.targets }}
+          # One build job for a row that builds meerkat-meta (see main-unit).
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') }}
           # Set only on feature-suite rows whose tests need a deeper test-thread
           # stack than the 8 MiB .cargo/config.toml default (see FEATURE_UNIT_SUITES).
           MIN_STACK: ${{ matrix.rust_min_stack }}
@@ -1641,6 +1643,9 @@ jobs:
             "--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected unit targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
           # is exported only when the row sets one.
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
@@ -2512,6 +2517,26 @@ jobs:
         env:
           PACKAGES: ${{ matrix.packages }}
           TARGETS: ${{ matrix.targets }}
+          # True for a row that builds meerkat-meta: the rows of the swap step
+          # above (meta, meta[openai-live], meta[extension-state]). Such a row
+          # compiles with ONE build job, so that meerkat-meta's library and
+          # its library test binary compile one after the other and not side
+          # by side (17.2 to 17.8 GiB together when measured, the test binary
+          # alone about 14.2 GiB). Two build jobs would still start the two
+          # at once. What is known: in every run of these rows that ended
+          # and was read, the step after the tests showed the runner's
+          # memory used up and 3.3 to 4.6 GiB in swap at the peak, with no
+          # OOM kill counted, and hosted runners were lost in this step. Why
+          # they were lost is not established: a lost runner leaves no log.
+          # One job lowers what the compile holds at once. It is no promise
+          # that the row fits the runner's memory, and it also runs each
+          # crate's code generation on one thread: the compile took 29 to 63
+          # minutes at Cargo's default of four jobs and has not been timed
+          # at one. The job's limit, the test threads, the features and the
+          # test selection are unchanged. CARGO_BUILD_JOBS is Cargo's own
+          # setting (build.jobs); nextest's --build-jobs would override it,
+          # and the commands below do not pass it.
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') }}
           # Set only on feature-suite rows whose tests need a deeper test-thread
           # stack than the 8 MiB .cargo/config.toml default (see FEATURE_UNIT_SUITES).
           MIN_STACK: ${{ matrix.rust_min_stack }}
@@ -2531,6 +2556,9 @@ jobs:
             "--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected unit targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
           # is exported only when the row sets one.
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
@@ -2734,6 +2762,8 @@ jobs:
         env:
           PACKAGES: ${{ matrix.packages }}
           TARGETS: ${{ matrix.targets }}
+          # One build job for a row that builds meerkat-meta (see main-unit).
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') }}
           MIN_STACK: ${{ matrix.rust_min_stack }}
           # A partitioned lane's rows only (see main-unit).
           PARTITION: ${{ matrix.partition }}
@@ -2750,6 +2780,9 @@ jobs:
             "--lib"|"--bins"|"--lib --bins") ;;
             *) echo "::error::unexpected unit targets '${TARGETS}'"; exit 1 ;;
           esac
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
+          fi
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
           partition_args=()
           if [[ -n "${PARTITION}" ]]; then

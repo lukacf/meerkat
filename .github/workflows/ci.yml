@@ -3168,6 +3168,22 @@ jobs:
           CLOSURE: ${{ matrix.packages }}
           ROW_TARGETS: ${{ matrix.targets }}
           ROW_FEATURES: ${{ matrix.features }}
+          # True for at most one row: Meta's part when it checks every target
+          # with every feature ("meta, N crates" after a Core change). It gets
+          # ONE build job, so that meerkat-meta's library and its library test
+          # target are checked one after the other and not side by side, as
+          # the Clippy job does for its meerkat-meta row. Measured on another
+          # machine, for this row's own command: it succeeds, its largest
+          # single process held 12.80 GiB, and two long meerkat-meta checks
+          # ran side by side. Not measured: what the two hold together, and
+          # this row's memory on a hosted runner. A hosted run of this row
+          # ended with exit code 143 while it checked meerkat-meta, with no
+          # memory reading in its log; why is not known. One job lowers what
+          # the check holds at once and is no promise that the row fits the
+          # runner's memory. The two checks then run in turn, so the step
+          # takes longer. Meta's default-features row and the other products'
+          # rows are not selected and run as before.
+          META_ROW: ${{ contains(matrix.packages, '-p meerkat-meta') && matrix.targets == 'all' && matrix.features == 'all' }}
         run: |
           set -euo pipefail
           [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
@@ -3185,6 +3201,9 @@ jobs:
           features=(--all-features)
           if [[ "${ROW_FEATURES}" == "default" ]]; then
             features=()
+          fi
+          if [[ "${META_ROW}" == "true" ]]; then
+            export CARGO_BUILD_JOBS=1
           fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" "${features[@]}"

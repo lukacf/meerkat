@@ -21,9 +21,10 @@
  */
 import React from "react";
 import { act, fireEvent, render } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConsoleApp } from "../ConsoleApp";
+import type { ActivityLedger, ActivityLedgerOptions } from "../lib/activity-ledger";
 import type { MetaConsoleTransport } from "../lib/headless";
 import {
   installRenderCounts,
@@ -33,6 +34,41 @@ import {
 } from "../lib/render-counts";
 import { TRANSCRIPT_WINDOW_TURNS } from "../panels/ChatPane";
 import type { ConsoleFrame } from "../types";
+
+// One check per activity ledger the mounted app made: whether that ledger
+// still owes its readers a change. A ledger does not pass a change on at
+// once: its readers (the sidebar and the signals rail) hear of it on the
+// ledger's notify timer, and re-render then without the app root.
+const ledgersOwing = vi.hoisted(() => [] as Array<() => boolean>);
+
+vi.mock("../lib/activity-ledger", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/activity-ledger")>();
+  return {
+    ...actual,
+    // The real ledger, doing what it does. Each call that can change it is
+    // watched through the version its readers read, nothing else.
+    createActivityLedger: (options?: ActivityLedgerOptions): ActivityLedger => {
+      const ledger = actual.createActivityLedger(options);
+      // The version the readers had when the ledger was told of a change it
+      // did not publish at once; null while no such change was told.
+      let owedSince: number | null = null;
+      const watched = <Args extends unknown[], Result>(change: (...args: Args) => Result) =>
+        (...args: Args): Result => {
+          const published = ledger.getVersion();
+          const result = change(...args);
+          // ingest and ingestMany answer false for frames that changed nothing.
+          if (result !== false && ledger.getVersion() === published) owedSince = published;
+          return result;
+        };
+      ledger.setResolver = watched(ledger.setResolver.bind(ledger));
+      ledger.reset = watched(ledger.reset.bind(ledger));
+      ledger.ingest = watched(ledger.ingest.bind(ledger));
+      ledger.ingestMany = watched(ledger.ingestMany.bind(ledger));
+      ledgersOwing.push(() => owedSince !== null && ledger.getVersion() === owedSince);
+      return ledger;
+    },
+  };
+});
 
 const AGENT_COUNT = 160;
 const CHAT_IDENTITY = "identity:agent-000";
@@ -263,6 +299,10 @@ async function measure(
     if (visibility) Object.defineProperty(Document.prototype, "visibilityState", visibility);
   }
 
+  // The app tells its ledger of the roster as it mounts, and the ledger
+  // publishes that on its notify timer. The render that follows belongs to
+  // the mount: the keystroke counts start once no ledger owes its readers.
+  await settle(() => !ledgersOwing.some((owing) => owing()), "the ledger's publish of what it was told at mount");
   resetRenderCounts();
   const keystrokeMs: number[] = [];
   let draft = "";
@@ -351,6 +391,7 @@ function stats(samples: number[]): string {
 describe("console typing lag benchmark", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    ledgersOwing.length = 0;
   });
   afterEach(() => {
     uninstallRenderCounts();

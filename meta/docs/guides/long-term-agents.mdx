@@ -160,7 +160,9 @@ Three things make this safe to automate:
 - **`request_id` names the change.** The same id and the same request return
   the same state and commit at most once. After a lost answer or a restart,
   send the same call again, or read it with `operation`. A different request
-  under the same id is refused `operation_reused`.
+  under the same id is refused, `operation_reused` in the ordinary case; the
+  reference states the limits of both
+  ([Requests, operations and retries](/api/rpc#requests-operations-and-retries)).
 - **`expected_spec_digest` is the spec you read.** There is one spec digest
   on every surface, the digest of the agent's record: the same value in
   `list`, `get`, a change's outcome and the `current_digest` of a

@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [defd2cd35cbf](https://github.com/lukacf/meerkat/commit/defd2cd35cbf1ae360558a32deaad26d0b55706c) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [8a276c1512a0](https://github.com/lukacf/meerkat/commit/8a276c1512a096373abdbc56596bbe2cb4454261) on 2026-11-27; Meta version 0.9.19 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -1778,9 +1778,10 @@ Every change takes `request_id`, 1 to 256 bytes of text the caller chooses.
 It names the operation: the same caller sending the same request under the
 same `request_id` gets the same answer again and nothing is written twice,
 so a change whose answer was lost is retried as it was. Another request
-under a `request_id` the caller already used is refused `operation_reused`,
-whatever change it asks for: one `request_id` names one change, and one
-held decision. The id is the caller's own: two callers (the stdio host and
+under a `request_id` the caller already used is refused, whatever change it
+asks for: one `request_id` names one change, and one held decision. It is
+refused `operation_reused`, within the limits the next two paragraphs
+state. The id is the caller's own: two callers (the stdio host and
 a person at the Console, for example) that pick the same `request_id` name
 two operations.
 
@@ -1792,6 +1793,36 @@ retry is taken for the request that committed. And a retry of a committed
 change that can no longer be normalized for another reason (a peer removed
 since, a profile gone) answers that refusal; `meta/identity/operation`
 reads the committed outcome in both cases.
+
+A retry of a change that still waits for a decision is compared with the
+request the decision holds, and that has limits of its own. The held
+request asked again answers its decision as it stands, also when the
+host's rules, the mob's definition or the host's own check would refuse it
+as a new request now: the rules and the mob are asked again when the
+decision is carried out, and the host's own check is asked only when a
+change is asked or planned, never when a decision is carried out. A request
+that can no longer be normalized, or for which a read failed, is compared
+with the held request by its change kind and the agents it names only:
+nothing else of it can be compared. Where both are the held request's, it
+is answered the held decision and is not judged as a new request, whatever
+its other parameters are: they may differ from the held request's (another
+profile, other peers, other instructions), and the answer does not say
+that the two requests are the same. Nothing is held or written for it. Any
+other request that cannot be normalized, of another change kind or
+naming other agents, is `operation_reused`, and so is one under a decision
+whose held request this gateway cannot read. A request that is normalized
+and is not the held one is answered by the owner's rule
+(`owner_read_only`) or the host's own check (`validation_refused`) where
+they refuse it, and `operation_reused` otherwise. One retry is not
+recognised: a held request that still normalizes, but to another form than
+the one the decision holds (the peer rules now give one of its peers under
+another rule, for one), is refused `operation_reused`, while
+`meta/identity/operation` reads the decision. Under the `request_id` of a
+decision that ended without its change (rejected, expired, withdrawn, or
+refused when it was carried out), every request answers how it ended. A
+decision that was approved and carried out is a change that committed: a
+retry under its `request_id` is compared with what committed, as the
+paragraph before this one says.
 
 With every change the mob drives the seats it still owes again (see
 [`meta/identity/create`](#meta%2Fidentity%2Fcreate)), beside the change: the
@@ -3600,10 +3631,12 @@ A change of an agent whose outcome under the host's identity policy
 (`runtime_options.identity_creation`) is `require_approval` is not committed
 when it is asked. It is held as one durable decision and answers
 `pending_decision {operation_id, decision_id, deadline_ms}`; the same request
-id asked again answers the same state, and nothing is written but the
-decision: no agent is created, built or woken while it is held. One request
-id names one change: any other request under it, of the same action or
-another, is refused `operation_reused`.
+asked again under its request id answers the same state, and nothing is
+written but the decision: no agent is created, built or woken while it is
+held. One request id names one change: another request under it is refused,
+`operation_reused` unless the owner's rule or the host's own check refuses
+it first. [Requests, operations and retries](#requests-operations-and-retries)
+states the limits of both sentences.
 
 | Kind | The held change |
 |------|-----------------|

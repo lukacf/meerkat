@@ -702,6 +702,69 @@ async fn the_console_http_surface_refuses_an_attestation_field() {
     runtime.shutdown().await;
 }
 
+/// The Console's decision reads and its withdraw read their params as the
+/// stdio verbs do. Malformed params are invalid params (`-32602`, no
+/// `data`) whose message names the place of the fault, and nothing of the
+/// whole answer carries what the request sent, as a value or as a key.
+#[tokio::test]
+async fn a_malformed_console_decision_request_names_its_place_and_never_its_values() {
+    const CALLER_VALUE: &str = "caller-value-7f3a91";
+    const CALLER_NUMBER: i64 = -70_421;
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let absent = format!("decision:{}", "0".repeat(64));
+    let mut faults = Vec::new();
+    for (subject, method, params, message) in [
+        (
+            ALICE,
+            "meta/decisions/get",
+            json!({"decision_id": [CALLER_VALUE]}),
+            "decision_id: invalid type: sequence, expected a string",
+        ),
+        (
+            ALICE,
+            "meta/decisions/get",
+            json!({"decision_id": absent, "include_request": CALLER_VALUE}),
+            "include_request: invalid type: string, expected a boolean",
+        ),
+        (
+            ALICE,
+            "meta/decisions/list",
+            json!({"limit": CALLER_VALUE}),
+            "limit: invalid type: string, expected u32",
+        ),
+        (
+            ALICE,
+            "meta/decisions/rendering",
+            json!({"decision_id": absent, "max_part_bytes": CALLER_NUMBER}),
+            "max_part_bytes: invalid value: integer, expected u32",
+        ),
+        (
+            ERIN,
+            WITHDRAW,
+            json!({"decision_id": absent, CALLER_VALUE: true}),
+            "unknown field, expected `decision_id`",
+        ),
+    ] {
+        let answer = rpc(&app, Some(subject), method, params.clone()).await;
+        let expected = json!({"code": -32602, "message": format!("invalid params: {message}")});
+        let text = answer.to_string();
+        if answer["error"] != expected {
+            faults.push(format!(
+                "{method} {params}: expected the error {expected}, got {answer}"
+            ));
+        } else if text.contains(CALLER_VALUE) || text.contains("70421") {
+            faults.push(format!(
+                "{method} {params}: the answer carries a value of the request: {answer}"
+            ));
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+    drop(app);
+    runtime.shutdown().await;
+}
+
 #[test]
 fn a_star_rule_grants_the_new_decision_actions() {
     for action in ["decisions.view", "decisions.decide", "decisions.admin"] {

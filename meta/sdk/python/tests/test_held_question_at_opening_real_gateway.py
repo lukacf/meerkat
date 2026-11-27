@@ -13,15 +13,22 @@ notice names it reads the set (:meth:`MobHandle.gating_questions`; a set's
 (:meth:`MobHandle.gating_answer`). The set then leaves the open sets and its
 decision is no longer open. Its launch names a roster (one long-term agent
 that is never sent anything): a gateway serves and lists the questions of
-its agents only for a launch with a roster. On a launch without one, as the
-first row's, the notice still arrives and ``decisions_list`` returns the
-decision, but ``gating_questions`` returns no set.
+its agents only for a launch with a roster.
 
-The two rows run in the order of this file, and the second one ends the set:
-a seeded directory serves ONE run of this file. The second row leaves a
+A row between the two pins what a launch WITHOUT a roster does with that
+same set, as the gateway is today: the notice still arrives, and it is
+genuine (the decision is open in the store and ``decisions_list`` returns
+it), but the set is not a readable question there:
+:meth:`MobHandle.gating_questions` returns no set, and
+:meth:`MobHandle.gating_answer` with the noticed id is refused as an id
+that is not pending (``RpcError``, ``-32602``, no typed refusal) and
+decides nothing.
+
+The rows run in the order of this file, and the last one ends the set:
+a seeded directory serves ONE run of this file. The last row leaves a
 marker file beside the directory (the directory's name with the suffix
-``.sdk-held-question-answered``), and both rows refuse a directory that has
-one. The TypeScript SDK has the same two rows
+``.sdk-held-question-answered``), and every row refuses a directory that
+has one. The TypeScript SDK has the same rows
 (``sdk/typescript/tests/held-question-at-opening-real-gateway.test.ts``);
 they need a seeded directory of their own.
 
@@ -101,6 +108,7 @@ from typing import Any
 import pytest
 
 from meerkat_meta.builder import Meta
+from meerkat_meta.errors import RpcError
 from meerkat_meta.identity_first_models import DurableAgentSpec
 from meerkat_meta.runtime import MetaRuntime
 from meerkat_meta.types import GatingQuestionAnswer
@@ -119,6 +127,11 @@ _ANSWERED_MARKER_SUFFIX = ".sdk-held-question-answered"
 _ANSWERS_AS = "sdk-held-question-row"
 # The one agent of the answering row's roster. It is not the seeded asker.
 _ROSTER_AGENT = "held-question-row-agent"
+# One question of the seeded set and one of its choices, as the seed step
+# holds them: what the row without a roster names in the answer the gateway
+# refuses.
+_SEEDED_QUESTION = "q1"
+_SEEDED_CHOICE = "a"
 
 # How long the row waits for an observation it expects.
 _WAIT_SECONDS = 30.0
@@ -356,6 +369,72 @@ async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_an
             "a further notice was observed by the handler at the second list, "
             f"watched for {_QUIET_SECONDS:g} s after its answer: {notices}"
         )
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.skipif(
+    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
+    reason=_SKIP_REASON,
+)
+@pytest.mark.asyncio
+async def test_without_a_roster_the_noticed_question_set_is_not_read_and_not_answered(
+    tmp_path, monkeypatch
+):
+    state = _seeded_state()
+    seeded_id, note = _seed(state)
+    _only_the_allow_list_is_inherited(tmp_path, monkeypatch)
+
+    notices: list[dict[str, Any]] = []
+    # A launch without a roster, as the first row's: its gateway serves no
+    # questions, and still tells its host of the set its store holds.
+    runtime = _runtime_over(state)
+    runtime.on_decision_notice(notices.append)
+    try:
+        await _answered(runtime.connect(), "the gateway's start (connect)", note)
+        handle = runtime.mob_handle()
+
+        # The notice is genuine: it names an open decision of the store.
+        await _observed(notices, 1, "the notice of the seeded question set before any list", note)
+        noticed = notices[0]
+        assert noticed["event"] == "held", noticed
+        assert noticed["kind"] == _QUESTION_KIND, noticed
+        assert noticed["decision_id"] == seeded_id, (noticed, seeded_id)
+
+        # The questions read returns no set on this launch: the notice is not
+        # a readable question here.
+        open_sets = await _answered(
+            handle.gating_questions(), "the open question sets (gating_questions)", note
+        )
+        assert open_sets == [], open_sets
+
+        # A decide of the noticed id is not taken as the answer of a question
+        # set: it is refused as an id that is not pending, with the code of
+        # invalid params and no typed refusal of a decision. Nothing in the
+        # refusal says that the id is a question set of the store.
+        with pytest.raises(RpcError) as refused:
+            await _answered(
+                handle.gating_answer(
+                    seeded_id,
+                    approver_id=_ANSWERS_AS,
+                    presented_digest=noticed["rendering_ref"],
+                    answers=[GatingQuestionAnswer.choice(_SEEDED_QUESTION, _SEEDED_CHOICE)],
+                ),
+                "the refusal of the answer (gating_answer)",
+                note,
+            )
+        assert refused.value.code == -32602, (refused.value.code, str(refused.value))
+        assert refused.value.data is None, (refused.value.data, str(refused.value))
+
+        # Nothing was decided: the decisions list still returns the set, open.
+        listed = await _answered(
+            handle.decisions_list(), "the list after the refusal (decisions_list)", note
+        )
+        phases = {
+            row["decision_id"]: row["phase"]
+            for row in [*listed.get("decisions", []), *listed.get("statuses", [])]
+        }
+        assert phases.get(seeded_id) == "open", (listed, seeded_id)
     finally:
         await runtime.shutdown()
 

@@ -14,10 +14,15 @@
  * (`MobHandle.gatingAnswer`). The set then leaves the open sets and its
  * decision is no longer open. Its launch names a roster (one long-term
  * agent that is never sent anything): a gateway serves and lists the
- * questions of its agents only for a launch with a roster. On a launch
- * without one, as the first row's, the notice still arrives and
- * `decisionsList` returns the decision, but `gatingQuestions` returns no
- * set.
+ * questions of its agents only for a launch with a roster.
+ *
+ * A row between the two pins what a launch WITHOUT a roster does with that
+ * same set, as the gateway is today: the notice still arrives, and it is
+ * genuine (the decision is open in the store and `decisionsList` returns
+ * it), but the set is not a readable question there:
+ * `MobHandle.gatingQuestions` returns no set, and `MobHandle.gatingAnswer`
+ * with the noticed id is refused as an id that is not pending (`RpcError`,
+ * `-32602`, no typed refusal) and decides nothing.
  *
  * The pairing and its order
  * -------------------------
@@ -49,11 +54,11 @@
  *            META_SDK_HELD_QUESTION_STATE=<that directory> \
  *            npx tsx --test tests/held-question-at-opening-real-gateway.test.ts
  *
- * The two rows run in the order of this file, and the second one ends the
- * set: a seeded directory serves ONE run of this file. The second row leaves
- * a marker file beside the directory (the directory's name with the suffix
- * `.sdk-held-question-answered`), and both rows refuse a directory that has
- * one. The Python SDK has the same two rows
+ * The rows run in the order of this file, and the last one ends the set: a
+ * seeded directory serves ONE run of this file. The last row leaves a
+ * marker file beside the directory (the directory's name with the suffix
+ * `.sdk-held-question-answered`), and every row refuses a directory that
+ * has one. The Python SDK has the same rows
  * (`sdk/python/tests/test_held_question_at_opening_real_gateway.py`); they
  * need a seeded directory of their own.
  *
@@ -107,7 +112,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 
-import { Meta } from "../src/index.js";
+import { Meta, RpcError } from "../src/index.js";
 import type { MetaRuntime, RosterProvider } from "../src/index.js";
 
 const gatewayBin = (process.env.META_RPC_GATEWAY_BIN ?? "").trim();
@@ -124,6 +129,11 @@ const ANSWERED_MARKER_SUFFIX = ".sdk-held-question-answered";
 const ANSWERS_AS = "sdk-held-question-row";
 // The one agent of the answering row's roster. It is not the seeded asker.
 const ROSTER_AGENT = "held-question-row-agent";
+// One question of the seeded set and one of its choices, as the seed step
+// holds them: what the row without a roster names in the answer the gateway
+// refuses.
+const SEEDED_QUESTION = "q1";
+const SEEDED_CHOICE = "a";
 
 // How long a row waits for an observation it expects.
 const WAIT_MS = 30_000;
@@ -405,6 +415,73 @@ describe("a question set pending before the gateway starts", { skip }, () => {
         "a further notice was observed by the handler at the second list, " +
           `watched for ${QUIET_MS / 1000} s after its answer: ${JSON.stringify(notices)}`,
       );
+    });
+  });
+
+  it("is not read and not answered on a launch without a roster", async () => {
+    const state = seededDirectory();
+    const { seededId, note } = seedOf(state);
+    // A launch without a roster, as the first row's: its gateway serves no
+    // questions, and still tells its host of the set its store holds.
+    await withGatewayOver(state, note, async (runtime, notices) => {
+      const handle = runtime.mobHandle();
+
+      // The notice is genuine: it names an open decision of the store.
+      await observed(notices, 1, "the notice of the seeded question set before any list", note);
+      const noticed = notices[0];
+      assert.equal(noticed.event, "held", JSON.stringify(noticed));
+      assert.equal(noticed.kind, QUESTION_KIND, JSON.stringify(noticed));
+      assert.equal(noticed.decision_id, seededId, JSON.stringify(noticed));
+
+      // The questions read returns no set on this launch: the notice is not
+      // a readable question here.
+      const openSets = await answered(
+        handle.gatingQuestions(),
+        "the open question sets (gatingQuestions)",
+        note,
+      );
+      assert.deepEqual(openSets, [], JSON.stringify(openSets));
+
+      // A decide of the noticed id is not taken as the answer of a question
+      // set: it is refused as an id that is not pending, with the code of
+      // invalid params and no typed refusal of a decision. Nothing in the
+      // refusal says that the id is a question set of the store.
+      const refused: unknown = await answered(
+        handle
+          .gatingAnswer(seededId, {
+            approverId: ANSWERS_AS,
+            presentedDigest: String(noticed.rendering_ref),
+            answers: [
+              { questionId: SEEDED_QUESTION, answer: { kind: "choice", choiceId: SEEDED_CHOICE } },
+            ],
+          })
+          .then(
+            (result) => result,
+            (error: unknown) => error,
+          ),
+        "the refusal of the answer (gatingAnswer)",
+        note,
+      );
+      assert.ok(
+        refused instanceof RpcError,
+        `the answer was not refused with an RpcError: ${JSON.stringify(refused)}`,
+      );
+      assert.equal(refused.code, -32602, refused.message);
+      assert.equal(refused.data ?? null, null, JSON.stringify(refused.data));
+
+      // Nothing was decided: the decisions list still returns the set, open.
+      const listed = await answered(
+        handle.decisionsList(),
+        "the list after the refusal (decisionsList)",
+        note,
+      );
+      const rows = [
+        ...((listed.decisions as Record<string, unknown>[] | undefined) ?? []),
+        ...((listed.statuses as Record<string, unknown>[] | undefined) ?? []),
+      ];
+      const row = rows.find((one) => one.decision_id === seededId);
+      assert.ok(row, `the list after the refusal does not name ${seededId}: ${JSON.stringify(listed)}`);
+      assert.equal(row.phase, "open", JSON.stringify(row));
     });
   });
 

@@ -39,6 +39,7 @@ pub(crate) mod console;
 mod executors;
 mod ingress;
 mod owner;
+mod params_fault;
 mod stdio;
 mod wire;
 

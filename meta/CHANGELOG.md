@@ -21,20 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   same way: `invalid params: presentation.at_ms: invalid type: string,
   expected u64`, `invalid params: presentation.parts_shown[0].index: invalid
   type: null, expected u32`, `invalid params: presentation.channel_ref:
-  missing field`. Params that are no object have no path (`invalid params:
-  invalid type: string, expected struct MetaDecisionDecideParams`). A fault
-  in the body of a presentation's `audience` other than a missing field is
-  placed at `presentation.audience`. Where the old message quoted the value
-  it found (`invalid type: string "..."`, `invalid value: integer ...`), the
-  new one names only its kind (`string`, `integer`, `floating point`,
-  `boolean`, `null`, `sequence`, `map`). An unknown variant or an unknown
-  field is reported without the name the request used, with the names that
-  are accepted: `invalid params: presentation.audience.kind: unknown
-  variant, expected `approver` or `reviewer``, and for an unknown field the
-  path of the object that holds it. The error code (`-32602`) is unchanged,
-  the error still carries no `data`, and the same requests are refused as
-  before. Only the message text changes, so a client that matched the old
-  text has to be updated; no SDK reads it.
+  missing field`. Params that are no object are refused with `invalid
+  params: expected an object`, and a nested object that is none in the same
+  words at its path (`invalid params: presentation: expected an object`).
+  Where the old message quoted the value it found (`invalid type: string
+  "..."`, `invalid value: integer ...`), the new one names only its kind
+  (`string`, `integer`, `floating point`, `boolean`, `null`, `sequence`,
+  `map`). An unknown field or an unknown variant is reported without the
+  name the request used, at the path of the object that holds it, with the
+  names that are accepted (``invalid params: unknown field, expected one of
+  `decision_id`, `approve`, `presented_digest`, `reason`, `attestation` ``).
+  A path is made only of the field names the verb documents and of list
+  indexes, never of a key as the request wrote it. One limit: a fault in a
+  presentation's `audience`, in its `kind` or in a field of its body, is
+  placed at `presentation.audience` and not deeper (``invalid params:
+  presentation.audience: unknown variant, expected `approver` or
+  `reviewer` ``); a field the audience lacks is still named
+  (`presentation.audience.approver_id: missing field`). The error code
+  (`-32602`) is unchanged, the error still carries no `data`, and the same
+  requests are refused as before. Only the message text changes, so a
+  client that matched the old text has to be updated; no SDK reads it.
 
 ## [0.9.19] - 2026-11-26
 

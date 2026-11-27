@@ -415,21 +415,25 @@ fn decision_verbs_answer_no_decision_store_without_persistent_state() {
 }
 
 /// A value no answer may carry: the rows below put it where a request is
-/// malformed.
+/// malformed, as a value or as a key.
 const CALLER_VALUE: &str = "caller-value-7f3a91";
+/// A number no answer may carry, and its digits.
+const CALLER_NUMBER: i64 = -70_421;
+const CALLER_DIGITS: &str = "70421";
 
 /// What is wrong with the answer to one malformed decision request, if
 /// anything: it is plain invalid params (`-32602`, a message, no `data`)
-/// whose message is exactly `message`, and nothing of it carries
-/// [`CALLER_VALUE`].
+/// whose message is exactly `message`, and nothing of the whole answer
+/// carries [`CALLER_VALUE`] or [`CALLER_NUMBER`].
 fn malformed_answer_fault(answer: &Value, message: &str) -> Option<String> {
     let expected = json!({"code": -32602, "message": format!("invalid params: {message}")});
     if answer["error"] != expected {
         return Some(format!("expected the error {expected}, got {answer}"));
     }
-    answer
-        .to_string()
-        .contains(CALLER_VALUE)
+    let text = answer.to_string();
+    [CALLER_VALUE, CALLER_DIGITS]
+        .iter()
+        .any(|mark| text.contains(mark))
         .then(|| format!("the answer carries a value of the request: {answer}"))
 }
 
@@ -473,28 +477,32 @@ fn a_decide_with_a_null_presented_digest_names_the_field() {
     );
 }
 
+/// The params of a `meta/decisions/present` whose presentation is the
+/// complete one of [`host_presentation`] after `edit`.
+fn present_after(edit: fn(&mut Value)) -> Value {
+    let mut presentation = host_presentation("team:owners", "chat:owners", "m-1", 1);
+    edit(&mut presentation);
+    json!({
+        "decision_id": format!("decision:{}", "0".repeat(64)),
+        "presentation": presentation,
+    })
+}
+
 /// A malformed presentation is refused with the path of the field at fault
-/// inside it: a mistyped field, a missing one, an element of a list, and
-/// the audience's kind and body.
+/// inside it: a mistyped field, a missing one, an element of a list, a
+/// field of a nested object, and a field the presentation does not have,
+/// whose name is not repeated.
 #[test]
 fn a_malformed_presentation_names_the_nested_field() {
-    let present = |edit: fn(&mut Value)| {
-        let mut presentation = host_presentation("team:owners", "chat:owners", "m-1", 1);
-        edit(&mut presentation);
-        json!({
-            "decision_id": format!("decision:{}", "0".repeat(64)),
-            "presentation": presentation,
-        })
-    };
     assert_malformed_requests_name_their_fault(vec![
         (
             "meta/decisions/present",
-            present(|presentation| presentation["at_ms"] = json!(CALLER_VALUE)),
+            present_after(|presentation| presentation["at_ms"] = json!(CALLER_VALUE)),
             "presentation.at_ms: invalid type: string, expected u64",
         ),
         (
             "meta/decisions/present",
-            present(|presentation| {
+            present_after(|presentation| {
                 presentation
                     .as_object_mut()
                     .expect("presentation")
@@ -504,33 +512,63 @@ fn a_malformed_presentation_names_the_nested_field() {
         ),
         (
             "meta/decisions/present",
-            present(|presentation| presentation["parts_shown"][0]["index"] = Value::Null),
+            present_after(|presentation| presentation["parts_shown"][0]["index"] = Value::Null),
             "presentation.parts_shown[0].index: invalid type: null, expected u32",
         ),
         (
             "meta/decisions/present",
-            present(|presentation| presentation["audience"]["kind"] = json!(CALLER_VALUE)),
-            "presentation.audience.kind: unknown variant, expected `approver` or `reviewer`",
+            present_after(|presentation| {
+                presentation["link"] = json!({"reference": CALLER_VALUE, "served_digest": 7});
+            }),
+            "presentation.link.served_digest: invalid type: integer, expected a string",
         ),
         (
             "meta/decisions/present",
-            present(|presentation| presentation["audience"] = json!({"kind": "approver"})),
+            present_after(|presentation| presentation[CALLER_VALUE] = json!(CALLER_VALUE)),
+            "presentation: unknown field, expected one of `audience`, `subject_digest`, \
+             `max_part_bytes`, `parts_shown`, `link`, `channel_ref`, `message_ref`, `at_ms`",
+        ),
+    ]);
+}
+
+/// The known limit of the place: a presentation's audience is read from a
+/// buffer, so a fault in its kind or in a field of its body is placed at
+/// `presentation.audience`, not deeper. A field the audience lacks is still
+/// named.
+#[test]
+fn a_fault_inside_a_presentations_audience_is_placed_at_the_audience() {
+    assert_malformed_requests_name_their_fault(vec![
+        (
+            "meta/decisions/present",
+            present_after(|presentation| presentation["audience"]["kind"] = json!(CALLER_VALUE)),
+            "presentation.audience: unknown variant, expected `approver` or `reviewer`",
+        ),
+        (
+            "meta/decisions/present",
+            present_after(|presentation| {
+                presentation["audience"]["approver_id"] = json!(CALLER_NUMBER);
+            }),
+            "presentation.audience: invalid type: integer, expected a string",
+        ),
+        (
+            "meta/decisions/present",
+            present_after(|presentation| presentation["audience"] = json!({"kind": "approver"})),
             "presentation.audience.approver_id: missing field",
         ),
         (
             "meta/decisions/present",
-            present(|presentation| {
-                presentation["link"] = json!({"reference": CALLER_VALUE, "served_digest": 7});
+            present_after(|presentation| {
+                presentation["audience"] = json!({"approver_id": CALLER_VALUE});
             }),
-            "presentation.link.served_digest: invalid type: integer, expected a string",
+            "presentation.audience.kind: missing field",
         ),
     ]);
 }
 
 /// Each of the six decision verbs refuses malformed params with the place
-/// of the fault and what was expected there, and never with a value of the
-/// request: not a mistyped value, not an unknown field's name, not params
-/// that are no object.
+/// of the fault and what was expected there, and never with anything the
+/// request sent: not a mistyped value, not a number out of range, not an
+/// unknown field's name, not params that are no object.
 #[test]
 fn a_malformed_decision_request_names_its_place_and_never_its_values() {
     let absent = format!("decision:{}", "0".repeat(64));
@@ -547,13 +585,13 @@ fn a_malformed_decision_request_names_its_place_and_never_its_values() {
         ),
         (
             "meta/decisions/rendering",
-            json!({"decision_id": absent, "max_part_bytes": -70421}),
+            json!({"decision_id": absent, "max_part_bytes": CALLER_NUMBER}),
             "max_part_bytes: invalid value: integer, expected u32",
         ),
         (
             "meta/decisions/present",
             json!({"decision_id": absent, "presentation": CALLER_VALUE}),
-            "presentation: invalid type: string, expected struct DecisionPresentationRequest",
+            "presentation: expected an object",
         ),
         (
             "meta/decisions/withdraw",
@@ -595,7 +633,12 @@ fn a_malformed_decision_request_names_its_place_and_never_its_values() {
         (
             "meta/decisions/decide",
             json!(CALLER_VALUE),
-            "invalid type: string, expected struct MetaDecisionDecideParams",
+            "expected an object",
+        ),
+        (
+            "meta/decisions/withdraw",
+            json!(CALLER_NUMBER),
+            "expected an object",
         ),
     ]);
 }

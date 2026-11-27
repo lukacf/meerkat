@@ -1,5 +1,5 @@
-//! What is wrong with a decision request's params, said without the
-//! request's values.
+//! What is wrong with a decision request's params, said without anything
+//! the request sent.
 //!
 //! `serde_json` decides whether the params of a decision verb are read
 //! (`parse` in `stdio.rs`). Its own message for a refusal names no field and
@@ -11,16 +11,25 @@
 //! found, the name of an unknown field or variant, or a message of the
 //! reading type's own.
 //!
-//! The place is the request's own keys and indexes down to the value at
-//! fault. The params of the decision verbs are structs all the way down, and
-//! a struct reads a value only under a key it knows, so the place names
-//! fields. Where serde buffers an object before it reads it (the body of an
-//! internally tagged enum), a fault inside is placed at that object.
+//! The place is a path of steps from the params to the value at fault
+//! ([`Place`]), and no step is a key of the request: a step is a field or a
+//! variant the reading type declares, an index, or `*` for an entry under a
+//! key that is none of those. Where serde reads an object into a buffer
+//! before it reads it (the body of an internally tagged enum), a fault
+//! inside is placed at that object.
 //!
 //! The second read decides nothing: which requests are refused stays
 //! `serde_json`'s. It reads a value as `serde_json` reads it, so that it
 //! finds the fault `serde_json` found, except for a type the decision verbs
-//! do not use: a `serde_json::value::RawValue` is not read.
+//! do not use: a `serde_json::value::RawValue` is not read. A second read
+//! that finds no fault, or fails in a way of its own, names none: the
+//! message is then the plain `invalid params`.
+//!
+//! The read touches nothing but the params it is given. It walks the value
+//! `serde_json` walked, no deeper, and builds what `serde_json` built up to
+//! the fault. The message is the place and one fault in fixed words: its
+//! length is bounded by the reading type (its names, its nesting, and the
+//! digits of an index or a length), not by the request.
 
 use std::fmt;
 
@@ -30,17 +39,42 @@ use serde::de::{
     Unexpected, Visitor,
 };
 use serde::forward_to_deserialize_any;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// The invalid params message for `params`, which did not read as `T`.
 pub(super) fn message<T: DeserializeOwned>(params: &Value) -> String {
-    match T::deserialize(Read {
+    let read = T::deserialize(Read {
         value: params,
-        path: "",
-    }) {
-        Err(fault) => format!("invalid params: {fault}"),
-        // The second read found nothing to name: say only what was refused.
-        Ok(_) => "invalid params".to_owned(),
+        place: &Place::Params,
+    });
+    match read {
+        Err(fault) if !fault.of_the_read => {
+            format!("invalid params: {}", fault.at(&Place::Params))
+        }
+        // The second read found nothing to name, or failed by itself: say
+        // only what was refused.
+        _ => "invalid params".to_owned(),
+    }
+}
+
+/// Where a value lies in the params: the params themselves, or one step
+/// below another place. A named step is a field or a variant the reading
+/// type declares, or `*`; it is never a key as the request wrote it.
+#[derive(Clone, Copy)]
+enum Place<'p> {
+    Params,
+    Entry(&'p Place<'p>, &'static str),
+    Item(&'p Place<'p>, usize),
+}
+
+impl fmt::Display for Place<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Place::Params => Ok(()),
+            Place::Entry(Place::Params, name) => formatter.write_str(name),
+            Place::Entry(parent, name) => write!(formatter, "{parent}.{name}"),
+            Place::Item(parent, index) => write!(formatter, "{parent}[{index}]"),
+        }
     }
 }
 
@@ -54,6 +88,8 @@ pub(super) struct Fault {
     /// The field of that value the fault is about: one it lacks or repeats.
     field: Option<&'static str>,
     what: String,
+    /// The second read failed by itself: nothing of this fault is said.
+    of_the_read: bool,
 }
 
 impl Fault {
@@ -62,20 +98,27 @@ impl Fault {
             path: None,
             field: None,
             what,
+            of_the_read: false,
         }
     }
 
     fn of_field(field: &'static str, what: &str) -> Self {
         Self {
-            path: None,
             field: Some(field),
-            what: what.to_owned(),
+            ..Self::new(what.to_owned())
         }
     }
 
-    /// This fault, at `path` unless a deeper level placed it already.
-    fn at(mut self, path: &str) -> Self {
-        self.path.get_or_insert_with(|| path.to_owned());
+    fn of_the_read() -> Self {
+        Self {
+            of_the_read: true,
+            ..Self::new(String::new())
+        }
+    }
+
+    /// This fault, at `place` unless a deeper level placed it already.
+    fn at(mut self, place: &Place<'_>) -> Self {
+        self.path.get_or_insert_with(|| place.to_string());
         self
     }
 }
@@ -159,6 +202,19 @@ fn kind(found: Unexpected<'_>) -> &'static str {
     }
 }
 
+/// The kind of a value of the params, in the words of [`kind`].
+fn shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_f64() => "floating point",
+        Value::Number(_) => "integer",
+        Value::String(_) => "string",
+        Value::Array(_) => "sequence",
+        Value::Object(_) => "map",
+    }
+}
+
 /// The names a reading type accepts, in serde's words.
 fn one_of(names: &'static [&'static str], none: &str) -> String {
     match names {
@@ -169,18 +225,52 @@ fn one_of(names: &'static [&'static str], none: &str) -> String {
     }
 }
 
-/// One value of the params, read where it lies, and its path from them.
+/// How the entries of an object are stepped to.
+#[derive(Clone, Copy)]
+enum Keys {
+    /// The fields of a struct or the variants of an enum: an entry is named
+    /// when its key is one of them, and is `*` otherwise.
+    Declared(&'static [&'static str]),
+    /// A map keyed by the request: every entry is `*`.
+    Free,
+    /// An object read with no type known for it, as serde reads one into a
+    /// buffer: a fault in an entry is placed at the object.
+    Unread,
+}
+
+/// One value of the params, read where it lies, and its place in them.
 struct Read<'p, 'de> {
     value: &'de Value,
-    path: &'p str,
+    place: &'p Place<'p>,
 }
 
 impl<'p, 'de> Read<'p, 'de> {
-    fn entries(&self, entries: &'de serde_json::Map<String, Value>) -> Entries<'p, 'de> {
+    fn entries(&self, entries: &'de Map<String, Value>, keys: Keys) -> Entries<'p, 'de> {
         Entries {
-            path: self.path,
+            place: self.place,
+            keys,
             entries: entries.iter(),
             pending: None,
+        }
+    }
+
+    /// The visitor's reading of an object. One it left entries of is
+    /// refused in `serde_json`'s words for it.
+    fn object<V: Visitor<'de>>(
+        &self,
+        entries: &'de Map<String, Value>,
+        keys: Keys,
+        visitor: V,
+    ) -> Result<V::Value, Fault> {
+        let mut rest = self.entries(entries, keys);
+        let read = visitor.visit_map(&mut rest)?;
+        if rest.entries.len() == 0 {
+            Ok(read)
+        } else {
+            Err(de::Error::invalid_length(
+                entries.len(),
+                &"fewer elements in map",
+            ))
         }
     }
 }
@@ -196,14 +286,14 @@ impl<'de> Deserializer<'de> for Read<'_, 'de> {
                 (Some(value), _, _) => visitor.visit_u64(value),
                 (None, Some(value), _) => visitor.visit_i64(value),
                 (None, None, Some(value)) => visitor.visit_f64(value),
-                (None, None, None) => Err(de::Error::custom("a number of no kind")),
+                (None, None, None) => Err(Fault::of_the_read()),
             },
             Value::String(value) => visitor.visit_borrowed_str(value),
-            // An array or an object the visitor left elements of is refused
-            // in `serde_json`'s words for it.
+            // An array the visitor left elements of is refused in
+            // `serde_json`'s words for it.
             Value::Array(items) => {
                 let mut rest = Items {
-                    path: self.path,
+                    place: self.place,
                     items: items.iter().enumerate(),
                 };
                 let read = visitor.visit_seq(&mut rest)?;
@@ -216,18 +306,7 @@ impl<'de> Deserializer<'de> for Read<'_, 'de> {
                     ))
                 }
             }
-            Value::Object(entries) => {
-                let mut rest = self.entries(entries);
-                let read = visitor.visit_map(&mut rest)?;
-                if rest.entries.len() == 0 {
-                    Ok(read)
-                } else {
-                    Err(de::Error::invalid_length(
-                        entries.len(),
-                        &"fewer elements in map",
-                    ))
-                }
-            }
+            Value::Object(entries) => self.object(entries, Keys::Unread, visitor),
         }
     }
 
@@ -246,19 +325,49 @@ impl<'de> Deserializer<'de> for Read<'_, 'de> {
         visitor.visit_newtype_struct(self)
     }
 
-    /// A variant is its name, or an object of the one entry that names it.
+    /// A struct is an object of its fields, or an array of them in order.
+    /// Anything else is refused without the struct's Rust name.
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Fault> {
+        match self.value {
+            Value::Object(entries) => self.object(entries, Keys::Declared(fields), visitor),
+            Value::Array(_) => self.deserialize_any(visitor),
+            _ => Err(Fault::new("expected an object".to_owned())),
+        }
+    }
+
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Fault> {
+        match self.value {
+            Value::Object(entries) => self.object(entries, Keys::Free, visitor),
+            _ => self.deserialize_any(visitor),
+        }
+    }
+
+    /// A variant is its name, or an object of the one entry that names it;
+    /// anything else is refused in `serde_json`'s words for it.
     fn deserialize_enum<V: Visitor<'de>>(
         self,
         _name: &'static str,
-        _variants: &'static [&'static str],
+        variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Fault> {
         match self.value {
             Value::String(variant) => visitor.visit_enum(BorrowedStrDeserializer::new(variant)),
-            Value::Object(entries) if entries.len() == 1 => {
-                visitor.visit_enum(MapAccessDeserializer::new(self.entries(entries)))
-            }
-            _ => self.deserialize_any(visitor),
+            Value::Object(entries) if entries.len() == 1 => visitor.visit_enum(
+                MapAccessDeserializer::new(self.entries(entries, Keys::Declared(variants))),
+            ),
+            Value::Object(_) => Err(de::Error::invalid_value(
+                Unexpected::Map,
+                &"map with a single key",
+            )),
+            other => Err(Fault::new(format!(
+                "invalid type: {}, expected string or map",
+                shape(other)
+            ))),
         }
     }
 
@@ -279,28 +388,16 @@ impl<'de> Deserializer<'de> for Read<'_, 'de> {
 
     forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf unit unit_struct seq tuple tuple_struct map struct
-        ignored_any
-    }
-}
-
-/// The kind of a value of the params, in the words of [`kind`].
-fn shape(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_f64() => "floating point",
-        Value::Number(_) => "integer",
-        Value::String(_) => "string",
-        Value::Array(_) => "sequence",
-        Value::Object(_) => "map",
+        bytes byte_buf unit unit_struct seq tuple tuple_struct ignored_any
     }
 }
 
 /// The entries of one object of the params. A fault in a value is placed at
-/// its key's path; a fault in a key is left to the object's own place.
+/// the step [`Keys`] gives its entry; a fault in a key is left to the
+/// object's own place.
 struct Entries<'p, 'de> {
-    path: &'p str,
+    place: &'p Place<'p>,
+    keys: Keys,
     entries: serde_json::map::Iter<'de>,
     /// The entry whose key was read last, until its value is read.
     pending: Option<(&'de str, &'de Value)>,
@@ -323,21 +420,31 @@ impl<'de> MapAccess<'de> for Entries<'_, 'de> {
 
     fn next_value_seed<S: DeserializeSeed<'de>>(&mut self, seed: S) -> Result<S::Value, Fault> {
         let Some((key, value)) = self.pending.take() else {
-            return Err(de::Error::custom("a value is read after its key"));
+            return Err(Fault::of_the_read());
         };
-        let path = if self.path.is_empty() {
-            key.to_owned()
-        } else {
-            format!("{}.{key}", self.path)
+        let step = match self.keys {
+            Keys::Declared(names) => Some(
+                names
+                    .iter()
+                    .copied()
+                    .find(|name| *name == key)
+                    .unwrap_or("*"),
+            ),
+            Keys::Free => Some("*"),
+            Keys::Unread => None,
         };
-        seed.deserialize(Read { value, path: &path })
-            .map_err(|fault| fault.at(&path))
+        let place = step.map_or(*self.place, |step| Place::Entry(self.place, step));
+        seed.deserialize(Read {
+            value,
+            place: &place,
+        })
+        .map_err(|fault| fault.at(&place))
     }
 }
 
 /// The elements of one array of the params, each placed at its index.
 struct Items<'p, 'de> {
-    path: &'p str,
+    place: &'p Place<'p>,
     items: std::iter::Enumerate<std::slice::Iter<'de, Value>>,
 }
 
@@ -351,9 +458,12 @@ impl<'de> SeqAccess<'de> for Items<'_, 'de> {
         let Some((index, value)) = self.items.next() else {
             return Ok(None);
         };
-        let path = format!("{}[{index}]", self.path);
-        seed.deserialize(Read { value, path: &path })
-            .map(Some)
-            .map_err(|fault| fault.at(&path))
+        let place = Place::Item(self.place, index);
+        seed.deserialize(Read {
+            value,
+            place: &place,
+        })
+        .map(Some)
+        .map_err(|fault| fault.at(&place))
     }
 }

@@ -9,7 +9,11 @@
   `MobHandle.decisionsList` call: once when the gateway's runtime opens the
   decision, or once when the connection starts for a decision already open.
   A question set a member asked (`kind` `ask_user.questions`) arrives this
-  way; read it with `MobHandle.gatingQuestions`. A list still writes its
+  way; read it with `MobHandle.gatingQuestions`. That read returns it on a
+  launch with a roster only: on a launch without one a set already in the
+  store is still noticed and still listed by `decisionsList`, while
+  `gatingQuestions` returns no set and `gatingAnswer` is refused, so such
+  a notice is not a readable question. A list still writes its
   own notice, so a host with a handler that also lists is called with
   `held` twice for one decision. A `held` notice that arrives before a
   handler is registered is no longer dropped: the SDK keeps one per

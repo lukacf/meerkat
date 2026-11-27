@@ -437,6 +437,16 @@ connection. A decide called while the SDK serves a host tool callback rejects
 with `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`)
 and sends nothing: an agent's tool call never decides.
 
+A notice of `kind` `ask_user.questions` names a question set that is open in
+the store: read it with `handle.gatingQuestions()` and answer it with
+`handle.gatingAnswer()`. That works on a launch with a roster
+(`.rosterProvider(...)`): a gateway serves its agents' questions only there.
+On a launch without a roster the handler is still called for a set the store
+already holds, and `decisionsList()` returns it, but `gatingQuestions()`
+returns no set and `gatingAnswer()` rejects with `RpcError` (`-32602`: the
+`pending_id` was not found). Such a notice is genuine and is not a readable
+question: do not treat it as one.
+
 ## Member restore
 
 Every roster identity is a member of the gateway's mob from ready, and is

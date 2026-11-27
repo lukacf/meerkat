@@ -3263,6 +3263,12 @@ answers or dismisses it, with the same approver rules as above (stdio names
 `approver_id`; the HTTP console decides as the signed-in person and refuses a
 request that names one).
 
+On a launch without a roster no `pending_id` names a question set: the
+gateway serves no questions there. A decide that names the id of a question
+set such a launch's store holds (one the host was told of with a
+`meta/decisions/notice`) is refused `-32602` as a `pending_id` that was not
+found, and nothing is decided.
+
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -3461,6 +3467,14 @@ access control is enforced and lists only the sets whose asking agent the
 caller may view: a set of a member private to someone else is not listed. A
 set nobody answers leaves the list at its deadline and ends `timed_out`.
 
+A gateway serves its agents' questions only on a launch with a roster, and
+this method lists sets only there. On a launch without a roster the list is
+empty, also when the store holds an open question set that the gateway told
+the host of with a
+[`meta/decisions/notice`](#notices-on-the-stdio-gateway) and that
+`meta/decisions/list` returns. That notice is genuine: the decision is open
+in the store. It is not a readable question on that launch.
+
 ### `meta/gating/audit`
 
 Return the gating audit log (most recent entries, bounded by retention limit).
@@ -3532,6 +3546,16 @@ listed `held` while it waited for its review, and presented to the stdio
 operator at a later list.) A
 host that reads the pipe itself receives these notifications whether or not
 it lists decisions; a notification needs no answer.
+
+A notice of `kind` `ask_user.questions` says that a question set is open in
+the store. Whether the host can read and answer it depends on the launch: a
+gateway serves its agents' questions only on a launch with a roster. On a
+launch without one the notice is still written for a set the store already
+holds, and `meta/decisions/list` returns it, but
+[`meta/gating/questions`](#meta%2Fgating%2Fquestions) returns no set and
+[`meta/gating/decide`](#answering-a-question-set) refuses its id as not
+found. Such a notice is genuine and is not a readable question: a host must
+not treat it as one.
 
 ```json
 {

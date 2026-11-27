@@ -2281,6 +2281,16 @@ connection. A decide called while the SDK serves a host tool callback raises
 `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`) and
 sends nothing: an agent's tool call never decides.
 
+A notice of `kind` `ask_user.questions` names a question set that is open in
+the store: read it with `gating_questions()` and answer it with
+`gating_answer()`. That works on a launch with a roster (`.roster(...)`): a
+gateway serves its agents' questions only there. On a launch without a
+roster the handler is still called for a set the store already holds, and
+`decisions_list()` returns it, but `gating_questions()` returns no set and
+`gating_answer()` raises `RpcError` (`-32602`: the `pending_id` was not
+found). Such a notice is genuine and is not a readable question: do not
+treat it as one.
+
 ## Mobpack authoring
 
 `MobHandle` wraps the full Flow Editor authoring surface (`meta/mobpacks/*`) with snake_case typed methods — `mobpack_templates`, `mobpack_catalogs`, `mobpack_validate`, `mobpack_source`, `mobpack_export`, `mobpack_import`, `mobpack_list`, `mobpack_get`, `mobpack_create`, `mobpack_save`, `mobpack_delete`, `mobpack_undo`, `mobpack_redo`, `mobpack_apply_operation`, `mobpack_deploy_command`, and `mobpack_deploy`. The same wrappers exist on the SDK's typed JSON-RPC clients.

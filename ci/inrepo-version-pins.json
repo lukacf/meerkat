@@ -107,6 +107,12 @@
       "reason": "Each connector version's support record names the wheels its verification ran with."
     },
     {
+      "path": "docs/guides/auth.mdx",
+      "match": "^meta-gateway-0\\.9\\.18$",
+      "context": "The inspected archive was `meta-gateway-0\\.9\\.18-x86_64-unknown-linux-gnu\\.tar\\.gz`\\.",
+      "reason": "This historical authentication finding names the exact Linux x86-64 archive inspected, not a version to install."
+    },
+    {
       "path": "docs/guides/upgrading.mdx",
       "match": "^meerkat-meta==0\\.9\\.10$",
       "reason": "The upgrade notes of 0.9.10 describe the pins that release shipped with."

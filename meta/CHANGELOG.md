@@ -49,6 +49,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   requests are refused as before. Only the message text changes, so a
   client that matched the old text has to be updated; no SDK reads it.
 
+- The gateway's sentence for the refusal `authority_field_needs_approval`
+  of a change of an agent (its `detail`) says what `key` names. The `key`
+  is the first, by name, of the authority labels an agent would carry
+  after the change (on a create of several agents, of the first of them,
+  by name, that would carry one). On an update that can be a label the
+  request neither sets nor removes: when an agent carries two authority
+  labels and an update takes one of them off, `key` names the one that
+  stays. The sentence was "This label is an authority field, which only a
+  human decision sets: leave it out, or ask under a rule that requires
+  approval.", which told a caller to leave out a label it may never have
+  named. It is now "This change would give an agent a set of authority
+  labels it does not have now, which only a human decision does: `key`
+  names one of the labels that agent would carry after the change. Leave
+  authority labels out of the change, or ask under a rule that requires
+  approval." Only the text changed: the kind, its token, `key` and which
+  label it names, `retryable` and the rules that decide the refusal are as
+  they were.
+
+### Fixed
+
+- A change of an agent that waits for a person's decision answers that
+  decision when the same request is sent again under its `request_id`,
+  also after the launch's identity policy, the mob's definition or the
+  host's own check has turned against it. The request was judged again as
+  a new one before it was compared with the held one, so the retry
+  answered the new refusal (`change_denied`, `profile_unknown`,
+  `validation_refused` and so on) while `meta/identity/operation` still
+  read `pending_decision`. Now the held request answers `pending_decision`
+  with its decision, as the operation's read does. When each of the three
+  is asked is unchanged: the policy and the mob are asked again when the
+  decision is carried out, and the host's own check is asked when a change
+  is asked or planned and never when a decision is carried out. So a host
+  whose check has turned against a held change sees its refusal on a new
+  request, not on the retry and not when the change is carried out.
+
+  Answers that change under the `request_id` of a change that waits:
+
+  - A request of the held change's kind that names the same agents and
+    cannot be normalized (a profile the mob does not define, for one), or
+    for which a read failed, reads the held decision, where it was answered
+    its own refusal or the failed read. Only its change kind and the agents
+    it names are compared: its other parameters may differ from the held
+    request's, and it is still answered the held decision, not judged as a
+    new request. Nothing is held or written for it.
+  - A request of another change kind, or one that names other agents, that
+    cannot be normalized is refused `operation_reused`, where it was
+    answered its own refusal. This includes two refusals that answered the
+    held decision to any request under the id: `stale_spec` and
+    `identity_unknown` now answer it only to a request of the held kind
+    over the held agents, and `operation_reused` to any other.
+  - A request that normalizes and is not the held one is refused as before:
+    by the owner's rule, by the host's check, or `operation_reused`.
+
+  Under the `request_id` of a decision that ended without its change
+  (rejected, expired, withdrawn, or refused when it was carried out),
+  every request now answers how it ended, where one that was refused for a
+  reason of its own was answered that refusal. One case is not cured: a
+  retry that still normalizes, but to another normalized form than the one
+  held (a peer the peer rules now give under another rule, for one), is
+  still refused `operation_reused`; `meta/identity/operation` reads the
+  decision. A retry of a change that committed is unchanged, and a
+  decision that was approved and carried out is such a change. The RPC
+  reference states these limits under "Requests, operations and retries".
+
 ## [0.9.19] - 2026-11-26
 
 ### Added

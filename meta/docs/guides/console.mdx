@@ -1089,7 +1089,9 @@ through the commands `createAgent`, `updateAgent`, `archiveAgent`,
 `listAgentRecords`, `getAgentChange`, `listAgentDirectory` and
 `planAgentChange`, from the roster and from an agent's chat and details.
 Every change carries a `request_id`: the same request under the same id
-answers the same state again and writes nothing twice.
+answers the same state again and writes nothing twice (the reference states
+the limits:
+[Requests, operations and retries](/api/rpc#requests-operations-and-retries)).
 
 ### Local action feedback
 

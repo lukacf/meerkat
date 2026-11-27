@@ -1474,6 +1474,129 @@ fn authority_fields_need_a_human_decision() {
     assert_eq!(normalized.plan.kind(), ApprovalKind::Allow);
 }
 
+/// The gateway's sentence for `authority_field_needs_approval` says what
+/// its `key` names. The key is the first, by name, of the authority labels
+/// the agent would carry after the change, so on an update it can be a
+/// label the request neither sets nor removes. The sentence speaks of the
+/// agent's authority labels as the change would leave them, and never of
+/// "this label" as one to leave out. The kind, its token and its data are
+/// as they were.
+#[test]
+fn the_authority_label_refusal_says_what_its_key_names() {
+    let refusal = IdentityRefusal::new(IdentityRefusalKind::AuthorityFieldNeedsApproval {
+        key: "clearance".to_owned(),
+    });
+    assert_eq!(
+        refusal.to_refused(),
+        json!({
+            "kind": "authority_field_needs_approval",
+            "key": "clearance",
+            "retryable": false,
+            "detail": "This change would give an agent a set of authority labels it does not \
+                       have now, which only a human decision does: `key` names one of the \
+                       labels that agent would carry after the change. Leave authority \
+                       labels out of the change, or ask under a rule that requires approval.",
+        })
+    );
+}
+
+/// The case the sentence has to be true of. An agent carries two authority
+/// labels; an update takes one of them off and names no other label. The
+/// rules give a change of authority labels no human decision here, so the
+/// update is refused, and the `key` of the refusal is the label the agent
+/// would still carry: one the request never names. The sentence says so,
+/// and does not tell the caller to leave that label out.
+#[test]
+fn an_update_that_takes_one_of_two_authority_labels_off_names_the_one_it_keeps() {
+    let mut value = policy_json();
+    value["reserved_keys"]["labels"] = json!(["team", "clearance", "tier"]);
+    value["authority_fields"]["tier"] = json!({"values": ["gold"]});
+    // No rule names a change of authority labels here, so its outcome is
+    // the default, which allows: no human decision. (A rule that names that
+    // change class has to hold a human decision; the policy refuses any
+    // other.)
+    value["approval"]["rules"][2]["change"] = json!(["capability", "peers"]);
+    value["approval"]["default"] = json!({"kind": "allow"});
+    let policy = parse(&value);
+    let carried = [("clearance", "elevated"), ("tier", "gold")];
+    let entry = entry_with("assistant", &carried);
+
+    // The request as a surface writes it: it removes `tier`, and that is
+    // the only label it names.
+    let asked: UpdateAgent = serde_json::from_value(json!({
+        "name": entry.identity,
+        "expected_spec_digest": entry.spec_digest,
+        "set": {"labels_remove": ["tier"]},
+    }))
+    .expect("an update request");
+    let spec = asked
+        .to_update_spec(&policy, &labels_of(&carried))
+        .expect("the update is well formed");
+    assert_eq!(
+        spec.set.authority_fields,
+        Some(labels_of(&[("clearance", "elevated")])),
+        "the authority labels the agent would carry after the update"
+    );
+
+    let refusal = update_with(&policy, &RequesterFacts::host("gateway"), &entry, &spec)
+        .expect_err("the default's allow is no human decision");
+    assert_eq!(
+        refusal.kind,
+        IdentityRefusalKind::AuthorityFieldNeedsApproval {
+            key: "clearance".to_owned()
+        },
+        "the key is the label the agent would still carry, which the request does not name"
+    );
+    let detail = refusal.detail();
+    assert!(
+        !detail.contains("leave it out") && !detail.starts_with("This label"),
+        "the sentence does not tell the caller to leave out a label it never named: {detail}"
+    );
+    assert!(
+        detail.contains("`key` names one of the labels that agent would carry after the change"),
+        "the sentence says what the key names: {detail}"
+    );
+}
+
+/// The key on a create of several agents: the first label, by name, of the
+/// first created agent, by name, that would carry an authority label,
+/// whatever order the request lists the agents in. The sentence speaks of
+/// "an agent" and "that agent", so it reads right for one agent and for
+/// several, and tells the caller to leave authority labels out of the
+/// change.
+#[test]
+fn a_create_of_several_agents_names_a_label_of_the_first_by_name_that_carries_one() {
+    let mut value = policy_json();
+    value["reserved_keys"]["labels"] = json!(["team", "clearance", "tier"]);
+    value["authority_fields"]["tier"] = json!({"values": ["gold"]});
+    let policy = parse(&value);
+    // In the order the request lists them: `delta` carries `tier` alone,
+    // `bravo` carries both labels, `alpha` carries none.
+    let mut delta = spec("delta");
+    set_labels(&mut delta, &[("tier", "gold")]);
+    let mut bravo = spec("bravo");
+    set_labels(&mut bravo, &[("tier", "gold"), ("clearance", "elevated")]);
+    let alpha = spec("alpha");
+
+    // An agent's create gets a notice under these rules: no human decision.
+    let refusal = create(&policy, &lead(), &[delta, bravo, alpha])
+        .expect_err("a notice is no human decision");
+    assert_eq!(
+        refusal.kind,
+        IdentityRefusalKind::AuthorityFieldNeedsApproval {
+            key: "clearance".to_owned()
+        },
+        "`bravo` is the first by name that carries one, and `clearance` its first by name"
+    );
+    let detail = refusal.detail();
+    assert!(
+        detail.starts_with("This change would give an agent a set of authority labels")
+            && detail.contains("`key` names one of the labels that agent would carry")
+            && detail.contains("Leave authority labels out of the change"),
+        "the sentence reads right for a create of several agents: {detail}"
+    );
+}
+
 #[test]
 fn a_label_key_a_selector_reads_is_reserved() {
     // The host reserves no key here, yet every key a selector reads is

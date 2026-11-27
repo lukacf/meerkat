@@ -14,27 +14,35 @@ job then checks the shards' run lists together (verify).
 
 A run can have more than one attempt: a rerun of some jobs runs those jobs
 again and leaves the others as they were. A shard that is not rerun keeps the
-plan and the toolchain record of the attempt it ran in, under that attempt's
+plan and the toolchain file of the attempt it ran in, under that attempt's
 artifact names, and the newer attempt's job list repeats its result under the
 newer attempt's number, so neither a name pattern for one attempt nor the job
-list says where a shard's files are. Each shard therefore writes its own
-record beside its run list (installer-shard-identity.json: the run, the
-attempt, the tested commit, the shard, and the collection the plan was
-computed from) and again beside its toolchain record, which it writes only
-after its tests passed. The backend job collects the plans and records of
-every attempt of its run and takes, for each shard, the newest execution by
-those records. It refuses plans that are not of its run, of one tested commit
-and of one collection, a shard without a plan, and a taken plan whose own
-toolchain record is missing.
+list says where a shard's files are. Each shard therefore writes its identity
+beside its run list (installer-shard-identity.json: the run, the attempt, the
+tested commit, the shard, and the collection the plan was computed from) and
+again beside its toolchain file, which it writes only after its tests passed.
+The backend job collects the plans and toolchain files of every attempt of
+its run and takes, for each shard, the newest execution by those identities.
+It refuses plans that are not of its run, of one tested commit and of one
+collection, a shard without a plan, a taken plan without its own toolchain
+file, and any folder it is given that is not one execution's.
+
+What this script cannot see: an execution that failed before it uploaded a
+plan leaves nothing, so "newest" here is the newest execution that planned.
+If such a failed execution were a shard's newest, the script alone would take
+the older one. The workflow's job graph refuses that case, not this script:
+the backend job needs every shard job and has no condition of its own, so it
+does not run while any shard's newest result is not a success. Keep it so
+(meta/scripts/test_installer_release.py pins it).
 
 Usage: installer_shards.py SHARD COUNT FILES_OUT writes the test files this
-shard runs to FILES_OUT and its record beside it. installer_shards.py verify
+shard runs to FILES_OUT and its identity beside it. installer_shards.py verify
 COUNT PLANS fails unless the newest run lists of the COUNT shards, one folder
 per execution under PLANS, ran every installer test file once.
-installer_shards.py toolchain COUNT PLANS RECORDS prints the one toolchain the
-executions taken from PLANS recorded, one folder per execution under RECORDS.
-installer_shards.py record JUNIT... rewrites installer_shard_seconds.json from
-a complete run's junit files.
+installer_shards.py toolchain COUNT PLANS TOOLCHAINS prints the one toolchain
+the executions taken from PLANS wrote, one folder per execution under
+TOOLCHAINS. installer_shards.py record JUNIT... rewrites
+installer_shard_seconds.json from a complete run's junit files.
 """
 from __future__ import annotations
 
@@ -136,8 +144,11 @@ def record(junit_files, path=SECONDS):
 
 
 def identity(shard, shards, counts, environ=None):
-    """This shard execution's own record: where it ran and what it planned from."""
+    """This shard execution's identity: where it ran and what it planned from."""
     environ = os.environ if environ is None else environ
+    unset = [name for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA") if not environ.get(name)]
+    if unset and environ.get("GITHUB_ACTIONS") == "true":
+        raise SystemExit(f"Inside Actions without {', '.join(unset)}: this execution cannot say what it is.")
     collected = "".join(f"{name} {items}\n" for name, items in sorted(counts.items()))
     return {"run_id": environ.get("GITHUB_RUN_ID") or "local",
             "run_attempt": int(environ.get("GITHUB_RUN_ATTEMPT") or 1),
@@ -147,7 +158,7 @@ def identity(shard, shards, counts, environ=None):
 
 
 def read_identity(folder):
-    """A folder's record, or why it has none that can be used."""
+    """A folder's identity, or why it has none that can be used."""
     path = folder / IDENTITY
     if not path.is_file():
         return None, f"{folder.name} has no {IDENTITY}"
@@ -158,9 +169,32 @@ def read_identity(folder):
     if not (isinstance(value, dict)
             and set(value) == {"run_id", "run_attempt", "commit", "shard", "shards", "collection"}
             and all(type(value[key]) is int for key in ("run_attempt", "shard", "shards"))
+            and value["run_attempt"] >= 1 and value["shards"] >= 1 and value["shard"] >= 0
             and all(isinstance(value[key], str) and value[key] for key in ("run_id", "commit", "collection"))):
         return None, f"{folder.name} has an unreadable {IDENTITY}"
     return value, None
+
+
+def executions(folder, prefix, problems):
+    """Every execution folder under FOLDER with its identity. A folder is one
+    execution's when it is named PREFIX-<shard>-<attempt> as its own identity
+    says; whatever else FOLDER holds is added to PROBLEMS."""
+    entries, found = sorted(Path(folder).iterdir()), []
+    loose = [path.name for path in entries if not path.is_dir()]
+    if loose:
+        problems.append(f"{Path(folder).name} holds {', '.join(loose)} outside a folder: "
+                        "one folder per execution is expected")
+    for path in entries:
+        if not path.is_dir():
+            continue
+        value, problem = read_identity(path)
+        if problem is None and path.name != f"{prefix}-{value['shard']}-{value['run_attempt']}":
+            problem = f"{path.name} says it is shard {value['shard']} of attempt {value['run_attempt']}"
+        if problem is None:
+            found.append((path, value))
+        else:
+            problems.append(problem)
+    return found
 
 
 def select(shards, plans, environ=None):
@@ -168,21 +202,16 @@ def select(shards, plans, environ=None):
     what stops the newest ones from being one suite of this run."""
     environ = os.environ if environ is None else environ
     problems, newest, superseded = [], {}, []
-    for folder in sorted(path for path in Path(plans).iterdir() if path.is_dir()):
-        value, problem = read_identity(folder)
-        if problem is None and folder.name != f"installer-shard-plan-{value['shard']}-{value['run_attempt']}":
-            problem = f"{folder.name} says it is shard {value['shard']} of attempt {value['run_attempt']}"
-        if problem is None and not (value["shards"] == shards and 0 <= value["shard"] < shards):
-            problem = f"{folder.name} is shard {value['shard']} of {value['shards']}, not one of {shards}"
-        if problem is not None:
-            problems.append(problem)
+    for folder, value in executions(plans, "installer-shard-plan", problems):
+        if not (value["shards"] == shards and value["shard"] < shards):
+            problems.append(f"{folder.name} is shard {value['shard']} of {value['shards']}, not one of {shards}")
             continue
         held = newest.get(value["shard"])
         if held is not None and held[1]["run_attempt"] > value["run_attempt"]:
-            superseded.append(folder.name)
+            superseded.append((folder, value))
             continue
         if held is not None:
-            superseded.append(held[0].name)
+            superseded.append(held)
         newest[value["shard"]] = (folder, value)
     chosen = [newest[shard] for shard in sorted(newest)]
     if len(chosen) != shards:
@@ -199,10 +228,14 @@ def select(shards, plans, environ=None):
                                if value != most)
             problems.append(f"plans of more than one {label}: {others}; the other {len(said[most])} have {most[:12]}")
         here = environ.get(variable) if variable else None
+        if variable and not here and environ.get("GITHUB_ACTIONS") == "true":
+            # A hosted job always has both. Without one the comparison with
+            # this run would be skipped, so it is refused.
+            problems.append(f"inside Actions without {variable}: this run's {label} is unknown")
         strangers = [folder.name for folder, value in chosen if here and value[field] != here]
         if strangers:
             problems.append(f"not this run's {label} {here[:12]}: {', '.join(strangers)}")
-    return chosen, sorted(superseded), problems
+    return chosen, sorted(superseded, key=lambda held: held[0].name), problems
 
 
 def verify(shards, plans, expected_files=None, environ=None):
@@ -228,24 +261,32 @@ def verify(shards, plans, expected_files=None, environ=None):
     taken = "; ".join(f"attempt {attempt}: shard{'s' if len(mine) > 1 else ''} {', '.join(mine)}"
                       for attempt, mine in sorted(attempts.items()))
     print(f"{len(chosen)} shards ran {len(ran)} test files once. Plans taken: {taken}."
-          + (f" Not counted, superseded: {', '.join(superseded)}." if superseded else ""))
+          + (f" Not counted, superseded: {', '.join(folder.name for folder, _ in superseded)}." if superseded else ""))
 
 
-def toolchain(shards, plans, records, environ=None):
-    """Print the one toolchain the executions taken from PLANS recorded.
+def toolchain(shards, plans, toolchains, environ=None):
+    """Print the one toolchain the executions taken from PLANS wrote.
 
-    A shard records its toolchain after its tests passed, with the record of
-    the execution that planned. The record taken for a shard is the one that
-    carries the taken plan's own record; an older record of the shard is not
-    taken in its place."""
-    chosen, _, problems = select(shards, plans, environ)
+    A shard writes its toolchain file after its tests passed, with its
+    identity beside it. The file taken for a shard is the one whose identity
+    is the taken plan's; an older file of the shard is never taken in its
+    place. Every folder under TOOLCHAINS must be an execution that planned in
+    this run, taken or superseded: nothing else is passed over in silence."""
+    chosen, superseded, problems = select(shards, plans, environ)
     if problems:
         raise SystemExit("The shards' plans are not one suite of this run. " + "; ".join(problems))
+    planned = {json.dumps(value, sort_keys=True) for _, value in chosen + superseded}
     held = {}
-    for folder in sorted(path for path in Path(records).iterdir() if path.is_dir()):
-        value, problem = read_identity(folder)
-        if problem is None and (folder / TOOLCHAIN).is_file():
-            held.setdefault(json.dumps(value, sort_keys=True), []).append(folder / TOOLCHAIN)
+    for folder, value in executions(toolchains, "installer-toolchain-backend-shard", problems):
+        key = json.dumps(value, sort_keys=True)
+        if not (folder / TOOLCHAIN).is_file():
+            problems.append(f"{folder.name} has no {TOOLCHAIN}")
+        elif key not in planned:
+            problems.append(f"{folder.name} is of no plan of this run")
+        else:
+            held.setdefault(key, []).append(folder / TOOLCHAIN)
+    if problems:
+        raise SystemExit("The shards' toolchain folders are not this run's executions. " + "; ".join(problems))
     values, missing = [], []
     for _, value in chosen:
         mine = held.get(json.dumps(value, sort_keys=True), [])
@@ -254,9 +295,9 @@ def toolchain(shards, plans, records, environ=None):
         else:
             missing.append(f"shard {value['shard']} (attempt {value['run_attempt']})")
     if missing:
-        raise SystemExit(f"No one toolchain record of the execution that planned: {', '.join(missing)}. "
-                         "A shard records its toolchain only after its tests passed.")
-    if len(set(values)) != 1:
+        raise SystemExit(f"No toolchain file of the execution that planned: {', '.join(missing)}. "
+                         "A shard writes it only after its tests passed.")
+    if len(values) != shards or len(set(values)) != 1:
         raise SystemExit(f"Expected {shards} identical shard toolchains, found {len(values)} records of "
                          f"{len(set(values))} kinds.")
     print(values[0], end="")
@@ -275,9 +316,9 @@ def main(argv):
     if not 0 <= shard < shards:
         raise SystemExit(f"Shard {shard} is outside 0..{shards - 1}.")
     counts = collected_items(test_files())
-    mine = plan(weights(counts), shards)[shard]
+    mine, own = plan(weights(counts), shards)[shard], identity(shard, shards, counts)
     Path(argv[2]).write_text("".join(f"installer/tests/{name}\n" for name in mine))
-    Path(argv[2]).with_name(IDENTITY).write_text(json.dumps(identity(shard, shards, counts), sort_keys=True) + "\n")
+    Path(argv[2]).with_name(IDENTITY).write_text(json.dumps(own, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":

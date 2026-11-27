@@ -96,19 +96,42 @@ shards balanced on the test time a hosted run recorded
 (`installer/tests/installer_shard_seconds.json`), each with a 120-minute limit and
 its own 20 slowest tests. The `backend` job passes only once every shard
 has, and it checks that the shards together ran every test file once
-(`installer_shards.py verify`). After a rerun of one failed shard the other
-shards are not run again: each shard writes its own record beside its run
-list and beside its toolchain record (`installer-shard-identity.json`: the
-run, the attempt, the tested commit, the shard and the collection the plan
-was computed from), and the `backend` job takes each shard's newest execution
-across the run's attempts by those records. It refuses plans that are not of
-its run, of one tested commit and of one collection. Refresh the record from a complete run's junit
-files with `python installer/tests/installer_shards.py record installer-pytest.xml...`;
-a stale record only affects the balance, never which files run.
+(`installer_shards.py verify`). Refresh the recorded test time from a
+complete run's junit files with
+`python installer/tests/installer_shards.py record installer-pytest.xml...`;
+stale times only affect the balance, never which files run.
 No failure limit stops a run early, so every failure is reported. A run
 stopped by a job timeout is incomplete even when its earlier cases passed.
-Preserve the failure output and XML before making a correction. To run one
-shard's files as the workflow does:
+Preserve the failure output and XML before making a correction.
+
+After a rerun of one failed shard the other shards are not run again. Each
+shard therefore writes its identity beside its run list and beside its
+toolchain file (`installer-shard-identity.json`: the run, the attempt, the
+tested commit, the shard and the collection the plan was computed from), and
+the `backend` job takes each shard's newest execution across the run's
+attempts by those identities. It refuses plans that are not of its run, of
+one tested commit and of one collection, and any collected folder that is not
+one execution's. Three limits of that rule:
+
+- The script cannot see an execution that wrote nothing. A shard execution
+  that fails before it uploads its plan leaves no artifact, and with an older
+  passed execution of that shard in the run the script would take the older
+  one. The job graph refuses that case, not the script: `backend` needs every
+  shard job and has no condition of its own, so it does not run while any
+  shard's newest result is not a success. A contract test pins this
+  (`meta/scripts/test_installer_release.py`).
+- Nothing binds the packages each execution's `pip` and `npm` resolved. The
+  shards of one attempt already resolved them separately; a retry long after
+  the first attempt joins shards that may have run against different resolved
+  packages. Only the Python and Node versions and the collected item counts
+  are compared.
+- A release does not join attempts. `scripts/installer-release.py` binds a
+  dispatched run only when every backend shard planned in the attempt it
+  binds (see RELEASING.md): dispatch again, or rerun all jobs.
+
+To run one shard's files as the workflow does (the first command also writes
+`installer-shard-identity.json` beside the list; both stay in the working
+tree, untracked):
 
 ```bash
 installer/.venv/bin/python installer/tests/installer_shards.py 3 12 shard-files.txt

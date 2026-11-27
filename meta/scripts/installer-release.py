@@ -196,6 +196,32 @@ def toolchain_artifact_name(job, attempt):
     return f"installer-toolchain-{job}-{attempt}"
 
 
+SHARD_PLAN = re.compile(r"installer-shard-plan-([0-9]+)-([0-9]+)")
+
+
+def joined_attempts(artifacts, attempt):
+    """Why a Forge run's attempt is not the work of that one attempt, or None.
+
+    The installer workflow's backend job takes each backend shard's newest
+    execution across the run's attempts, so after a retry of some jobs a
+    green attempt can rest on shard executions of earlier attempts. That
+    serves a pull request's gate. A release binds one attempt: every shard
+    that planned in the run (each uploads installer-shard-plan-<shard>-<the
+    attempt it ran in>) must have planned in this attempt, which is then the
+    newest and the one the backend job took."""
+    planned = {}
+    for name in artifacts:
+        match = SHARD_PLAN.fullmatch(name)
+        if match:
+            planned.setdefault(int(match.group(1)), set()).add(int(match.group(2)))
+    if not planned:
+        return "lists no backend shard plan"
+    others = sorted(shard for shard, attempts in planned.items() if attempt not in attempts)
+    if others:
+        return f"took the plan of another attempt for backend shard {', '.join(str(shard) for shard in others)}"
+    return None
+
+
 def write_outputs(values):
     if os.environ.get("GITHUB_OUTPUT"):
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
@@ -697,10 +723,10 @@ def version_fits(observed, pattern, declared):
     return match is not None and (match.group(1) == declared or match.group(1).startswith(declared + "."))
 
 
-def run_toolchain(run_info, work):
+def run_toolchain(run_info, work, artifacts=None):
     """The versions each job of a Forge run recorded, from its toolchain artifacts."""
     run_id, attempt = run_info["id"], run_info["run_attempt"]
-    artifacts = run_artifacts(run_id)
+    artifacts = run_artifacts(run_id) if artifacts is None else artifacts
     recorded = {}
     for job in EVIDENCE_JOBS:
         name = toolchain_artifact_name(job, attempt)
@@ -754,7 +780,7 @@ def forge_ci_evidence(sha, work, objects=None):
         runs = [run for run in rc.api(endpoint)["workflow_runs"] if run.get("event") == "workflow_dispatch"
                 and run.get("path") == INSTALLER_CI and run.get("status") == "completed"
                 and run.get("conclusion") == "success" and run["repository"]["full_name"] == rc.repository()]
-        nearest = None
+        nearest = joined = None
         for run in sorted(runs, key=lambda run: (run["head_sha"] != sha, -run["id"])):
             observed = evidence_tuple(objects, rc.digest(run["head_sha"], "Forge run SHA", 40))
             differences = tuple_differences(wanted, observed)
@@ -763,12 +789,18 @@ def forge_ci_evidence(sha, work, objects=None):
                 continue
             if not run_jobs_green(run["id"], run["run_attempt"]):
                 continue
-            toolchain = run_toolchain(run, folder)
+            artifacts = run_artifacts(run["id"])
+            reason = joined_attempts(artifacts, run["run_attempt"])
+            if reason:
+                joined = joined or f"run {run['id']} attempt {run['run_attempt']} {reason}"
+                continue
+            toolchain = run_toolchain(run, folder, artifacts)
             if toolchain is None or not toolchain_fits(declared, toolchain):
                 continue
             return {"run_id": run["id"], "run_attempt": run["run_attempt"], "head_sha": run["head_sha"],
                     "event": run["event"], "tuple": wanted, "toolchain": {"declared": declared, **toolchain}}
         detail = (f"; the newest green run {nearest[0]} differs in {', '.join(nearest[1])}" if nearest else "")
+        detail += f"; {joined}, and a release binds the work of one attempt" if joined else ""
         raise Miss(f"none of {len(runs)} listed green dispatched run(s) tested these Forge inputs",
                    f"no green dispatched Forge run (backend and frontend) tested the Forge inputs at "
                    f"{sha}{detail}. "

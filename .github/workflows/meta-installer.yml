@@ -238,7 +238,7 @@ jobs:
       - name: Select this shard's test files
         run: python installer/tests/installer_shards.py ${{ matrix.shard }} 12 installer-shard-files.txt
       # The backend job checks these lists of every shard together. Beside
-      # the list is this execution's own record (installer-shard-identity.json:
+      # the list is this execution's identity (installer-shard-identity.json:
       # the run, the attempt, the tested commit, the shard and the collection
       # the plan was computed from), which says where the list belongs.
       - name: Retain this shard's plan
@@ -252,9 +252,9 @@ jobs:
       # Every failure is reported: no failure limit stops a shard early.
       - name: Backend regression tests
         run: python -m pytest -vv --tb=short --durations=20 --junitxml=installer-pytest.xml $(cat installer-shard-files.txt)
-      # The backend job binds the versions every shard recorded. This step
-      # runs only after the tests passed, and the record goes up with the
-      # execution's own record: the backend job takes a shard's toolchain
+      # The backend job binds the versions every shard wrote. This step runs
+      # only after the tests passed, and the toolchain file goes up with the
+      # execution's identity: the backend job takes a shard's toolchain
       # from the execution whose plan it took.
       - name: Record the toolchain
         run: |
@@ -276,6 +276,14 @@ jobs:
           path: meta/installer-pytest.xml
           if-no-files-found: ignore
 
+  # This job relies on the two lines below it, `needs` with every shard job
+  # and no `if:`. A shard execution that fails before it uploads a plan
+  # leaves nothing behind, so installer_shards.py cannot see it and would
+  # take an older passed execution of that shard. The job graph is what
+  # refuses that case: this job does not run while any shard's newest
+  # result is not a success. Do not give it a condition, do not drop a shard
+  # from `needs`, and do not let a shard step continue on error
+  # (meta/scripts/test_installer_release.py pins all three).
   backend:
     needs: [backend-shard, agent-team-live]
     runs-on: ubuntu-24.04
@@ -285,11 +293,14 @@ jobs:
         with:
           persist-credentials: false
       # A rerun of some jobs gives the run a new attempt and leaves a shard
-      # that is not rerun as it was: its plan and its toolchain record stay
-      # under the attempt it ran in. So the plans and records of every
+      # that is not rerun as it was: its plan and its toolchain file stay
+      # under the attempt it ran in. So the plans and toolchain files of every
       # attempt of this run are collected, and the script takes each shard's
-      # newest execution by the record each one carries. It refuses plans
-      # that are not of this run, of one tested commit and of one collection.
+      # newest execution by the identity each one carries. It refuses plans
+      # that are not of this run, of one tested commit and of one collection,
+      # and any folder that is not one execution's. A release does not join
+      # attempts: installer-release.py binds a run only when every shard
+      # planned in the attempt it binds.
       - name: Collect the shards' plans
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -305,8 +316,9 @@ jobs:
           pattern: installer-toolchain-backend-shard-*
           path: meta/shards
       # installer-release.py binds a reused run to the versions it ran with; every
-      # shard execution taken above must have recorded the same ones. A shard
-      # records them only after its tests passed.
+      # shard execution taken above must have written the same ones, and a
+      # shard writes them only after its tests passed. Every folder collected
+      # here must be an execution that planned in this run.
       - name: Record the toolchain
         run: python3 installer/tests/installer_shards.py toolchain 12 plans shards > installer-toolchain.json
       - name: Retain the toolchain

@@ -105,7 +105,11 @@ and it records the one toolchain all shards recorded.
 Evidence and packages are matched to one run attempt. A rerun of only the
 failed jobs leaves the other jobs' records under the earlier attempt, so it
 is not complete evidence, for a `meta-installer.yml` run or for a candidate. Dispatch
-a fresh run, or rerun all jobs, when the run must count. Publication checks
+a fresh run, or rerun all jobs, when the run must count. The `backend` job
+itself can pass after such a rerun, because for a pull request's gate it
+takes each backend shard's newest execution across the run's attempts; a
+candidate still refuses that run unless every backend shard planned in the
+attempt it binds. Publication checks
 the bound run again on the attempt the candidate bound, so a later rerun of
 that run changes nothing it reads; a candidate that should use the newer
 attempt is a new candidate.

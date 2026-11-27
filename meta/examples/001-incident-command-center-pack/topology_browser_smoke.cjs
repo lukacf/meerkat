@@ -5,6 +5,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { chromium } = require("playwright");
 
+// The deliveries scenario.yaml seeds, by their idempotency keys, and the
+// adapter the pack's fixture binary (mcp_fixture) names in its answer to
+// delivery.send when nothing overrides it.
+const SEEDED_DELIVERY_KEYS = ["incident-seed-statuspage", "incident-seed-major-accounts"];
+const FIXTURE_DELIVERY_ADAPTER = "smtp-mock";
+
 async function rpc(baseUrl, method, params = {}) {
   const response = await fetch(new URL("/console/rpc", baseUrl), {
     method: "POST",
@@ -156,6 +162,31 @@ async function main() {
   }
   assert.equal(capabilities.topology_control?.mode, "editable");
   assert.equal(capabilities.topology_control?.can_bulk, false);
+
+  // The pack's router and delivery modules are both the fixture binary, run
+  // by the server as an MCP server. At its start the server seeds two
+  // deliveries: the router module resolves each one's route and the delivery
+  // module dispatches it, and the record keeps the adapter that module's
+  // answer names. So a seeded delivery with the fixture's adapter is in the
+  // history only when the fixture binary this server was given was run and
+  // answered. A server that only listens and serves the console document
+  // has none: this is checked before the browser starts.
+  const deliveryHistory = await rpc(baseUrl, "meta/delivery/history", { limit: 50 });
+  for (const idempotencyKey of SEEDED_DELIVERY_KEYS) {
+    const record = (deliveryHistory.deliveries ?? []).find(
+      (delivery) => delivery.idempotency_key === idempotencyKey,
+    );
+    assert.ok(
+      record,
+      `seeded delivery ${idempotencyKey} is not in the delivery history: the fixture's modules did not serve it: ${JSON.stringify(deliveryHistory)}`,
+    );
+    assert.equal(
+      record.sink_adapter,
+      FIXTURE_DELIVERY_ADAPTER,
+      `seeded delivery ${idempotencyKey} does not carry the fixture's adapter: ${JSON.stringify(record)}`,
+    );
+  }
+
   const initialTopology = await rpc(baseUrl, "meta/topology/query");
   const commanderEndpointId = stockEndpointId(initialTopology, "incident-commander");
 

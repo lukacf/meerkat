@@ -61,15 +61,18 @@ name: Meta CI
 #                              cases (a pull request also runs the gateway
 #                              binaries' voice cases)
 #   rust-voice-lib           - pull requests: that feature's lib voice cases
-#   console-backends         - the five acceptance backends, built once for
-#                              the console and console-browser jobs
+#   console-backends         - the five acceptance backends and the incident
+#                              pack's two binaries, built once for the
+#                              console, console-browser and
+#                              console-acceptance jobs
 #   console                  - console contracts and the API, voice, memory
 #                              and workgraph suites
 #   console-browser (x7)     - the browser scenarios, --shard=i/6, and the
 #                              native MCP Apps checks in a leg of their own
 #   console-fixtures         - the customization fixtures and the acceptance
 #                              fixture's own tests
-#   console-acceptance       - the stock incident topology acceptance
+#   console-acceptance       - the stock incident topology acceptance, on
+#                              the two binaries console-backends built
 #   console-perf             - composer typing in a real browser (no Rust)
 #   flow-editor-contracts    - the flow editor's source, projection and
 #                              visual contracts (no Rust)
@@ -1893,6 +1896,12 @@ jobs:
   # as one archive (example-backend.cjs runs META_EXAMPLE_BIN_DIR's binaries
   # and never falls back to cargo). Each browser leg built them itself
   # before: 393 s of a 14.3-minute leg (run 38776842877).
+  # The same one compile also builds the incident pack's two binaries (the
+  # example incident_command_center and the bin mcp_fixture: the same
+  # package, profile and features) for console-acceptance, which compiled the
+  # same library a second time. That job checks the two files it unpacks
+  # against the digests this job publishes as outputs, so it runs the bytes
+  # this run built.
   console-backends:
     name: console-backends
     needs: changes
@@ -1904,6 +1913,9 @@ jobs:
       id-token: write
     env:
       RUSTC_WRAPPER: sccache
+    outputs:
+      incident_command_center_sha256: ${{ steps.incident_digests.outputs.incident_command_center }}
+      mcp_fixture_sha256: ${{ steps.incident_digests.outputs.mcp_fixture }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -1942,7 +1954,7 @@ jobs:
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
       - name: Build console acceptance backends
         working-directory: .
-        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture --timings
+        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture --example incident_command_center --bin mcp_fixture --timings
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -1954,7 +1966,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
-          INSTR_SELECTION: "meerkat-meta examples library_mode_reference, console_acceptance_fixture, memory_console_reference, workgraph_console_reference, mcp_apps_gateway_fixture, default features"
+          INSTR_SELECTION: "meerkat-meta examples library_mode_reference, console_acceptance_fixture, memory_console_reference, workgraph_console_reference, mcp_apps_gateway_fixture, incident_command_center, bin mcp_fixture, default features"
           INSTR_PACKAGE: meerkat-meta
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
@@ -2187,9 +2199,20 @@ jobs:
                   say(f"unknown (a part of the report failed: {type(error).__name__})")
           PY
       # The artifact keeps no file mode; the archive keeps the binaries
-      # executable.
+      # executable. The bin sits beside the examples' directory, not in it.
       - name: Pack the backends
-        run: tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" library_mode_reference console_acceptance_fixture memory_console_reference workgraph_console_reference mcp_apps_gateway_fixture
+        run: tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" library_mode_reference console_acceptance_fixture memory_console_reference workgraph_console_reference mcp_apps_gateway_fixture incident_command_center -C "${CARGO_TARGET_DIR}/debug" mcp_fixture
+      # What console-acceptance checks its two files against: the digests of
+      # the files as built, published as this job's outputs (not through the
+      # archive they describe).
+      - name: Record the incident pack binaries' digests
+        id: incident_digests
+        run: |
+          for name in examples/incident_command_center mcp_fixture; do
+            digest="$(sha256sum "${CARGO_TARGET_DIR}/debug/${name}" | cut -d' ' -f1)"
+            echo "console-backends built ${name##*/} sha256 ${digest}"
+            echo "${name##*/}=${digest}" >> "${GITHUB_OUTPUT}"
+          done
       - name: Retain the backends
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -2419,28 +2442,25 @@ jobs:
         run: npm --prefix console run fixtures:console-customization --silent
 
   # Needs Playwright (it captures screenshots) and its own two binaries,
-  # built here through the root wrapper; the pack's script runs them from
-  # META_EXAMPLE_BIN_DIR. The bundles are built first, as the script did
-  # before its own build, so the example embeds fresh ones.
+  # which console-backends builds with the acceptance backends; the pack's
+  # script runs them from META_EXAMPLE_BIN_DIR and compiles nothing here.
+  # They embed the bundles console-backends built before its compile. This
+  # job still builds the bundles first, as it did before its own compile.
   console-acceptance:
     name: console-acceptance
-    needs: changes
+    needs: [changes, console-backends]
     if: needs.changes.outputs.console == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      # The incident example and its fixture build against all of Core next
-      # to Playwright's Chromium, and the runner's root disk is the limit
-      # (rust-integration ran out of it on PR #2011's runs). No step here
-      # uses these preinstalled toolchains.
+      # Written for the compile this job no longer runs, next to Playwright's
+      # Chromium on the runner's root disk. It stays: the job now holds the
+      # backends' archive there instead, and no run of it has yet shown the
+      # headroom without this step. No step here uses these preinstalled
+      # toolchains.
       - name: Free runner disk
         run: |
           df -h /
@@ -2451,35 +2471,46 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: meta/console/package-lock.json
-      - name: Setup Rust
-        uses: ./.github/actions/setup-rust-ci
-      - name: Setup sccache
-        uses: ./.github/actions/setup-sccache-ci
+      - name: Fetch the console acceptance backends
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
-          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
-          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
-          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
-      - name: Setup mold linker
-        uses: ./.github/actions/setup-mold-ci
-      - name: Restore the cargo registry
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: false
-          shared-key: ci-registry
-          cache-targets: "false"
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends
+      # Only the pack's two binaries are unpacked. Each must be the file
+      # console-backends built in this run: its digest is compared with the
+      # one that job published, both are printed, and a difference or a
+      # missing digest fails the job here, before the acceptance runs.
+      # The script runs the server from META_EXAMPLE_BIN_DIR. The server
+      # looks for mcp_fixture by itself: CARGO_BIN_EXE_mcp_fixture first,
+      # then Cargo's target directory, and it builds the bin when it finds
+      # neither. The variable names the checked file, so the server runs
+      # that file, and refuses a missing one, in a job that compiles nothing.
+      - name: Unpack and verify the incident pack's binaries
+        env:
+          BUILT_INCIDENT_COMMAND_CENTER_SHA256: ${{ needs.console-backends.outputs.incident_command_center_sha256 }}
+          BUILT_MCP_FIXTURE_SHA256: ${{ needs.console-backends.outputs.mcp_fixture_sha256 }}
+        run: |
+          bin_dir="${RUNNER_TEMP}/console-backends/bin"
+          mkdir -p "${bin_dir}"
+          tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar" incident_command_center mcp_fixture
+          status=0
+          for name in incident_command_center mcp_fixture; do
+            built_variable="BUILT_${name^^}_SHA256"
+            built="${!built_variable}"
+            unpacked="$(sha256sum "${bin_dir}/${name}" | cut -d' ' -f1)"
+            echo "console-backends built ${name} sha256 ${built:-missing}"
+            echo "console-acceptance unpacked ${name} sha256 ${unpacked}"
+            if [[ ! "${built}" =~ ^[0-9a-f]{64}$ || "${built}" != "${unpacked}" ]]; then
+              echo "::error::${name} is not the file console-backends built in this run"
+              status=1
+            fi
+          done
+          if [[ "${status}" != 0 ]]; then exit 1; fi
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+          echo "CARGO_BIN_EXE_mcp_fixture=${bin_dir}/mcp_fixture" >> "${GITHUB_ENV}"
       - run: npm --prefix console ci --silent --no-fund --no-audit
       - run: npm --prefix console exec -- playwright install --with-deps chromium
       - run: npm --prefix console run build --silent
-      - name: Build the incident pack's binaries
-        working-directory: .
-        run: |
-          ./scripts/repo-cargo build -p meerkat-meta --example incident_command_center --bin mcp_fixture
-          bin_dir="${RUNNER_TEMP}/incident-bins"
-          mkdir -p "${bin_dir}"
-          ln -s "${CARGO_TARGET_DIR}/debug/examples/incident_command_center" "${CARGO_TARGET_DIR}/debug/mcp_fixture" "${bin_dir}/"
-          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
       - name: Stock incident topology acceptance
         run: examples/001-incident-command-center-pack/topology_examples.sh
       - name: Upload incident topology screenshots
@@ -2744,7 +2775,7 @@ jobs:
           GUARD_LANE_REASONS: "{}"
           GUARD_LANE_JOBS: ""
           # The jobs that wait for another job besides the classification.
-          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends;rust-unit*=rust-unit-build
+          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends;console-acceptance=console-backends;rust-unit*=rust-unit-build
           # Seconds to wait before each retry of a GitHub API request that
           # answered with a server error (5xx).
           API_RETRY_DELAYS: 5 10 20

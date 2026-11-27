@@ -48,6 +48,27 @@ them.
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+- Behaviour-only (not measured by the gate): `meerkat-tools`, `meerkat-core`:
+  session-filtered search and notices. `tool_catalog_search` returns no row
+  for a tool the session's tool filters do not allow, or that a closed tool
+  grant gate holds back, and does not count it in `total_matches`. This
+  changes what a caller of search sees: such a tool used to be returned
+  with its name, its description and the status `blocked_by_filter`. That
+  status is no longer produced, and neither the name nor the description
+  of a filtered or gated tool is in a search result; for a gated tool, the
+  description could be read there before a grant and no longer can. The
+  deferred-catalog notice and its typed delta do not offer a tool the
+  filters do not allow: it is not announced as available, and a tool that
+  was never offered is never named. A tool that was announced, is still
+  deferred, and is later disallowed is reported once as no longer
+  available, as a tool its source dropped is. A search whose tool scope
+  cannot be read names no entry: it returns no result and
+  `temporarily_unavailable` as its `empty_result_status`, where it
+  returned one row per deferrable entry. This covers search and notices
+  only. Tool load and call behavior is unchanged. A reader of search
+  results that looked for a `blocked_by_filter` row to learn that a tool
+  is denied finds no row now; read a denial from the host's own tool
+  policy.
 
 - `meerkat-mob`: the public struct `ToolConfig` gains the public field `web_search: Option<bool>` (the profile key `tools.web_search`, see Added). `meerkat-contracts`: the public structs `wire::PortableToolConfig`, `WireMobToolConfig` and `wire::MobToolConfigInput` gain the same field. Code that builds one of them with a struct literal adds the field; `..Default::default()` covers it.
 

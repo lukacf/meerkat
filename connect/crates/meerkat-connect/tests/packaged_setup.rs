@@ -218,6 +218,49 @@ fn value(result: ToolResult) -> Result<Value> {
     Ok(serde_json::from_str(&result.text_content())?)
 }
 
+// What the model reads from the catalog search does not prove a policy
+// ceiling: under one, a denied tool has no row. The ceiling is therefore
+// established in two halves:
+//
+// 1. Host side, never from anything the model is shown: the launch tool
+//    policy the packaged setup composed into the session's own options
+//    (`SessionOptions::build.tool_access_policy`, the caller's policy
+//    conjoined with the preparation ceiling) denies exactly the expected
+//    setup names (`require_setup_ceiling`).
+// 2. Caller side: every permitted setup name is found and loads on that
+//    session (the search works and the source is connected), and each denied
+//    name is absent from the search (`setup_catalog_ready`). Tool load and
+//    call behavior is unchanged (`setup_load_accepted`).
+//
+// The positive control for the caller's ceiling is the same packaged setup
+// without it: the preparation-only session of `active_worker` finds and loads
+// `setup_catalog_entry`, which the caller's deny list hides here. No packaged
+// session lifts the preparation ceiling over `setup_install` (installation
+// stays refused by design), so that name has the host-side half only.
+
+/// The setup names the session's own launch tool policy does not permit: a
+/// host-side read of the options the packaged setup composed for the session.
+fn setup_names_denied_by_launch_policy(options: &SessionOptions) -> Result<BTreeSet<&'static str>> {
+    let policy = options
+        .build
+        .tool_access_policy
+        .clone()
+        .ok_or("the packaged setup session carries no launch tool policy")?;
+    let policy = meerkat_core::ToolExecutionPolicy::resolve(policy)?;
+    Ok(SETUP_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| !policy.permits(name))
+        .collect())
+}
+
+fn require_setup_ceiling(options: &SessionOptions, denied: &[&str]) -> Result {
+    require(
+        setup_names_denied_by_launch_policy(options)? == denied.iter().copied().collect(),
+        "the session's launch tool policy does not deny exactly the expected setup names",
+    )
+}
+
 // These are assertions over native observations, not a second readiness owner.
 // Exact catalog means exact current contents; it does not mean a pending source
 // has connected. Only that explicit pending observation permits another search.
@@ -248,19 +291,21 @@ fn setup_catalog_ready(search: &Value, denied: &[&str]) -> Result<bool> {
             .iter()
             .filter(|row| row["name"] == *name)
             .collect::<Vec<_>>();
+        if denied.contains(name) {
+            // The catalog offers a session only what its tool policy allows:
+            // a denied name is not a row, whatever its status. On its own
+            // this is not proof of a ceiling (see `require_setup_ceiling`).
+            require(
+                matches.is_empty(),
+                &format!("catalog offered the policy-denied tool {name}"),
+            )?;
+            continue;
+        }
         require(
             matches.len() == 1,
             &format!("ready catalog does not contain exact tool {name}"),
         )?;
         let row = matches[0];
-        if denied.contains(name) {
-            require(
-                row["visibility_status"] == "blocked_by_filter"
-                    && row["currently_callable"] == false,
-                &format!("catalog did not retain the expected policy denial for {name}"),
-            )?;
-            continue;
-        }
         require(
             (row["visibility_status"] == "deferred" && row["currently_callable"] == false)
                 || (row["visibility_status"] == "loaded" && row["currently_callable"] == true),
@@ -371,6 +416,98 @@ async fn await_setup_catalog(session: &ConnectSession, probe: &Probe, denied: &[
     }
 }
 
+/// The session options the packaged setup composes for a caller policy, built
+/// from a preparer handoff that names an executable nothing here launches.
+fn composed_setup_options(caller: Option<ToolAccessPolicy>) -> SessionOptions {
+    meerkat_connect::setup::PreparedSetupConnection::from_preparer_output(
+        br#"{"mcpServers":{"toolkit-setup":{"command":"/unlaunched/toolkit-setup"}}}"#,
+    )
+    .expect("a structurally valid preparer handoff")
+    .preparation_session(SessionOptions {
+        model: Default::default(),
+        build: SessionBuildOptions {
+            tool_access_policy: caller,
+            ..Default::default()
+        },
+    })
+    .expect("the packaged setup composes its session options")
+}
+
+#[test]
+fn setup_ceiling_is_read_from_the_host_side_launch_policy() {
+    // Preparation only: installation is the one setup name the ceiling denies.
+    let preparation = composed_setup_options(None);
+    assert_eq!(
+        setup_names_denied_by_launch_policy(&preparation).unwrap(),
+        PREPARATION_DENIED.iter().copied().collect()
+    );
+    require_setup_ceiling(&preparation, PREPARATION_DENIED).unwrap();
+    assert!(
+        require_setup_ceiling(&preparation, COMPOSITION_DENIED).is_err(),
+        "a session without the caller's deny list does not carry the caller's ceiling"
+    );
+
+    // The caller's deny list is conjoined with the preparation ceiling.
+    let composition = composed_setup_options(Some(ToolAccessPolicy::DenyList(
+        ["setup_catalog_entry"].into_iter().collect(),
+    )));
+    require_setup_ceiling(&composition, COMPOSITION_DENIED).unwrap();
+    assert!(
+        require_setup_ceiling(&composition, PREPARATION_DENIED).is_err(),
+        "the caller's ceiling is part of what the session is built with"
+    );
+
+    // Options without a launch policy prove no ceiling at all.
+    let mut bare = composed_setup_options(None);
+    bare.build.tool_access_policy = None;
+    assert!(require_setup_ceiling(&bare, &[]).is_err());
+}
+
+/// Both halves for the name the caller's ceiling hides: without the ceiling
+/// the same catalog and load observations must hold the name, and under the
+/// ceiling they must not. Neither observation passes for the other session.
+#[test]
+fn a_denied_name_is_found_without_its_ceiling_and_absent_under_it() {
+    const NAME: &str = "setup_catalog_entry";
+    let row_names = |catalog: &Value| {
+        catalog["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let load = |denied: &[&str]| {
+        json!({"catalog_exact":true,
+            "accepted_names":SETUP_TOOLS.iter().copied().filter(|name| !denied.contains(name)).collect::<Vec<_>>(),
+            "noop_names":[],
+            "resolutions":SETUP_TOOLS.iter().map(|name| if denied.contains(name) {
+                json!({"name":name,"accepted":false,"rejected_reason":"not_filterable"})
+            } else {
+                json!({"name":name,"accepted":true})
+            }).collect::<Vec<_>>()})
+    };
+
+    // Without the caller's ceiling (the preparation-only session): found, and
+    // its load is accepted.
+    let uncapped = ready_catalog(PREPARATION_DENIED);
+    assert!(row_names(&uncapped).iter().any(|name| name == NAME));
+    assert!(setup_catalog_ready(&uncapped, PREPARATION_DENIED).unwrap());
+    setup_load_accepted(&load(PREPARATION_DENIED), PREPARATION_DENIED).unwrap();
+
+    // Under it: absent from the search, and its load keeps the policy refusal.
+    let capped = ready_catalog(COMPOSITION_DENIED);
+    assert!(!row_names(&capped).iter().any(|name| name == NAME));
+    assert!(setup_catalog_ready(&capped, COMPOSITION_DENIED).unwrap());
+    setup_load_accepted(&load(COMPOSITION_DENIED), COMPOSITION_DENIED).unwrap();
+
+    // The observations of one session never pass for the other.
+    assert!(setup_catalog_ready(&uncapped, COMPOSITION_DENIED).is_err());
+    assert!(setup_catalog_ready(&capped, PREPARATION_DENIED).is_err());
+    assert!(setup_load_accepted(&load(PREPARATION_DENIED), COMPOSITION_DENIED).is_err());
+    assert!(setup_load_accepted(&load(COMPOSITION_DENIED), PREPARATION_DENIED).is_err());
+}
+
 #[test]
 fn selected_pending_catalog_is_not_ready_even_when_exact() {
     let observed = json!({"catalog_exact":true,"total_matches":0,"results":[],
@@ -391,13 +528,16 @@ fn selected_pending_catalog_is_not_ready_even_when_exact() {
 }
 
 fn ready_catalog(denied: &[&str]) -> Value {
-    json!({"catalog_exact":true,"total_matches":SETUP_TOOLS.len(),"results":SETUP_TOOLS.iter().map(|name|
-        json!({"name":name,"visibility_status":if denied.contains(name) {"blocked_by_filter"} else {"deferred"},
-            "currently_callable":false})).collect::<Vec<_>>()})
+    let rows = SETUP_TOOLS
+        .iter()
+        .filter(|name| !denied.contains(name))
+        .map(|name| json!({"name":name,"visibility_status":"deferred","currently_callable":false}))
+        .collect::<Vec<_>>();
+    json!({"catalog_exact":true,"total_matches":rows.len(),"results":rows})
 }
 
 #[test]
-fn ready_catalog_requires_each_observed_name_including_denial_controls() {
+fn ready_catalog_requires_each_permitted_name_and_no_denied_name() {
     assert!(setup_catalog_ready(&ready_catalog(COMPOSITION_DENIED), COMPOSITION_DENIED).unwrap());
     assert!(setup_catalog_ready(&ready_catalog(PREPARATION_DENIED), PREPARATION_DENIED).unwrap());
     for status in [
@@ -413,22 +553,26 @@ fn ready_catalog_requires_each_observed_name_including_denial_controls() {
             "{status} must not admit a permitted load"
         );
     }
-    for status in ["deferred", "loaded", "temporarily_unavailable", "unknown"] {
+    for (status, callable) in [
+        ("blocked_by_filter", false),
+        ("deferred", false),
+        ("loaded", true),
+        ("temporarily_unavailable", false),
+        ("unknown", false),
+    ] {
         let mut observed = ready_catalog(COMPOSITION_DENIED);
-        observed["results"][1]["visibility_status"] = json!(status);
+        observed["results"].as_array_mut().unwrap().push(json!({
+            "name":COMPOSITION_DENIED[0],"visibility_status":status,"currently_callable":callable}));
         assert!(
             setup_catalog_ready(&observed, COMPOSITION_DENIED).is_err(),
-            "{status} must not replace the exact caller denial"
+            "{status} must not offer a tool the caller's policy denies"
         );
     }
-    let mut callable_denial = ready_catalog(COMPOSITION_DENIED);
-    callable_denial["results"][1]["currently_callable"] = json!(true);
-    assert!(setup_catalog_ready(&callable_denial, COMPOSITION_DENIED).is_err());
     let mut missing = ready_catalog(COMPOSITION_DENIED);
     missing["results"].as_array_mut().unwrap().pop();
     assert!(
         setup_catalog_ready(&missing, COMPOSITION_DENIED).is_err(),
-        "missing setup_install must not be fabricated for denial"
+        "a missing permitted tool is not readiness"
     );
     let mut pending = ready_catalog(COMPOSITION_DENIED);
     pending["pending_sources"] = json!(["toolkit-setup"]);
@@ -542,8 +686,9 @@ async fn exercise(session: &ConnectSession, probe: &Probe) -> Result {
     )?;
     setup_load_accepted(&loaded, COMPOSITION_DENIED)?;
     // Ask the offered native catalog loader about all observed names. Its
-    // exact refusals prove the caller and preparation ceilings without making
-    // the model emit an unoffered protected tool call.
+    // exact refusals keep the caller and preparation ceilings in force
+    // without making the model emit an unoffered protected tool call; that
+    // the ceilings exist is read host side (`require_setup_ceiling`).
     probe.record(
         json!({"kind":"native_catalog_policy_denials_verified","names":COMPOSITION_DENIED}),
     );
@@ -744,6 +889,11 @@ async fn installed_product_native_catalog_preparation_and_help() -> Result {
             ..Default::default()
         },
     })?;
+    // Host side: the caller and preparation ceilings are in force in the
+    // launch policy this session is built with. The ceiling is read here,
+    // not from a search row.
+    require_setup_ceiling(&options, COMPOSITION_DENIED)?;
+    probe.record(json!({"kind":"host_launch_policy_ceiling_verified","names":COMPOSITION_DENIED}));
     let session = ConnectSession::open_with_config(storage, Config::default(), options).await?;
     // On assertion errors close through the same exact native owner before
     // returning. Test deadlines do not drop a live product session or replay it.

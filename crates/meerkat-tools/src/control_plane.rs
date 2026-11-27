@@ -49,6 +49,10 @@ pub struct CatalogControlVisibilityProvider {
     scope: RwLock<Option<ToolScope>>,
     #[cfg(test)]
     visibility_state_override: RwLock<Option<SessionToolVisibilityState>>,
+    /// Test-only: how many more filter reads answer before the read starts
+    /// failing as an unreadable scope does. `None` never fails.
+    #[cfg(test)]
+    filter_reads_before_failure: RwLock<Option<usize>>,
 }
 
 impl CatalogControlVisibilityProvider {
@@ -73,12 +77,15 @@ impl CatalogControlVisibilityProvider {
         *guard = Some(visibility_state);
     }
 
-    fn visible_tool_names(&self) -> Option<BTreeSet<meerkat_core::ToolName>> {
-        self.scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|scope| scope.visible_tool_names().ok())
+    /// Test-only: let `successful_reads` filter reads answer, then fail every
+    /// later one as an unreadable scope does.
+    #[cfg(test)]
+    fn fail_filter_reads_after_for_test(&self, successful_reads: usize) {
+        let mut guard = self
+            .filter_reads_before_failure
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(successful_reads);
     }
 
     /// Resolve the visibility facts the deferred-load path needs from a *bound*
@@ -125,6 +132,19 @@ impl CatalogControlVisibilityProvider {
     /// In tests, an injected `visibility_state_override` stands in for a bound
     /// scope, so the filter is composed from that injected state.
     fn staged_session_filters_allow_name(&self, name: &str) -> Result<bool, NoToolScope> {
+        #[cfg(test)]
+        {
+            let mut remaining = self
+                .filter_reads_before_failure
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(left) = remaining.as_mut() {
+                if *left == 0 {
+                    return Err(NoToolScope);
+                }
+                *left -= 1;
+            }
+        }
         #[cfg(test)]
         if let Some(visibility_state) = self
             .visibility_state_override
@@ -291,7 +311,24 @@ impl CatalogControlDispatcher {
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let query = args.query.unwrap_or_default().to_lowercase();
         let pending_sources = self.session_dispatcher.pending_catalog_sources();
-        let visible_tool_names = self.visibility_provider.visible_tool_names();
+
+        // Fail closed: without a readable scope there is no telling which
+        // entries the session's filters allow, so the answer names none of
+        // them. It says so at the result level, the same for every query.
+        let scope_unreadable = || SearchResponse {
+            catalog_exact: true,
+            total_matches: 0,
+            results: Vec::new(),
+            pending_sources: pending_sources.iter().cloned().collect(),
+            empty_result_status: Some(SearchVisibilityStatus::TemporarilyUnavailable),
+        };
+        let Ok(ResolvedLoadVisibility {
+            visible_tool_names, ..
+        }) = self.visibility_provider.resolve_load_visibility()
+        else {
+            return scope_unreadable();
+        };
+        let filters_unreadable = std::cell::Cell::new(false);
 
         let results = catalog
             .iter()
@@ -303,10 +340,8 @@ impl CatalogControlDispatcher {
                 )
             })
             .filter(|entry| matches_query(entry, &query))
-            .map(|entry| {
-                let currently_loaded = visible_tool_names
-                    .as_ref()
-                    .is_some_and(|names| names.contains(entry.tool.name.as_str()));
+            .filter_map(|entry| {
+                let currently_loaded = visible_tool_names.contains(entry.tool.name.as_str());
                 let visibility_status = if currently_loaded {
                     SearchVisibilityStatus::Loaded
                 } else {
@@ -314,11 +349,18 @@ impl CatalogControlDispatcher {
                         .visibility_provider
                         .staged_session_filters_allow_name(&entry.tool.name)
                     {
-                        // No bound scope authority: fail closed. Without
-                        // visibility truth the entry cannot honestly be
-                        // advertised as loadable or as filter-blocked.
-                        Err(NoToolScope) => SearchVisibilityStatus::TemporarilyUnavailable,
-                        Ok(false) => SearchVisibilityStatus::BlockedByFilter,
+                        // The scope stopped answering for its filters: no
+                        // row, and the whole answer fails closed below.
+                        Err(NoToolScope) => {
+                            filters_unreadable.set(true);
+                            return None;
+                        }
+                        // The session's filters do not allow the tool: the
+                        // model is not shown its name or its description.
+                        // No row, and so no total and no limit slot that
+                        // counts it. Its load and its call stay refused as
+                        // they were.
+                        Ok(false) => return None,
                         Ok(true) if !entry.currently_callable() => {
                             SearchVisibilityStatus::TemporarilyUnavailable
                         }
@@ -326,14 +368,17 @@ impl CatalogControlDispatcher {
                     }
                 };
 
-                SearchResultItem {
+                Some(SearchResultItem {
                     name: entry.tool.name.clone().into(),
                     description: entry.tool.description.clone(),
                     currently_callable: currently_loaded,
                     visibility_status,
-                }
+                })
             })
             .collect::<Vec<_>>();
+        if filters_unreadable.get() {
+            return scope_unreadable();
+        }
 
         let empty_result_status = if results.is_empty() && !pending_sources.is_empty() {
             Some(SearchVisibilityStatus::PendingSource)
@@ -750,7 +795,6 @@ struct SearchResultItem {
 enum SearchVisibilityStatus {
     Loaded,
     Deferred,
-    BlockedByFilter,
     PendingSource,
     TemporarilyUnavailable,
 }
@@ -1870,11 +1914,12 @@ mod tests {
     }
 
     /// Without a bound `ToolScope` the search surface must fail closed too:
-    /// a deferred-eligible entry reports `TemporarilyUnavailable`, never
-    /// `Deferred`/`BlockedByFilter` derived from a locally composed default
-    /// filter — the control plane is not a fallback visibility authority.
+    /// it names no entry at all. Whether the session's filters allow an
+    /// entry cannot be told, so neither its name nor its description is
+    /// answered; the answer says temporarily unavailable at the result
+    /// level. The control plane is not a fallback visibility authority.
     #[tokio::test]
-    async fn search_without_scope_reports_temporarily_unavailable() {
+    async fn search_without_scope_names_no_entry_and_reports_temporarily_unavailable() {
         let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
         let dispatcher = Arc::new(ExactCatalogDispatcher {
             tools: vec![Arc::clone(&deferred)].into(),
@@ -1890,21 +1935,110 @@ mod tests {
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
 
-        let outcome = control
-            .dispatch(search_call(
-                SEARCH_TOOL_NAME,
-                json!({ "query": "deferred" }),
-            ))
-            .await
-            .unwrap();
-        let response: SearchResponse =
-            serde_json::from_str(&outcome.result.text_content()).unwrap();
+        // The same answer whether the query matches an entry or not.
+        for query in ["deferred", "matches-nothing"] {
+            let outcome = control
+                .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": query })))
+                .await
+                .unwrap();
+            let answer = outcome.result.text_content();
+            let response: SearchResponse = serde_json::from_str(&answer).unwrap();
 
-        assert_eq!(response.results.len(), 1);
+            assert!(
+                response.results.is_empty(),
+                "no bound scope means no visibility truth: no entry is named: {answer}"
+            );
+            assert_eq!(response.total_matches, 0, "{answer}");
+            assert_eq!(
+                response.empty_result_status,
+                Some(SearchVisibilityStatus::TemporarilyUnavailable),
+                "the caller is told the catalog is temporarily unavailable: {answer}"
+            );
+            assert!(
+                !answer.contains("deferred_mcp_tool") && !answer.contains("Deferred MCP tool"),
+                "neither a name nor a description is in the answer: {answer}"
+            );
+        }
+    }
+
+    /// The scope answers when the search begins and stops answering for its
+    /// filters at the second entry: the whole answer is the empty one. The
+    /// first entry, which the filters had allowed, is not named either, so a
+    /// partial answer never passes for the catalog. Control, the same search
+    /// before the reads fail: both entries are returned.
+    #[tokio::test]
+    async fn search_whose_filters_stop_answering_mid_pass_names_no_entry() {
+        let first = session_tool("first_deferred_tool", "First deferred MCP tool");
+        let second = session_tool("second_deferred_tool", "Second deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&first), Arc::clone(&second)].into(),
+            catalog: vec![
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&first),
+                    true,
+                    callback_provenance("test"),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&second),
+                    true,
+                    callback_provenance("test"),
+                ),
+            ]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(generated_visibility_scope(
+            vec![Arc::clone(&first), Arc::clone(&second)].into(),
+            ["first_deferred_tool".into(), "second_deferred_tool".into()]
+                .into_iter()
+                .collect(),
+        ));
+        let control = CatalogControlDispatcher::new(dispatcher, Arc::clone(&visibility_provider));
+        let search = || async {
+            let outcome = control
+                .dispatch(search_call(
+                    SEARCH_TOOL_NAME,
+                    json!({ "query": "deferred" }),
+                ))
+                .await
+                .unwrap();
+            outcome.result.text_content()
+        };
+
+        // Control: every filter read answers.
+        let answer = search().await;
+        let response: SearchResponse = serde_json::from_str(&answer).unwrap();
         assert_eq!(
-            response.results[0].visibility_status,
-            SearchVisibilityStatus::TemporarilyUnavailable,
-            "no bound scope means no visibility truth: fail closed"
+            response
+                .results
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first_deferred_tool", "second_deferred_tool"],
+            "{answer}"
+        );
+        assert_eq!(response.total_matches, 2, "{answer}");
+        assert_eq!(response.empty_result_status, None, "{answer}");
+
+        // The read for the first entry answers; the read for the second fails.
+        visibility_provider.fail_filter_reads_after_for_test(1);
+        let answer = search().await;
+        let response: SearchResponse = serde_json::from_str(&answer).unwrap();
+        assert!(
+            response.results.is_empty(),
+            "no entry is named once a filter read fails: {answer}"
+        );
+        assert_eq!(response.total_matches, 0, "{answer}");
+        assert_eq!(
+            response.empty_result_status,
+            Some(SearchVisibilityStatus::TemporarilyUnavailable),
+            "{answer}"
+        );
+        assert!(
+            !answer.contains("deferred_tool") && !answer.contains("deferred MCP tool"),
+            "neither a name nor a description is in the answer: {answer}"
         );
     }
 
@@ -2218,10 +2352,11 @@ mod tests {
             pending_sources: Arc::from(["pending-mcp".to_string()]),
             may_require_control_plane: false,
         });
-        let control = CatalogControlDispatcher::new(
-            dispatcher,
-            Arc::new(CatalogControlVisibilityProvider::new()),
-        );
+        // A session's control plane always has its scope bound; the pending
+        // status below is the answer of a readable scope with nothing to find.
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(generated_visibility_scope(Arc::from([]), HashSet::new()));
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
 
         let outcome = control
             .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": "secret" })))
@@ -2239,8 +2374,13 @@ mod tests {
         );
     }
 
+    /// A search over four entries that all match the query: the loaded, the
+    /// deferred and the temporarily unavailable entries are returned with
+    /// their states (the permitted-entry control), and the entry the
+    /// session's filter blocks is not returned, not counted and not
+    /// described.
     #[tokio::test]
-    async fn search_reports_loaded_deferred_blocked_and_temporarily_unavailable_states() {
+    async fn search_reports_loaded_deferred_and_unavailable_states_and_leaves_a_blocked_tool_out() {
         let loaded = session_tool(
             "loaded_secret_lookup",
             "Deferred secret lookup that is already loaded and visible.",
@@ -2347,8 +2487,18 @@ mod tests {
             .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": "secret" })))
             .await
             .unwrap();
-        let response: SearchResponse =
-            serde_json::from_str(&outcome.result.text_content()).unwrap();
+        let answer = outcome.result.text_content();
+        let response: SearchResponse = serde_json::from_str(&answer).unwrap();
+
+        assert_eq!(
+            response.total_matches, 3,
+            "the blocked entry is not counted: {answer}"
+        );
+        assert!(
+            !answer.contains("blocked_secret_lookup")
+                && !answer.contains("currently blocked by a session filter"),
+            "neither the blocked entry's name nor its description is in the answer: {answer}"
+        );
 
         let statuses = response
             .results
@@ -2366,11 +2516,13 @@ mod tests {
         );
         assert_eq!(
             statuses.get("blocked_secret_lookup"),
-            Some(&SearchVisibilityStatus::BlockedByFilter)
+            None,
+            "an entry the session's filter blocks has no row"
         );
         assert_eq!(
             statuses.get("offline_secret_lookup"),
             Some(&SearchVisibilityStatus::TemporarilyUnavailable)
         );
+        assert_eq!(statuses.len(), 3);
     }
 }

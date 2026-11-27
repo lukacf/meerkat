@@ -8623,6 +8623,21 @@ where
                                     )
                                     .into_iter()
                                     .filter(|name| !closed_by_grant_gate.contains(name))
+                                    // The notice offers only what the
+                                    // session's filters allow: a tool they
+                                    // do not allow is not announced as
+                                    // available. The scope's own predicate
+                                    // decides, as it does for the search;
+                                    // when it cannot be read, nothing is
+                                    // offered. A name offered at an earlier
+                                    // boundary and no longer allowed leaves
+                                    // this set, so the delta below reports
+                                    // it once as no longer available.
+                                    .filter(|name| {
+                                        self.tool_scope
+                                            .staged_session_filters_allow_name(name.as_str())
+                                            .unwrap_or(false)
+                                    })
                                     .collect()
                                 })
                                 .unwrap_or_default()
@@ -30568,6 +30583,134 @@ mod tests {
                 .all(|body| !body.contains("deferred_tool_two")),
             "the closed gated name is never offered: {deferred_notices:?}"
         );
+    }
+
+    /// The deferred catalog notice follows the session's tool filters. A
+    /// tool they do not allow is not offered, in the notice's text or in its
+    /// typed delta, and it is offered as new once they allow it. A tool that
+    /// was offered, is still deferred, and is later disallowed is reported
+    /// once as no longer available, as a tool its source dropped is; the
+    /// next boundary under the same filter says nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_follows_the_session_tool_filters() {
+        const PREFIX: &str = "Deferred catalog changed at turn boundary: ";
+
+        /// Every deferred-catalog notice so far: its text, and the names its
+        /// typed delta adds and removes.
+        fn notices(session: &crate::Session) -> Vec<(String, Vec<String>, Vec<String>)> {
+            fn names(names: &[crate::ToolName]) -> Vec<String> {
+                names.iter().map(ToString::to_string).collect()
+            }
+            session
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::SystemNotice(notice)
+                        if notice.kind == SystemNoticeKind::ToolScope
+                            && notice
+                                .body
+                                .as_deref()
+                                .is_some_and(|body| body.starts_with(PREFIX)) =>
+                    {
+                        Some(notice)
+                    }
+                    _ => None,
+                })
+                .map(|notice| {
+                    let delta = notice.blocks.iter().find_map(|block| match block {
+                        crate::types::SystemNoticeBlock::ToolConfig { payload } => {
+                            payload.deferred_catalog_delta.as_ref()
+                        }
+                        _ => None,
+                    });
+                    (
+                        notice.body.clone().unwrap_or_default(),
+                        delta
+                            .map(|delta| names(&delta.added_hidden_names))
+                            .unwrap_or_default(),
+                        delta
+                            .map(|delta| names(&delta.removed_hidden_names))
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        }
+
+        fn deny(name: &str) -> crate::ToolFilter {
+            crate::ToolFilter::Deny([name.to_string()].into_iter().collect())
+        }
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(DeferredLoadDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        // One boundary per run: the model answers with text and loads nothing.
+        macro_rules! boundary {
+            () => {{
+                agent.set_runtime_execution_kind(Some(
+                    crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+                ));
+                agent.run("prompt".to_string().into()).await.unwrap();
+                notices(agent.session())
+            }};
+        }
+
+        // Hidden from the first boundary: not offered, in text or delta.
+        agent
+            .stage_external_tool_filter(deny("deferred_tool_two"))
+            .expect("stage the session's deny");
+        let seen = boundary!();
+        assert_eq!(
+            seen,
+            vec![(
+                format!("{PREFIX}new deferred tools available: deferred_tool"),
+                vec!["deferred_tool".to_string()],
+                Vec::new(),
+            )],
+            "a tool the filter hides is not offered"
+        );
+
+        // The filter is lifted: the tool is offered as new.
+        agent
+            .stage_external_tool_filter(crate::ToolFilter::All)
+            .expect("lift the session's deny");
+        let seen = boundary!();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(
+            seen[1],
+            (
+                format!("{PREFIX}new deferred tools available: deferred_tool_two"),
+                vec!["deferred_tool_two".to_string()],
+                Vec::new(),
+            ),
+            "a tool the filter allows again is offered as new"
+        );
+
+        // A tool that was offered is disallowed: reported once as removed.
+        agent
+            .stage_external_tool_filter(deny("deferred_tool"))
+            .expect("stage a deny of an offered tool");
+        let seen = boundary!();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(
+            seen[2],
+            (
+                format!("{PREFIX}deferred tools no longer available: deferred_tool"),
+                Vec::new(),
+                vec!["deferred_tool".to_string()],
+            ),
+            "an offered tool the filter now hides is reported as no longer available"
+        );
+
+        // The same filter at the next boundary: nothing more is said.
+        let seen = boundary!();
+        assert_eq!(seen.len(), 3, "the removal is reported once: {seen:?}");
     }
 
     #[cfg(feature = "workspace-tests")]

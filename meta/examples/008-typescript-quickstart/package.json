@@ -7,7 +7,7 @@
     "check": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext main.ts"
   },
   "dependencies": {
-    "@rkat/meta-sdk": "0.9.18"
+    "@rkat/meta-sdk": "0.9.19"
   },
   "devDependencies": {
     "@types/node": "^22",

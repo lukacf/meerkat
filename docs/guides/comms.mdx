@@ -382,14 +382,19 @@ recipient generation and fence are signed and checked before work admission.
 
 ### ACK behavior
 
+On TCP and Unix domain sockets, ACK behavior depends on the envelope kind:
+
 | Message Kind | Sender waits for ACK? | Receiver sends ACK? |
 |-------------|----------------------|---------------------|
 | `Message` | Yes (with timeout) | Yes |
 | `IncarnationFencedMessage` | Yes (with timeout) | Yes |
 | `Request` | Yes (with timeout) | Yes |
-| `Lifecycle` | No | No |
+| `Lifecycle` | Yes (with timeout) | Yes, after the in-memory consumer receives that envelope |
 | `Response` | No | No |
 | `Ack` | No | No (would loop) |
+
+For `Lifecycle`, queueing the envelope is not enough to trigger an ACK. The ACK
+confirms the handoff, not durable admission, completion, or an application reply.
 
 ACK timeout defaults to 30 seconds. The low-level router reports a missing
 stream ACK as `PeerOffline`, but runtime and host surfaces preserve the

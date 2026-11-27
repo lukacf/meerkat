@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The decision verbs (`meta/decisions/list`, `get`, `rendering`, `present`,
+  `decide` and `withdraw` on the stdio gateway, and the Console's
+  `meta/decisions/list`, `get`, `rendering` and `withdraw`): the message of
+  a request whose params cannot be read now names the field at fault, and
+  no longer quotes anything the request sent. A `meta/decisions/decide`
+  whose `presented_digest` is null was refused with `invalid params: invalid
+  type: null, expected a string`, which names no field. It is now refused
+  with `invalid params: presented_digest: invalid type: null, expected a
+  string`. A nested field is named by its path, and a missing field in the
+  same way: `invalid params: presentation.at_ms: invalid type: string,
+  expected u64`, `invalid params: presentation.parts_shown[0].index: invalid
+  type: null, expected u32`, `invalid params: presentation.channel_ref:
+  missing field`. Params that are no object are refused with `invalid
+  params: expected an object`, and so, at its path, is a nested object that
+  is none (`invalid params: presentation: expected an object`), except a
+  presentation's `audience`. Two refusals still print the name of the type
+  that reads the params, which is Meta's own text and nothing of the
+  request: an `audience` that is no object (`invalid params:
+  presentation.audience: invalid type: string, expected internally tagged
+  enum DecisionAudienceRequest`), and params or a nested object given as a
+  list of the wrong length (`invalid params: invalid length 0, expected
+  struct DecisionWithdrawParams with 1 element`).
+  Where the old message quoted the value it found (`invalid type: string
+  "..."`, `invalid value: integer ...`), the new one names only its kind
+  (`string`, `integer`, `floating point`, `boolean`, `null`, `sequence`,
+  `map`). An unknown field or an unknown variant is reported without the
+  name the request used, at the path of the object that holds it, with the
+  names that are accepted (``invalid params: unknown field, expected one of
+  `decision_id`, `approve`, `presented_digest`, `reason`, `attestation` ``).
+  A path is made only of the field names the verb documents and of list
+  indexes, never of a key as the request wrote it. One limit: a fault in a
+  presentation's `audience`, in its `kind` or in a field of its body, is
+  placed at `presentation.audience` and not deeper (``invalid params:
+  presentation.audience: unknown variant, expected `approver` or
+  `reviewer` ``); a field the audience lacks is still named
+  (`presentation.audience.approver_id: missing field`). The error code
+  (`-32602`) is unchanged, the error still carries no `data`, and the same
+  requests are refused as before. Only the message text changes, so a
+  client that matched the old text has to be updated; no SDK reads it.
+
+## [0.9.19] - 2026-11-26
+
 ### Added
 
 - Python identity results can be narrowed by their `outcome` string. For

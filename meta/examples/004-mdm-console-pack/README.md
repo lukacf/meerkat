@@ -46,6 +46,35 @@ wire shape:
 See `target-bindings.example.json` for the file shape. The example keys are not
 live credentials.
 
+### Replace a target binding without changing its sibling
+
+From this pack directory, try the binding-file step without starting a gateway
+or contacting a device. The addresses below are placeholders, not usable
+bindings. Real binding files can contain bootstrap tokens; keep them private.
+
+```bash
+(
+  set -eu
+  umask 077
+  demo=$(mktemp -d)
+  trap 'rm -rf -- "$demo"' EXIT
+  helper="$PWD/scripts/merge-bindings.mjs"
+  cd "$demo"
+  printf '%s\n' '{"id":"target-a","address":"tcp://127.0.0.1:5791"}' > a.json
+  printf '%s\n' '{"id":"target-b","address":"tcp://127.0.0.1:5792"}' > b.json
+  node "$helper" targets.json a.json b.json >/dev/null
+  printf '%s\n' '{"id":"target-a","address":"tcp://127.0.0.1:5793"}' > a.json
+  node "$helper" targets.json a.json >/dev/null
+  node -e 'for (const t of require("./targets.json")) console.log(t.id, t.address)'
+)
+```
+
+The output has exactly two rows: `target-a tcp://127.0.0.1:5793` and
+`target-b tcp://127.0.0.1:5792`. The helper replaces the **entire entry** for
+an existing ID; use a complete, newly issued binding for a real target, not
+just the changed address. Updating this file does not reconnect a running
+console or prove that a target received a message.
+
 ## Run
 
 For a local target on this machine:

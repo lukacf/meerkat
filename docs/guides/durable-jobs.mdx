@@ -40,8 +40,12 @@ does not become resumable. If the process is lost, the current attempt becomes
 `worker_lost` after its committed lease expires. Meerkat never silently
 replays a non-resumable shell command.
 
-`command: "some-command &"` is different. It follows the foreground shell
-path, creates no Meerkat job ID, and leaves any surviving child unmanaged.
+Adding `&` to the command does not create a durable job. Without
+`background: true`, Meerkat uses the foreground shell path and returns no
+`job_id`. Even when the shell exits normally, the runtime attempts to
+terminate its process group. If cleanup fails, the tool reports an error
+and the runtime retains custody of the group and retries cleanup. A shell
+exit code is not proof that every descendant has exited.
 
 ## Lifecycle And Restart Contract
 

@@ -595,3 +595,355 @@ fn an_unknown_notice_event_decodes_as_unknown() {
         assert_eq!(serde_json::to_value(event).expect("encode"), json!(known));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The message of a malformed request (`params_fault`)
+// ---------------------------------------------------------------------------
+
+/// A value no message may carry, as a value or as a key.
+const CALLER_VALUE: &str = "caller-value-7f3a91";
+
+/// A type whose own refusal quotes the value it was given.
+#[derive(Debug, serde::Deserialize)]
+#[serde(try_from = "String")]
+#[allow(dead_code)]
+struct Quoting;
+
+impl TryFrom<String> for Quoting {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, String> {
+        Err(format!("no reading of {value}"))
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum Choice {
+    Plain,
+    Sized { size: u32 },
+}
+
+/// Params of the shapes the decision verbs' own params do not have: a type
+/// with a message of its own, a tuple, an enum that carries data, numbers
+/// of each kind, and a map keyed by the request.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[allow(dead_code)]
+struct Shapes {
+    quoting: Option<Quoting>,
+    pair: Option<(u8, u8)>,
+    choice: Option<Choice>,
+    small: Option<i8>,
+    whole: Option<u64>,
+    labels: Option<std::collections::BTreeMap<String, u8>>,
+}
+
+/// The message for `params`, which `serde_json` refuses to read as `T`, as
+/// the verbs' parser asks for it: the second read must name a fault where
+/// `serde_json` found one, so a drift between the two reads fails here and
+/// is never a silent plain `invalid params`.
+fn fault_of<T: serde::de::DeserializeOwned>(params: &serde_json::Value) -> String {
+    assert!(
+        serde_json::from_value::<T>(params.clone()).is_err(),
+        "serde_json reads {params}"
+    );
+    let message = super::params_fault::message::<T>(params);
+    assert_ne!(
+        message, "invalid params",
+        "the second read found no fault in {params}"
+    );
+    assert!(!message.contains(CALLER_VALUE), "{message}");
+    message
+}
+
+#[test]
+fn a_params_fault_names_the_place_and_the_kind_found() {
+    for (params, message) in [
+        (
+            json!({"small": 300}),
+            "small: invalid value: integer, expected i8",
+        ),
+        (
+            json!({"whole": -70421}),
+            "whole: invalid value: integer, expected u64",
+        ),
+        (
+            json!({"whole": 1.5}),
+            "whole: invalid type: floating point, expected u64",
+        ),
+        (
+            json!({"whole": true}),
+            "whole: invalid type: boolean, expected u64",
+        ),
+        (
+            json!({"pair": {}}),
+            "pair: invalid type: map, expected a tuple of size 2",
+        ),
+        (
+            json!({"pair": [1]}),
+            "pair: invalid length 1, expected a tuple of size 2",
+        ),
+        (
+            json!({"pair": [1, 2, 3]}),
+            "pair: invalid length 3, expected fewer elements in array",
+        ),
+        (
+            json!({"pair": [1, null]}),
+            "pair[1]: invalid type: null, expected u8",
+        ),
+        (
+            json!({"choice": {"sized": {}}}),
+            "choice.sized.size: missing field",
+        ),
+        (
+            json!({"choice": {"plain": null, "sized": {"size": 1}}}),
+            "choice: invalid value: map, expected map with a single key",
+        ),
+        (
+            json!({"choice": 7}),
+            "choice: invalid type: integer, expected string or map",
+        ),
+        (
+            json!([null, [1]]),
+            "[1]: invalid length 1, expected a tuple of size 2",
+        ),
+        // Params that are no object are refused without the Rust name of
+        // the type that reads them.
+        (json!(7), "expected an object"),
+        (json!(null), "expected an object"),
+    ] {
+        assert_eq!(
+            fault_of::<Shapes>(&params),
+            format!("invalid params: {message}"),
+            "{params}"
+        );
+    }
+}
+
+/// Nothing the request sent is repeated: not a value (also where the
+/// reading type's own message quotes it), not an unknown field's or
+/// variant's name, and not a key of a map the request keys, which is `*`
+/// in the place.
+#[test]
+fn a_params_fault_never_carries_a_value_or_a_key_of_the_request() {
+    for (params, message) in [
+        (json!({"quoting": CALLER_VALUE}), "quoting: invalid value"),
+        (json!([CALLER_VALUE]), "[0]: invalid value"),
+        (
+            json!({"small": CALLER_VALUE}),
+            "small: invalid type: string, expected i8",
+        ),
+        (
+            json!({"choice": CALLER_VALUE}),
+            "choice: unknown variant, expected `plain` or `sized`",
+        ),
+        (
+            json!({"choice": {CALLER_VALUE: 1}}),
+            "choice: unknown variant, expected `plain` or `sized`",
+        ),
+        (
+            json!({"choice": {"sized": {"size": CALLER_VALUE}}}),
+            "choice.sized.*: invalid type: string, expected u32",
+        ),
+        (
+            json!({"labels": {CALLER_VALUE: CALLER_VALUE}}),
+            "labels.*: invalid type: string, expected u8",
+        ),
+        (
+            json!({CALLER_VALUE: 1}),
+            "unknown field, expected one of `quoting`, `pair`, `choice`, `small`, `whole`, \
+             `labels`",
+        ),
+        (json!(CALLER_VALUE), "expected an object"),
+    ] {
+        assert_eq!(
+            fault_of::<Shapes>(&params),
+            format!("invalid params: {message}"),
+            "{params}"
+        );
+    }
+}
+
+/// Wherever `serde_json` refuses the params of one of the six stdio verbs,
+/// the second read names a fault at the place given here.
+#[test]
+fn the_second_read_names_a_fault_wherever_serde_json_refuses_a_decision_verb() {
+    use meerkat_contracts::{
+        DecisionGetParams, DecisionListParams, DecisionPresentParams, DecisionRenderingParams,
+        DecisionWithdrawParams,
+    };
+
+    use super::wire::MetaDecisionDecideParams;
+
+    let id = format!("decision:{}", "0".repeat(64));
+    let named = [
+        (
+            fault_of::<DecisionListParams>(&json!({"kind": 7})),
+            "kind: invalid type: integer, expected a string",
+        ),
+        (
+            fault_of::<DecisionListParams>(&json!({"phase": 7})),
+            "phase: invalid type: integer, expected string or map",
+        ),
+        (
+            fault_of::<DecisionListParams>(&json!({"after": []})),
+            "after: invalid type: sequence, expected a string",
+        ),
+        (
+            fault_of::<DecisionListParams>(&json!({"limit": 4_294_967_296_u64})),
+            "limit: invalid value: integer, expected u32",
+        ),
+        (
+            fault_of::<DecisionListParams>(&json!({"limits": 1})),
+            "unknown field, expected one of `kind`, `phase`, `approver_id`, `requester`, \
+             `after`, `limit`",
+        ),
+        (
+            fault_of::<DecisionGetParams>(&json!({})),
+            "decision_id: missing field",
+        ),
+        (
+            fault_of::<DecisionGetParams>(&json!({"decision_id": null})),
+            "decision_id: invalid type: null, expected a string",
+        ),
+        (
+            fault_of::<DecisionGetParams>(&json!({"decision_id": id, "include_request": 1})),
+            "include_request: invalid type: integer, expected a boolean",
+        ),
+        (
+            fault_of::<DecisionRenderingParams>(&json!({"decision_id": id, "max_part_bytes": 1.5})),
+            "max_part_bytes: invalid type: floating point, expected u32",
+        ),
+        (
+            fault_of::<DecisionPresentParams>(&json!({"decision_id": id})),
+            "presentation: missing field",
+        ),
+        (
+            fault_of::<DecisionPresentParams>(&json!({"decision_id": id, "presentation": []})),
+            "presentation: invalid length 0, expected struct DecisionPresentationRequest with 8 \
+             elements",
+        ),
+        (
+            fault_of::<DecisionPresentParams>(&json!({
+                "decision_id": id,
+                "presentation": {"audience": {"kind": "approver", "approver_id": "team"}},
+            })),
+            "presentation.subject_digest: missing field",
+        ),
+        (
+            fault_of::<DecisionPresentParams>(&json!({
+                "decision_id": id,
+                "presentation": {"parts_shown": {}},
+            })),
+            "presentation.parts_shown: invalid type: map, expected a sequence",
+        ),
+        (
+            fault_of::<DecisionPresentParams>(&json!({
+                "decision_id": id,
+                "presentation": {"parts_shown": [{"index": 0, "count": 1, "part_digest": 2}]},
+            })),
+            "presentation.parts_shown[0].part_digest: invalid type: integer, expected a string",
+        ),
+        (
+            fault_of::<DecisionWithdrawParams>(&json!({"decision_id": true})),
+            "decision_id: invalid type: boolean, expected a string",
+        ),
+        (
+            fault_of::<DecisionWithdrawParams>(&json!([])),
+            "invalid length 0, expected struct DecisionWithdrawParams with 1 element",
+        ),
+        (
+            fault_of::<MetaDecisionDecideParams>(&json!({
+                "decision_id": id,
+                "approve": true,
+                "presented_digest": null,
+            })),
+            "presented_digest: invalid type: null, expected a string",
+        ),
+        (
+            fault_of::<MetaDecisionDecideParams>(&json!({
+                "decision_id": id,
+                "approve": true,
+                "presented_digest": "sha256:0",
+                "reason": 7,
+            })),
+            "reason: invalid type: integer, expected a string",
+        ),
+        (
+            fault_of::<MetaDecisionDecideParams>(&json!({
+                "decision_id": id,
+                "approve": true,
+                "presented_digest": "sha256:0",
+                "attestation": CALLER_VALUE,
+            })),
+            "attestation: expected an object",
+        ),
+        (
+            fault_of::<MetaDecisionDecideParams>(&json!({
+                "decision_id": id,
+                "approve": true,
+                "presented_digest": "sha256:0",
+                "attestation": {
+                    "ingress": "chat",
+                    "subject": "person",
+                    "scope": "session",
+                    "event_ref": "event",
+                    "observed_at_ms": 1,
+                    "presentation": {"audience": {"kind": 0}},
+                },
+            })),
+            // A variant is named by a string, as `serde_json` has it: the
+            // kind given as a number is the fault, not what follows it.
+            "attestation.presentation.audience: invalid type: integer, expected variant \
+             identifier",
+        ),
+    ];
+    for (message, expected) in named {
+        assert_eq!(message, format!("invalid params: {expected}"));
+    }
+    // The fault `serde_json` itself names for a kind given as a number.
+    assert_eq!(
+        serde_json::from_value::<DecisionPresentParams>(json!({
+            "decision_id": id,
+            "presentation": {"audience": {"kind": 0}},
+        }))
+        .expect_err("refused")
+        .to_string(),
+        "invalid type: integer `0`, expected variant identifier"
+    );
+}
+
+/// Params `serde_json` reads are read, positional ones too: the message is
+/// asked for only once it refuses. A second read that finds no fault names
+/// none.
+#[test]
+fn the_verbs_parser_reads_what_serde_json_reads() {
+    let id = json!("request-1");
+    let read: Shapes =
+        super::stdio::parse(&id, json!({"pair": [1, 2], "choice": "plain"})).expect("read");
+    assert_eq!(read.pair, Some((1, 2)));
+    assert!(matches!(read.choice, Some(Choice::Plain)));
+    let positional: meerkat_contracts::DecisionWithdrawParams =
+        super::stdio::parse(&id, json!(["decision:positional"])).expect("positional params");
+    assert_eq!(positional.decision_id, "decision:positional");
+    let refused =
+        super::stdio::parse::<Shapes>(&id, json!({"small": CALLER_VALUE})).expect_err("refused");
+    assert_eq!(
+        refused,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "request-1",
+            "error": {
+                "code": -32602,
+                "message": "invalid params: small: invalid type: string, expected i8",
+            },
+        })
+    );
+    assert!(!refused.to_string().contains(CALLER_VALUE));
+    assert_eq!(
+        super::params_fault::message::<Shapes>(&json!({})),
+        "invalid params"
+    );
+}

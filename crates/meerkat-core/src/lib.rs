@@ -731,11 +731,12 @@ pub use tool_execution::{
     DeadlineChainExtensionError, DetachedToolExecutionPolicy, EphemeralToolBindingFingerprint,
     IdempotencyScope, MemoryOperation, PeerSendKind, ResolvedExecutionKind,
     ResolvedToolExecutionPlan, RestartClass, RunnerIdentity, StreamingToolExecutionPolicy,
-    ToolBindingDigest, ToolBindingDigestParseError, ToolCredentialContextRef, ToolDeadlineChain,
-    ToolDeadlineContributor, ToolDeadlineOwner, ToolDeadlineSource, ToolExecutionApplicability,
-    ToolExecutionContract, ToolExecutionContractError, ToolExecutionDeclarationError,
-    ToolExecutionMode, ToolExecutionOwnerWitness, ToolExecutionResolutionContext,
-    ToolExecutionResolutionError, ToolOperationTarget, ToolOutputPolicy, ToolProgressPolicy,
+    ToolBindingDigest, ToolBindingDigestParseError, ToolCallOuterBound, ToolCallOuterBoundSlot,
+    ToolCredentialContextRef, ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
+    ToolDeadlineSource, ToolExecutionApplicability, ToolExecutionContract,
+    ToolExecutionContractError, ToolExecutionDeclarationError, ToolExecutionMode,
+    ToolExecutionOwnerWitness, ToolExecutionResolutionContext, ToolExecutionResolutionError,
+    ToolOperationTarget, ToolOutputPolicy, ToolProgressPolicy,
     ephemeral_tool_catalog_binding_fingerprint, mcp_request_digest,
 };
 pub use tool_execution_policy::{

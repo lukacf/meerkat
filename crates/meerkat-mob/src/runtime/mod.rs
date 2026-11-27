@@ -498,8 +498,15 @@ pub use delegation::{
     BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1, DelegationCancellationHandle,
     DelegationExecutionError, DelegationExecutionHandle, DelegationExecutionOutcome,
     DelegationExecutionRequest, DelegationExecutionService, DelegationExecutionSource,
-    DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
+    DelegationHelperEnd, DelegationHelperEnded, DelegationMemberOptions, DelegationParentContext,
+    DelegationRunBounds, DelegationRunFailure, DelegationTerminalizedExecution,
     DelegationTurnTerminal, LiveDelegationTerminalEvidence, render_bounded_delegation_task,
+};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use delegation::{
+    helper_tool_bound_slot_for_test, hold_delegation_limit_for_test,
+    hold_delegation_start_for_test, lose_delegation_run_for_test,
 };
 pub use delivery_scope::{
     DeliveryScopeDecodeError, LineageSteps, MEMBER_DELIVERY_SCOPE_VERSION, MemberBinding,

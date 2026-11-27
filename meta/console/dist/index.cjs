@@ -34082,7 +34082,7 @@ var NOTICE_WORDS = {
   expired: QUESTION_SET_REFUSAL_WORDS.expired
 };
 var FREE_TEXT_COUNTER_FROM = 200;
-var SOMETHING_ELSE = "Something else";
+var SOMETHING_ELSE = "Write my own reply";
 var ACTED_FOCUS_MS = 5e3;
 function QuestionGroup({ setId, question, answer, disabled, onChange }) {
   const name2 = React4.useId();
@@ -95842,7 +95842,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "3a2d0a36f8f1".trim() : "";
+  const named = true ? "9367bb5a8786".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {

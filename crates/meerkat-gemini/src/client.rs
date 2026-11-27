@@ -6400,6 +6400,101 @@ mod tests {
         Ok(())
     }
 
+    /// CHARACTERIZATION of today's request, not an endorsement of the route.
+    ///
+    /// The streaming request the adapter builds today for the `vertex_ai`
+    /// backend kind when an authorizer signs it: the shape a Google identity
+    /// gives the client, which a stub stands for here. One request goes to a
+    /// local stub, which records it.
+    ///
+    /// What is recorded: the Gemini developer-API streaming request sent to
+    /// the configured base URL.
+    /// `POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse`,
+    /// the credential in the authorizer's `Authorization` header alone (no
+    /// `x-goog-api-key`), and the public generateContent body (`contents` at
+    /// the top level, no wrapper).
+    ///
+    /// This row claims nothing about what a Vertex host accepts. It exists so
+    /// that a change of this request shape is seen.
+    #[tokio::test]
+    async fn today_the_vertex_backend_kind_streams_the_developer_api_request_no_claim_about_vertex()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{
+            body::Bytes,
+            http::{Method, Uri},
+        };
+
+        const MODEL: &str = "gemini-3.5-flash";
+
+        type Recorded = Arc<Mutex<Vec<(Method, Uri, HeaderMap, Value)>>>;
+        let recorded: Recorded = Arc::default();
+        let recorder = Arc::clone(&recorded);
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"recorded"}]},"finishReason":"STOP"}]}"#,
+            "",
+        ]
+        .join("\n");
+        let app = Router::new().fallback(
+            move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+                let recorder = Arc::clone(&recorder);
+                let payload = payload.clone();
+                async move {
+                    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    recorder
+                        .lock()
+                        .expect("recorder")
+                        .push((method, uri, headers, body));
+                    ([("content-type", "text/event-stream")], payload)
+                }
+            },
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the local stub");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve the local stub");
+        });
+
+        let client = GeminiClient::new_with_base_url(String::new(), base_url)
+            .with_authorizer(Arc::new(TestBearerAuthorizer))
+            .with_google_backend_kind(GoogleBackendKind::VertexAi);
+        let request = LlmRequest::new(MODEL, vec![Message::User(UserMessage::text("hello"))]);
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            if matches!(event?, LlmEvent::Done { .. }) {
+                break;
+            }
+        }
+        drop(stream);
+        handle.abort();
+
+        let recorded = recorded.lock().expect("recorded");
+        assert_eq!(recorded.len(), 1, "one request reaches the stub");
+        let (method, uri, headers, body) = &recorded[0];
+        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+
+        // The method, the whole path and the query: the developer API's, with
+        // no project, location or publisher in it.
+        assert_eq!(method, Method::POST);
+        assert_eq!(
+            uri.path(),
+            format!("/v1beta/models/{MODEL}:streamGenerateContent")
+        );
+        assert_eq!(uri.query(), Some("alt=sse"));
+
+        // The credential is the authorizer's bearer, and nothing else.
+        assert_eq!(header("authorization"), Some("Bearer test-token"));
+        assert!(headers.get("x-goog-api-key").is_none());
+
+        // The body is the public generateContent body.
+        assert!(body.get("contents").is_some(), "{body}");
+        assert!(body.get("request").is_none(), "{body}");
+        Ok(())
+    }
+
     #[test]
     fn test_build_request_body_rejects_video_tool_results() {
         let client = GeminiClient::new("test-key".to_string());

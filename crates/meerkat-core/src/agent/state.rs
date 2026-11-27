@@ -10498,6 +10498,11 @@ where
             self.tools_config.max_concurrent.max(1),
             executable_tool_calls,
             fence.clone(),
+            // The session's outer bound, as its host set it by now: read
+            // once for the batch, applied to each call from its own start.
+            self.tool_call_outer_bound
+                .as_ref()
+                .and_then(|slot| slot.get()),
         )
         .await;
         // A fence refusal fails the round before its results are collected
@@ -12233,12 +12238,14 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
         max_concurrent,
         executable_tool_calls,
         None,
+        None,
     )
 }
 
 // Keep construction and polling of the concrete tool-dispatch batch out of
 // the already-large agent run-loop poll frame.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_tool_calls_fenced_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
     tools_ref: Arc<T>,
     tool_dispatch_context: super::ToolDispatchContext,
@@ -12247,6 +12254,7 @@ fn dispatch_tool_calls_fenced_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
     max_concurrent: usize,
     executable_tool_calls: Vec<(usize, ToolCallOwned)>,
     fence: Option<DispatchFence>,
+    outer_bound: Option<crate::ToolCallOuterBound>,
 ) -> ToolDispatchFuture {
     Box::pin(async move {
         let dispatch_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
@@ -12271,20 +12279,50 @@ fn dispatch_tool_calls_fenced_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                 };
                 async move {
                     let start = crate::time_compat::Instant::now();
-                    let resolution_context =
-                        match crate::ToolDeadlineChain::new(vec![core_deadline]) {
-                            Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),
-                            Err(error) => {
-                                return (
-                                    tool_index,
-                                    tc,
-                                    Err(ToolError::from(
-                                        crate::ToolExecutionResolutionError::Deadline(error),
-                                    )),
-                                    start.elapsed().as_millis() as u64,
-                                );
-                            }
-                        };
+                    // The call's own timer starts here: a tool that owns its
+                    // wait counts what the call's deadline leaves from it.
+                    let tool_dispatch_context = tool_dispatch_context.with_dispatch_started(start);
+                    // The session's outer bound: what the caller it runs for
+                    // has left at this call's start, less the room the
+                    // session needs to report. One more contributor of the
+                    // chain, so the narrowest deadline wins; the context
+                    // carries the same duration for a tool that owns its
+                    // wait. A call that starts once nothing is left times
+                    // out here, without entering its body.
+                    let outer_allows = outer_bound.map(|bound| bound.allows_from(start));
+                    if matches!(outer_allows, Some(allowed) if allowed.is_zero()) {
+                        let timeout_error = ToolError::timeout(tc.name.clone(), 0);
+                        return (
+                            tool_index,
+                            tc,
+                            Err(timeout_error),
+                            start.elapsed().as_millis() as u64,
+                        );
+                    }
+                    let tool_dispatch_context = match outer_allows {
+                        Some(allowed) => tool_dispatch_context.with_outer_call_bound(allowed),
+                        None => tool_dispatch_context,
+                    };
+                    let mut deadlines = vec![core_deadline];
+                    if let Some(allowed) = outer_allows {
+                        deadlines.push(crate::ToolDeadlineContributor::finite(
+                            crate::ToolDeadlineOwner::DirectCaller,
+                            allowed,
+                        ));
+                    }
+                    let resolution_context = match crate::ToolDeadlineChain::new(deadlines) {
+                        Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),
+                        Err(error) => {
+                            return (
+                                tool_index,
+                                tc,
+                                Err(ToolError::from(
+                                    crate::ToolExecutionResolutionError::Deadline(error),
+                                )),
+                                start.elapsed().as_millis() as u64,
+                            );
+                        }
+                    };
                     let plan = match crate::resolve_tool_execution_plan_fenced(
                         &tools_ref,
                         tc.as_view(),
@@ -24385,6 +24423,222 @@ mod tests {
                 timeout_ms: 5,
             }) if name == "planned_slow"
         ));
+    }
+
+    /// A dispatcher whose one tool never answers. It counts the calls that
+    /// entered the tool and keeps what the dispatch context of the last one
+    /// said of the session's outer bound.
+    struct OuterBoundProbe {
+        tools: Arc<[Arc<ToolDef>]>,
+        entered: Arc<std::sync::atomic::AtomicUsize>,
+        outer_call_bound: Arc<Mutex<Option<std::time::Duration>>>,
+    }
+
+    impl OuterBoundProbe {
+        fn new() -> Self {
+            Self {
+                tools: Arc::from([Arc::new(ToolDef::new(
+                    "never_answers",
+                    "hangs until it is cut",
+                    serde_json::json!({ "type": "object" }),
+                ))]),
+                entered: Arc::default(),
+                outer_call_bound: Arc::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for OuterBoundProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            self.entered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            *self.outer_call_bound.lock().unwrap() = context.outer_call_bound();
+            self.dispatch(call).await
+        }
+    }
+
+    /// One call of `never_answers` through the loop's dispatch, under the
+    /// default deadline `default_timeout`, the per-tool deadlines
+    /// `tool_timeouts` and the session's outer bound `outer_bound`.
+    ///
+    /// The rows that use it run on a paused runtime clock: the loop's timer
+    /// for the call is the next thing the runtime waits for, so it elapses
+    /// at once, and no row depends on how fast its runner is. The guard
+    /// here is far beyond every bound of those rows.
+    async fn dispatch_under_outer_bound<T: AgentToolDispatcher + 'static>(
+        dispatcher: Arc<T>,
+        tool: &str,
+        default_timeout: std::time::Duration,
+        tool_timeouts: std::collections::HashMap<String, std::time::Duration>,
+        outer_bound: Option<crate::ToolCallOuterBound>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        let call = ToolCallOwned {
+            id: "bounded-call".to_string(),
+            name: tool.to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+        };
+        let mut results = tokio::time::timeout(
+            std::time::Duration::from_mins(5),
+            super::dispatch_tool_calls_fenced_boxed(
+                dispatcher,
+                crate::ToolDispatchContext::default(),
+                default_timeout,
+                tool_timeouts,
+                1,
+                vec![(0, call)],
+                None,
+                outer_bound,
+            ),
+        )
+        .await
+        .expect("the call ends well inside the row's own bound");
+        results.remove(0).2
+    }
+
+    /// A session's outer bound is one more deadline of every call: a call
+    /// whose configured deadline is longer is cut at what the bound allows
+    /// (what the caller has left less the report reserve, here a quarter),
+    /// reports that shorter timeout, and its dispatch context says what the
+    /// bound allowed.
+    #[tokio::test(start_paused = true)]
+    async fn an_outer_bound_cuts_a_call_before_its_configured_deadline() {
+        let probe = Arc::new(OuterBoundProbe::new());
+        let bound = crate::ToolCallOuterBound::new(
+            crate::time_compat::Instant::now() + std::time::Duration::from_secs(40),
+            std::time::Duration::from_secs(30),
+        );
+        let result = dispatch_under_outer_bound(
+            Arc::clone(&probe),
+            "never_answers",
+            std::time::Duration::from_mins(10),
+            std::collections::HashMap::new(),
+            Some(bound),
+        )
+        .await;
+        let Err(ToolError::Timeout { name, timeout_ms }) = result else {
+            panic!("the outer bound times the call out: {result:?}");
+        };
+        assert_eq!(name, "never_answers");
+        assert!(
+            (1..=30_000).contains(&timeout_ms),
+            "the call reports what the bound allowed (at most three quarters of 40 s), not its \
+             configured 10 minutes: {timeout_ms} ms"
+        );
+        assert_eq!(probe.entered.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let told = probe
+            .outer_call_bound
+            .lock()
+            .unwrap()
+            .expect("the context carries what the bound allowed");
+        assert_eq!(u64::try_from(told.as_millis()).unwrap(), timeout_ms);
+    }
+
+    /// The narrowest deadline wins: a tool with a shorter configured
+    /// deadline keeps it under an outer bound, and reports its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_shorter_configured_deadline_stays_under_an_outer_bound() {
+        let probe = Arc::new(OuterBoundProbe::new());
+        let bound = crate::ToolCallOuterBound::new(
+            crate::time_compat::Instant::now() + std::time::Duration::from_mins(10),
+            std::time::Duration::from_secs(30),
+        );
+        let result = dispatch_under_outer_bound(
+            Arc::clone(&probe),
+            "never_answers",
+            std::time::Duration::from_mins(10),
+            std::collections::HashMap::from([(
+                "never_answers".to_string(),
+                std::time::Duration::from_millis(5),
+            )]),
+            Some(bound),
+        )
+        .await;
+        assert!(
+            matches!(
+                &result,
+                Err(ToolError::Timeout {
+                    name,
+                    timeout_ms: 5,
+                }) if name == "never_answers"
+            ),
+            "the tool's own 5 ms deadline applied: {result:?}"
+        );
+    }
+
+    /// A call that starts once the caller has stopped waiting times out
+    /// without entering its tool.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_that_starts_after_the_outer_bound_ended_does_not_enter_its_tool() {
+        let probe = Arc::new(OuterBoundProbe::new());
+        // The bound ended at this moment: every call starts at or after it.
+        let bound = crate::ToolCallOuterBound::new(
+            crate::time_compat::Instant::now(),
+            std::time::Duration::from_secs(30),
+        );
+        let result = dispatch_under_outer_bound(
+            Arc::clone(&probe),
+            "never_answers",
+            std::time::Duration::from_mins(10),
+            std::collections::HashMap::new(),
+            Some(bound),
+        )
+        .await;
+        assert!(
+            matches!(
+                &result,
+                Err(ToolError::Timeout {
+                    name,
+                    timeout_ms: 0,
+                }) if name == "never_answers"
+            ),
+            "nothing was left of the bound: {result:?}"
+        );
+        assert_eq!(probe.entered.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A tool that owns its lifetime bound is not cut by the loop's default
+    /// deadline, but a session's outer bound cuts it: a nested call of such
+    /// a tool ends before the caller above it stops waiting.
+    #[tokio::test(start_paused = true)]
+    async fn an_outer_bound_cuts_a_tool_that_owns_its_deadline() {
+        let bound = crate::ToolCallOuterBound::new(
+            crate::time_compat::Instant::now() + std::time::Duration::from_secs(40),
+            std::time::Duration::from_secs(30),
+        );
+        let result = dispatch_under_outer_bound(
+            Arc::new(ToolOwnedDeadlineDispatcher::new(
+                std::time::Duration::from_mins(30),
+            )),
+            "slow_tool",
+            std::time::Duration::from_millis(20),
+            std::collections::HashMap::new(),
+            Some(bound),
+        )
+        .await;
+        let Err(ToolError::Timeout { name, timeout_ms }) = result else {
+            panic!("the outer bound times the tool out: {result:?}");
+        };
+        assert_eq!(name, "slow_tool");
+        assert!(
+            (21..=30_000).contains(&timeout_ms),
+            "cut by the outer bound, not by the default deadline of 20 ms: {timeout_ms} ms"
+        );
     }
 
     #[tokio::test]

@@ -14,15 +14,18 @@ use meerkat_core::service::SessionServiceCommsExt;
 use meerkat_core::types::HandlingMode;
 use serde::Serialize;
 
+use crate::ids::{AgentRuntimeId, FenceToken};
 use crate::machines::mob_machine::HostId;
 use crate::profile::Profile;
+use crate::tokio;
 use crate::{
     AgentIdentity, MobDeliveryIdentity, MobError, MobRuntimeMode, ProfileName, WorkOrigin, WorkSpec,
 };
 
 use super::{
-    BoundedResultSpec, BoundedTurnWaitError, ForkMemberAtTurnBoundary, MobHandle, SpawnMemberSpec,
-    SpawnResult, WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle,
+    BoundedResultSpec, BoundedTurnWaitError, ForkMemberAtTurnBoundary, MemberDeliveryScope,
+    MobHandle, SpawnMemberSpec, SpawnResult, WorkBoundedTurnResult, WorkDeliveryReceipt,
+    WorkTurnHandle,
 };
 
 /// Visible best-effort reporting convention for bounded delegated work.
@@ -580,6 +583,522 @@ pub enum DelegationExecutionError {
         error: BoundedTurnWaitError<WorkDeliveryReceipt>,
         retirement_error: Option<MobError>,
     },
+    /// The run limit of [`DelegationExecutionService::execute_within`]
+    /// elapsed before the helper's turn reached a terminal. The delegation
+    /// ended its helper; `ended` says what became of it.
+    #[error("delegated helper did not finish within {max_run:?}: {ended}")]
+    MaxRunElapsed {
+        max_run: std::time::Duration,
+        ended: DelegationHelperEnded,
+    },
+    /// The task that owned a run of
+    /// [`DelegationExecutionService::execute_within`] ended without
+    /// answering (it unwound, or its runtime is shutting down). A helper it
+    /// had seated is ended by the task's own guard, without the caller:
+    /// what became of it is not known here.
+    #[error(
+        "the delegation's run was lost before it answered; what became of its helper is not \
+         known"
+    )]
+    RunLost,
+}
+
+/// How long a run that was ended (its limit elapsed, or its caller stopped
+/// listening) waits, after the cancel, for the helper's turn to show that it
+/// had completed before the cancel landed. Such a turn shows at once. The
+/// cancel takes effect at the run's next boundary, so a run that is inside a
+/// model call or a tool call shows no terminal here; the retirement ends it.
+const ENDED_RUN_TERMINAL_REREAD: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long the retirement of a helper whose run was ended is retried.
+const ENDED_RUN_RETIRE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The pause between two attempts of that retirement.
+const ENDED_RUN_RETIRE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What became of a helper whose delegation ended without its turn's
+/// terminal result: every value the `helper` field of a `delegate` answer
+/// carries. [`DelegationExecutionService::execute_within`] reports the ends
+/// of a run that reached its limit; a surface names the others for the
+/// failures it answers itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DelegationHelperEnd {
+    /// Its run was cancelled and it was retired.
+    CancelledAndRetired,
+    /// Its turn failed, or was not admitted, and it was retired.
+    Retired,
+    /// The incarnation this delegation seated was no longer the member's
+    /// current one (retired or replaced by another hand). Nothing of a
+    /// later incarnation was cancelled or retired.
+    AlreadyGone,
+    /// No helper was seated: the call's wait was used up before the spawn.
+    /// There is nothing to cancel or retire.
+    NotSeated,
+    /// Its mob takes no commands any more (it completed, was destroyed or
+    /// was shut down), so it could not be ended.
+    MobNotRunning,
+    /// Its retirement failed. It stays a member until it is retired.
+    RetirementFailed,
+    /// Ending it had not finished when the caller had to be answered: its
+    /// spawn or its turn's admission was still in flight when the run limit
+    /// elapsed, or its cancel and retirement took longer than the caller
+    /// waits for them. The run's own task goes on and ends it without the
+    /// caller; how that went is logged.
+    EndPending,
+    /// The run's task was lost before it answered. If a helper was seated,
+    /// its end goes on without the caller; what became of it is not known.
+    Unknown,
+}
+
+impl DelegationHelperEnd {
+    /// Every end, in the order a tool's description lists them. A slice: a
+    /// value added later changes its length, not its type.
+    pub const ALL: &[Self] = &[
+        Self::CancelledAndRetired,
+        Self::Retired,
+        Self::AlreadyGone,
+        Self::NotSeated,
+        Self::EndPending,
+        Self::MobNotRunning,
+        Self::RetirementFailed,
+        Self::Unknown,
+    ];
+
+    /// The stable name of this end, as a tool answer carries it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CancelledAndRetired => "cancelled_and_retired",
+            Self::Retired => "retired",
+            Self::AlreadyGone => "already_gone",
+            Self::NotSeated => "not_seated",
+            Self::MobNotRunning => "mob_not_running",
+            Self::RetirementFailed => "retirement_failed",
+            Self::EndPending => "end_pending",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// What the scoped retire of the helper a run seated came to.
+#[derive(Debug)]
+enum SeatedRetire {
+    /// The incarnation the run seated was retired.
+    Retired,
+    /// MobMachine holds another incarnation under the helper's identity, or
+    /// none: nothing of this run's is left to retire.
+    NotCurrent,
+    /// The retire, or the read of the delivery scope it acts under, failed.
+    Failed(MobError),
+}
+
+/// The refusal a shared lifecycle failure carries, or the error itself.
+fn lifecycle_refusal(error: &MobError) -> &MobError {
+    match error {
+        MobError::SharedRetirementFailure(inner) | MobError::SharedLifecycleFailure(inner) => {
+            lifecycle_refusal(inner)
+        }
+        other => other,
+    }
+}
+
+/// Whether `error` says that the incarnation a fenced command named is not
+/// the member's current one: the member is gone, or another incarnation
+/// holds its identity.
+fn names_another_incarnation(error: &MobError) -> bool {
+    matches!(
+        lifecycle_refusal(error),
+        MobError::MemberNotFound(_)
+            | MobError::StaleFenceToken { .. }
+            | MobError::StaleDeliveryScope { .. }
+            | MobError::StaleMemberOperatorAuthority { .. }
+            | MobError::IncarnationMismatch { .. }
+    )
+}
+
+/// Whether `error` says that the mob no longer runs.
+fn mob_no_longer_runs(error: &MobError) -> bool {
+    matches!(
+        lifecycle_refusal(error),
+        MobError::InvalidTransition { .. } | MobError::ActorCommandChannelClosed
+    )
+}
+
+/// How a delegation ended its helper once the run had ended without the
+/// helper's terminal result: the answers of the fenced cancel and of the
+/// scoped retire, classified.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DelegationHelperEnded {
+    /// What became of the helper.
+    pub end: DelegationHelperEnd,
+    /// The cancel's failure, when it failed for a reason other than the
+    /// incarnation being gone or the mob no longer running.
+    pub cancel_error: Option<String>,
+    /// The retirement's failure, when [`DelegationHelperEnd::RetirementFailed`].
+    pub retirement_error: Option<String>,
+}
+
+impl DelegationHelperEnded {
+    /// Classify the answers of the fenced cancel and the scoped retire of
+    /// one helper incarnation.
+    fn of(cancel: Result<(), MobError>, retire: SeatedRetire) -> Self {
+        let cancel_names_another = cancel.as_ref().is_err_and(names_another_incarnation);
+        let cancel_error = cancel
+            .err()
+            .filter(|error| !names_another_incarnation(error) && !mob_no_longer_runs(error))
+            .map(|error| error.to_string());
+        let (end, retirement_error) = match retire {
+            SeatedRetire::Retired if cancel_names_another => {
+                (DelegationHelperEnd::AlreadyGone, None)
+            }
+            SeatedRetire::Retired => (DelegationHelperEnd::CancelledAndRetired, None),
+            SeatedRetire::NotCurrent => (DelegationHelperEnd::AlreadyGone, None),
+            SeatedRetire::Failed(error) if mob_no_longer_runs(&error) => {
+                (DelegationHelperEnd::MobNotRunning, None)
+            }
+            SeatedRetire::Failed(error) => (
+                DelegationHelperEnd::RetirementFailed,
+                Some(error.to_string()),
+            ),
+        };
+        Self {
+            end,
+            cancel_error,
+            retirement_error,
+        }
+    }
+
+    /// The helper's end had not finished when the caller had to be
+    /// answered (see [`DelegationHelperEnd::EndPending`]).
+    fn pending() -> Self {
+        Self {
+            end: DelegationHelperEnd::EndPending,
+            cancel_error: None,
+            retirement_error: None,
+        }
+    }
+}
+
+impl std::fmt::Display for DelegationHelperEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.end {
+            DelegationHelperEnd::CancelledAndRetired => {
+                f.write_str("the helper was cancelled and retired")
+            }
+            DelegationHelperEnd::AlreadyGone => f.write_str(
+                "the helper was already gone (retired or replaced by another hand); nothing \
+                 else was cancelled or retired",
+            ),
+            DelegationHelperEnd::MobNotRunning => f.write_str(
+                "the helper's mob no longer takes commands, so the helper could not be ended",
+            ),
+            DelegationHelperEnd::RetirementFailed => {
+                f.write_str("the helper could not be retired")?;
+                match self.retirement_error.as_deref() {
+                    Some(error) => write!(f, " ({error}); it is still a member"),
+                    None => f.write_str("; it is still a member"),
+                }
+            }
+            DelegationHelperEnd::EndPending => f.write_str(
+                "ending the helper had not finished when the call had to answer; it goes on \
+                 without the caller",
+            ),
+            DelegationHelperEnd::Retired => f.write_str("the helper was retired"),
+            DelegationHelperEnd::NotSeated => f.write_str("no helper was seated"),
+            DelegationHelperEnd::Unknown => f.write_str("what became of the helper is not known"),
+        }
+    }
+}
+
+/// The bounds of one run of [`DelegationExecutionService::execute_within`],
+/// and the member its call was made for.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DelegationRunBounds {
+    /// How long the caller waits for the helper's result, counted from the
+    /// call.
+    pub max_run: std::time::Duration,
+    /// How long the caller of a run that ended without the helper's result
+    /// waits, after `max_run`, for the helper's end before it is answered
+    /// [`DelegationHelperEnd::EndPending`].
+    pub end_within: std::time::Duration,
+    /// The member the call was made for, as the mob's member tool audience
+    /// is asked whether it hides the helper from it; `None` for a call made
+    /// by no member of the mob.
+    pub caller: Option<AgentIdentity>,
+}
+
+impl DelegationRunBounds {
+    #[must_use]
+    pub const fn new(max_run: std::time::Duration, end_within: std::time::Duration) -> Self {
+        Self {
+            max_run,
+            end_within,
+            caller: None,
+        }
+    }
+
+    /// Name the member the call was made for.
+    #[must_use]
+    pub fn for_caller(mut self, caller: Option<AgentIdentity>) -> Self {
+        self.caller = caller;
+        self
+    }
+}
+
+/// The failure of [`DelegationExecutionService::execute_within`], with what
+/// was read of the helper the call seated while it was seated.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DelegationRunFailure {
+    /// Why the delegation has no result.
+    pub error: DelegationExecutionError,
+    /// The session the helper ran on. `None` when no helper was seated, or
+    /// when its session could not be read while it was seated.
+    pub helper_session_id: Option<meerkat_core::SessionId>,
+    /// Whether the mob's member tool audience hides the helper from the
+    /// member the call was made for, asked when the helper was seated, with
+    /// the labels of its roster row. `None` when no helper was seated: the
+    /// audience was not asked.
+    pub helper_hidden_from_caller: Option<bool>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl DelegationRunFailure {
+    /// The failure of a run that ended at its limit, as a surface's test
+    /// hands it to the surface's answer. Test builds only.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn max_run_elapsed_for_test(
+        end: DelegationHelperEnd,
+        retirement_error: Option<String>,
+        helper_session_id: Option<meerkat_core::SessionId>,
+        helper_hidden_from_caller: Option<bool>,
+    ) -> Self {
+        Self {
+            error: DelegationExecutionError::MaxRunElapsed {
+                max_run: std::time::Duration::from_secs(1),
+                ended: DelegationHelperEnded {
+                    end,
+                    cancel_error: None,
+                    retirement_error,
+                },
+            },
+            helper_session_id,
+            helper_hidden_from_caller,
+        }
+    }
+
+    /// The failure of a run whose helper the mob refused to seat with
+    /// `error`, as a surface's test hands it to the surface's answer. Test
+    /// builds only.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn spawn_refused_for_test(error: MobError) -> Self {
+        Self {
+            error: DelegationExecutionError::Spawn(error),
+            helper_session_id: None,
+            helper_hidden_from_caller: None,
+        }
+    }
+}
+
+/// The helper one run seated, as that run's own spawn named it: the
+/// selectors of the fenced cancel and of the scoped retire. Nothing else
+/// identifies what the run may end.
+#[derive(Clone)]
+struct SeatedHelper {
+    runtime_id: AgentRuntimeId,
+    fence_token: FenceToken,
+    /// The audience's answer for the helper, once it was asked (see
+    /// [`DelegationRunFailure::helper_hidden_from_caller`]).
+    hidden_from_caller: Option<bool>,
+    /// The helper's session, from the last delivery scope read that named
+    /// this incarnation.
+    session_id: Option<meerkat_core::SessionId>,
+}
+
+/// What one bounded run's own spawn named, written by the run's `start` the
+/// moment the spawn answered, so that it is known to the run's task and to
+/// the guard that ends the helper of a lost run whatever `start` does next.
+/// It is no lifecycle state: what the helper is, is MobMachine's to say.
+struct RunSeat {
+    caller: Option<AgentIdentity>,
+    /// When the run's caller stops waiting for the helper's result: the
+    /// bound on the helper's own tool calls counts down to it. `None` for a
+    /// wait too long to name a moment.
+    wait_ends: Option<meerkat_core::time_compat::Instant>,
+    seated: std::sync::Mutex<Option<SeatedHelper>>,
+    /// The slot the run set its helper's tool bound in, kept to lift the
+    /// bound when the run is over.
+    tool_bound: std::sync::Mutex<Option<Arc<meerkat_core::ToolCallOuterBoundSlot>>>,
+}
+
+impl RunSeat {
+    fn new(
+        caller: Option<AgentIdentity>,
+        wait_ends: Option<meerkat_core::time_compat::Instant>,
+    ) -> Self {
+        Self {
+            caller,
+            wait_ends,
+            seated: std::sync::Mutex::new(None),
+            tool_bound: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Keep the slot in which the run bound its helper's tool calls.
+    fn keep_tool_bound(&self, slot: Arc<meerkat_core::ToolCallOuterBoundSlot>) {
+        *self
+            .tool_bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(slot);
+    }
+
+    /// Lift the bound the run put on its helper's tool calls: the run is
+    /// over. A helper that outlives its run (its retirement failed) waits
+    /// for nobody any more, and a bound that has ended would cut every tool
+    /// call of a turn it is given later.
+    fn lift_tool_bound(&self) {
+        if let Some(slot) = self
+            .tool_bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            slot.clear();
+        }
+    }
+
+    fn seat(&self, spawn: &SpawnResult) {
+        *self
+            .seated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SeatedHelper {
+            runtime_id: spawn.agent_runtime_id.clone(),
+            fence_token: spawn.fence_token,
+            hidden_from_caller: None,
+            session_id: None,
+        });
+    }
+
+    fn note(&self, note: impl FnOnce(&mut SeatedHelper)) {
+        if let Some(seated) = self
+            .seated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            note(seated);
+        }
+    }
+
+    fn seated(&self) -> Option<SeatedHelper> {
+        self.seated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Ends the helper of a bounded run whose task ended without settling it:
+/// the task unwound, or was dropped. Armed for the whole run; the fenced
+/// cancel and the scoped retire it issues name the incarnation the run's own
+/// spawn returned, as the run itself would.
+struct EndHelperOfLostRun {
+    service: Option<DelegationExecutionService>,
+    identity: AgentIdentity,
+    seat: Arc<RunSeat>,
+    /// The run's owner lease (see [`DelegationExecutionService::own_run`]):
+    /// held for the task that ends the helper of a lost run, and by nothing
+    /// else of the guard.
+    owner: Option<MobHandle>,
+}
+
+impl EndHelperOfLostRun {
+    fn arm(
+        service: DelegationExecutionService,
+        identity: AgentIdentity,
+        seat: Arc<RunSeat>,
+        owner: Option<MobHandle>,
+    ) -> Self {
+        Self {
+            service: Some(service),
+            identity,
+            seat,
+            owner,
+        }
+    }
+
+    /// The run settled its helper itself.
+    fn disarm(mut self) {
+        self.service = None;
+    }
+}
+
+impl Drop for EndHelperOfLostRun {
+    fn drop(&mut self) {
+        let Some(service) = self.service.take() else {
+            return;
+        };
+        let Some(seated) = self.seat.seated() else {
+            return;
+        };
+        let identity = self.identity.clone();
+        let seat = Arc::clone(&self.seat);
+        let owner = self.owner.take();
+        let end = async move {
+            // The mob stays owned until the helper of the lost run is ended.
+            let _owner = owner;
+            let cleanup = service.handle.bounded_child_cleanup_authority();
+            let cancel = cleanup
+                .cancel_all_work(seated.runtime_id.clone(), seated.fence_token)
+                .await;
+            let retire = service
+                .retire_seated(&cleanup, &identity, &seat, &seated)
+                .await;
+            // The lost run is over too.
+            seat.lift_tool_bound();
+            let ended = DelegationHelperEnded::of(cancel, retire);
+            tracing::warn!(
+                mob_id = %service.handle.mob_id(),
+                member = %identity,
+                helper = ended.end.as_str(),
+                cancel_error = ?ended.cancel_error,
+                retirement_error = ?ended.retirement_error,
+                "a delegation's run was lost before it settled; its helper was ended"
+            );
+        };
+        // The browser runtime has one local executor and no runtime handle.
+        #[cfg(target_arch = "wasm32")]
+        {
+            tokio::spawn(end);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(end);
+            }
+            Err(_) => tracing::warn!(
+                member = %self.identity,
+                "the helper of a lost delegation run could not be ended: no async runtime at drop"
+            ),
+        }
+    }
+}
+
+/// The answer one bounded run owes its caller.
+type RunAnswer = Result<DelegationExecutionOutcome, DelegationRunFailure>;
+
+/// Resolves when the caller of a run stopped listening; never, once the
+/// caller was answered.
+async fn caller_gone(caller: &mut Option<tokio::sync::oneshot::Sender<RunAnswer>>) {
+    match caller.as_mut() {
+        Some(caller) => caller.closed().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Mob-owned reusable executor for one synchronous delegated helper turn.
@@ -597,6 +1116,13 @@ impl DelegationExecutionService {
     /// hears a truthful busy answer. The fork's store IO is outside the
     /// bound.
     pub const SOURCE_TURN_BOUNDARY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// What a bounded run ([`Self::execute_within`]) keeps back of its
+    /// caller's wait for the helper's report: a tool call of the helper may
+    /// run what the caller has left less this much (less a quarter of what
+    /// is left when that is shorter), so a slow tool ends inside the helper
+    /// with time for the helper to say so.
+    pub const HELPER_REPORT_RESERVE: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn source_turn_boundary_wait(&self) -> std::time::Duration {
         #[cfg(test)]
@@ -637,18 +1163,23 @@ impl DelegationExecutionService {
         &self,
         request: DelegationExecutionRequest,
     ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
-        Box::pin(self.start_owning(request, false)).await
+        Box::pin(self.start_owning(request, false, None)).await
     }
 
     /// [`Self::start`]. With `retire_abandoned`, the started helper is
     /// retired on a detached task when its handle (or the terminal made
     /// from it) is dropped still armed: the caller owns the helper's whole
     /// life and disarms it after its own retirement.
+    ///
+    /// A bounded run instead supplies `seat` with `retire_abandoned` false:
+    /// its run owner observes the exact spawn before further work and owns
+    /// the helper's cancellation and retirement itself.
     #[allow(clippy::result_large_err)]
     async fn start_owning(
         &self,
         request: DelegationExecutionRequest,
         retire_abandoned: bool,
+        seat: Option<&RunSeat>,
     ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
         tracing::debug!("delegation service received a bounded execution request");
         let DelegationExecutionRequest {
@@ -936,6 +1467,9 @@ impl DelegationExecutionService {
                 SpawnResult::new(fork.agent_identity, fork.agent_runtime_id, fork.fence_token)
             }
         };
+        if let Some(seat) = seat {
+            self.observe_seat(seat, &spawn).await;
+        }
 
         // From the helper's spawn on, a call that owns the helper's whole
         // life and is dropped before its own retirement retires the helper.
@@ -994,10 +1528,16 @@ impl DelegationExecutionService {
                 // A live worker is already bound into the generated
                 // delegation lifecycle. Its failed-start cleanup remains
                 // pending until the machine emits exact retirement authority.
+                // A helper that is gone already (another hand retired it
+                // before its turn was admitted) leaves no retirement debt.
                 let retirement_error = if live_admission.is_some() {
                     None
                 } else {
-                    self.handle.retire(identity).await.err()
+                    self.handle
+                        .retire(identity)
+                        .await
+                        .err()
+                        .filter(|error| !names_another_incarnation(error))
                 };
                 // The retirement was asked for here; its debt is reported.
                 if let Some(guard) = abandon_guard {
@@ -1091,7 +1631,11 @@ impl DelegationExecutionService {
         self.handle.retire(identity).await
     }
 
-    /// Compatibility composition for synchronous callers such as MCP.
+    /// Compatibility composition for a synchronous caller that bounds the
+    /// call itself. The run lives in the caller's future; dropping it after
+    /// the spawn requests the helper's retirement on a detached task.
+    /// [`Self::execute_within`] instead owns a bounded run, cancels and
+    /// retires its exact helper, and reports how that helper ended.
     ///
     /// Machine-admitted live callers use [`Self::start`], machine-owned
     /// cancellation, explicit terminal resolution, and separately authorized
@@ -1103,8 +1647,17 @@ impl DelegationExecutionService {
         if request.live_admission.is_some() {
             return Err(DelegationExecutionError::LiveLifecycleRequired);
         }
-        let handle = Box::pin(self.start_owning(request, true)).await?;
+        let handle = Box::pin(self.start_owning(request, true, None)).await?;
         let terminal = handle.await_terminal().await;
+        self.settle_terminal(terminal).await
+    }
+
+    /// Retire the helper of a turn that reached its terminal, and answer
+    /// the delegation: the completed turn, or the turn's failure.
+    async fn settle_terminal(
+        &self,
+        terminal: DelegationTerminalizedExecution,
+    ) -> Result<DelegationExecutionOutcome, DelegationExecutionError> {
         let retirement_error = self
             .retire_terminalized(&terminal)
             .await
@@ -1135,6 +1688,492 @@ impl DelegationExecutionService {
                 error,
                 retirement_error: retirement_error.map(MobError::Internal),
             }),
+        }
+    }
+
+    /// [`Self::execute`] under a run limit, with the run owned by a task of
+    /// its own instead of the caller's future.
+    ///
+    /// A delegation that ends without its helper's terminal result starts
+    /// the end of its helper: when `bounds.max_run` elapses (counted from
+    /// this call), or when the caller stops listening (this future is
+    /// dropped), the run issues a cancel of the helper's work and then the
+    /// helper's retirement. Either can fail, and [`DelegationHelperEnded`]
+    /// says how they went. Both go through
+    /// MobMachine, fenced on the incarnation this call's own spawn named:
+    /// the cancel (`CancelAllWork`) names its runtime id and fence token,
+    /// the retire the delivery scope MobMachine holds for that incarnation
+    /// when it is retired, so neither reaches the caller's own work, another
+    /// delegation's helper, or a later member under the same identity.
+    ///
+    /// The caller is answered within `bounds.max_run` and
+    /// `bounds.end_within` of this call, whatever the run's task waits for.
+    /// A limit that elapses while the spawn or the turn's admission is
+    /// still in flight is answered at the limit, and a helper whose end
+    /// takes longer than `bounds.end_within` is answered then: both as
+    /// [`DelegationHelperEnd::EndPending`], with the task going on to end
+    /// the helper and logging how that went.
+    ///
+    /// The task holds the limit's timer, the two ends it listens on (the
+    /// helper's turn and the caller) and what its own spawn named, and no
+    /// lifecycle state: what the helper is, is MobMachine's to say. Spawn
+    /// and turn admission run in the task too, so a caller dropped between
+    /// them leaves no helper without a turn. A task that ends without
+    /// settling its run (it unwound) is answered
+    /// [`DelegationExecutionError::RunLost`], and its guard ends the helper
+    /// it had seated.
+    ///
+    /// A turn that completed before the cancel landed is answered as the
+    /// completed delegation, limit or not. With nobody left to answer, the
+    /// way the delegation settled is logged.
+    ///
+    /// The helper's own tool calls are bounded by what the caller has left
+    /// of `bounds.max_run`, less [`Self::HELPER_REPORT_RESERVE`]: a slow tool
+    /// ends inside the helper and the helper reports it, where the run
+    /// would otherwise reach its limit. The narrowest deadline wins, so a
+    /// tool with a shorter configured deadline keeps it. A `delegate` the
+    /// helper makes itself reads the same bound as its call's deadline, so a
+    /// nested run waits what this one has left. The bound is set on this
+    /// host's runtime for the helper's session: a helper placed on another
+    /// host, and a mob without the runtime adapter, run without it. It
+    /// bounds tool calls only: a helper's long model call still ends with
+    /// the run's limit, cancelled, with no partial result.
+    pub async fn execute_within(
+        &self,
+        request: DelegationExecutionRequest,
+        bounds: DelegationRunBounds,
+    ) -> Result<DelegationExecutionOutcome, DelegationRunFailure> {
+        let unseated = |error| DelegationRunFailure {
+            error,
+            helper_session_id: None,
+            helper_hidden_from_caller: None,
+        };
+        if request.live_admission.is_some() {
+            return Err(unseated(DelegationExecutionError::LiveLifecycleRequired));
+        }
+        let max_run = bounds.max_run;
+        let answer_by = max_run.saturating_add(bounds.end_within);
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(self.clone().own_run(request, bounds, answer_tx));
+        match tokio::time::timeout(answer_by, answer_rx).await {
+            Ok(Ok(answer)) => answer,
+            // The run's task ended without answering: it unwound, or its
+            // runtime is shutting down.
+            Ok(Err(_)) => Err(unseated(DelegationExecutionError::RunLost)),
+            // The run's task has not settled in the time the caller waits
+            // for it. Dropping the receiver tells the task that nobody
+            // listens any more, which ends the helper if that is not under
+            // way already.
+            Err(_) => Err(unseated(DelegationExecutionError::MaxRunElapsed {
+                max_run,
+                ended: DelegationHelperEnded::pending(),
+            })),
+        }
+    }
+
+    /// The task of one bounded delegation (see [`Self::execute_within`]):
+    /// the run, under the guard that ends its helper if the run is lost.
+    async fn own_run(
+        self,
+        request: DelegationExecutionRequest,
+        bounds: DelegationRunBounds,
+        answer_tx: tokio::sync::oneshot::Sender<RunAnswer>,
+    ) {
+        // The run holds its mob while it owes a helper its end: an owner
+        // lease, taken before the helper is seated and dropped when the run
+        // has settled it. The mob's actor counts a lease as a foreground
+        // owner, so an idle close asked in the gaps where nothing is in
+        // flight (before the turn's admission, between the helper's end and
+        // its retirement, between two attempts of that retirement) answers
+        // busy, and the retirement is not refused by a mob that closed under
+        // the run. A mob whose admission is closed already gives no lease:
+        // the run goes on without one and is answered that mob's own
+        // refusals.
+        //
+        // The lease is a value of its own: this local, and one clone in the
+        // guard below, which moves it into the task that ends the helper of
+        // a lost run. It issues no command and goes nowhere else: not into
+        // the service's handle, the request, the outcome or the failure. A
+        // lease lasts until the leased handle and all its clones drop, so a
+        // clone that outlived the run would keep the mob loaded and owned
+        // for good. It is as long as this task, which has no deadline beyond
+        // its steps; an actor that never answers the cancel or the
+        // retirement holds the task, and cannot answer an idle close either.
+        let owner = self.handle.acquire_owner().ok();
+        // The caller's wait counts from here, as the limit's timer does. A
+        // wait too long to name a moment bounds nothing.
+        let wait_ends = meerkat_core::time_compat::Instant::now().checked_add(bounds.max_run);
+        let seat = Arc::new(RunSeat::new(bounds.caller, wait_ends));
+        let lost = EndHelperOfLostRun::arm(
+            self.clone(),
+            request.identity.clone(),
+            Arc::clone(&seat),
+            owner.clone(),
+        );
+        self.settle_run(request, bounds.max_run, &seat, answer_tx)
+            .await;
+        // The run is over: a helper it could not retire waits for nobody.
+        seat.lift_tool_bound();
+        lost.disarm();
+        drop(owner);
+    }
+
+    /// The whole of one bounded delegation, from the helper's spawn to its
+    /// retirement.
+    async fn settle_run(
+        &self,
+        request: DelegationExecutionRequest,
+        max_run: std::time::Duration,
+        seat: &RunSeat,
+        answer_tx: tokio::sync::oneshot::Sender<RunAnswer>,
+    ) {
+        let identity = request.identity.clone();
+        // `None` once the caller was answered or stopped listening.
+        let mut caller = Some(answer_tx);
+        let limit = tokio::time::sleep(max_run);
+        tokio::pin!(limit);
+        let mut limit_elapsed = false;
+
+        let started = {
+            let start = self.start_owning(request, false, Some(seat));
+            tokio::pin!(start);
+            tokio::select! {
+                biased;
+                started = &mut start => started,
+                // The limit elapsed while the spawn or the turn's admission
+                // was still in flight: the caller is answered now, and the
+                // task keeps the start, to end whatever it seats.
+                () = &mut limit => {
+                    limit_elapsed = true;
+                    self.answer(
+                        caller.take(),
+                        &identity,
+                        seat,
+                        Err(DelegationExecutionError::MaxRunElapsed {
+                            max_run,
+                            ended: DelegationHelperEnded::pending(),
+                        }),
+                    );
+                    start.await
+                }
+                () = caller_gone(&mut caller) => {
+                    caller = None;
+                    start.await
+                }
+            }
+        };
+        let handle = match started {
+            Ok(handle) => handle,
+            // Nothing is left seated: `start` retired a helper whose turn
+            // it could not admit.
+            Err(error) => {
+                self.answer(caller.take(), &identity, seat, Err(error));
+                return;
+            }
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        lose_run_if_requested(&identity);
+        let Some(seated) = seat.seated() else {
+            // A run that owns no member of its own: not this composition's.
+            self.answer(
+                caller.take(),
+                &identity,
+                seat,
+                Err(DelegationExecutionError::ExistingMemberAdmissionRequired),
+            );
+            return;
+        };
+        let wait = handle.await_terminal();
+        tokio::pin!(wait);
+        if !limit_elapsed && caller.is_some() {
+            // A terminal that is ready wins over a limit or a lost caller
+            // seen at the same time.
+            tokio::select! {
+                biased;
+                terminal = &mut wait => {
+                    let settled = self.settle_terminal(terminal).await;
+                    self.answer(caller.take(), &identity, seat, settled);
+                    return;
+                }
+                () = &mut limit => limit_elapsed = true,
+                () = caller_gone(&mut caller) => caller = None,
+            }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if limit_elapsed {
+            hold_run_if_requested(&identity, RunHoldPoint::LimitElapsed).await;
+        }
+        // The cleanup of a member the engine itself seated for one call, as
+        // for a fork child past its limit: not an agent's cancel.
+        let cleanup = self.handle.bounded_child_cleanup_authority();
+        let cancel = cleanup
+            .cancel_all_work(seated.runtime_id.clone(), seated.fence_token)
+            .await;
+        if let Ok(terminal) = tokio::time::timeout(ENDED_RUN_TERMINAL_REREAD, &mut wait).await
+            && matches!(terminal.terminal(), DelegationTurnTerminal::Completed(_))
+        {
+            // The turn had completed before the cancel landed: its result
+            // is committed and is the delegation's answer.
+            let settled = self.settle_terminal(terminal).await;
+            self.answer(caller.take(), &identity, seat, settled);
+            return;
+        }
+        let retire = self.retire_seated(&cleanup, &identity, seat, &seated).await;
+        let ended = DelegationHelperEnded::of(cancel, retire);
+        if limit_elapsed && caller.is_some() {
+            self.answer(
+                caller.take(),
+                &identity,
+                seat,
+                Err(DelegationExecutionError::MaxRunElapsed { max_run, ended }),
+            );
+        } else {
+            tracing::warn!(
+                mob_id = %self.handle.mob_id(),
+                member = %identity,
+                limit_elapsed,
+                helper = ended.end.as_str(),
+                cancel_error = ?ended.cancel_error,
+                retirement_error = ?ended.retirement_error,
+                "a delegation ended without its helper's result; its caller had been answered \
+                 or had stopped listening when it ended its helper"
+            );
+        }
+    }
+
+    /// Answer the caller of one bounded delegation. A caller that was
+    /// answered already, or that stopped listening, gets nothing: the
+    /// settlement is logged instead.
+    fn answer(
+        &self,
+        caller: Option<tokio::sync::oneshot::Sender<RunAnswer>>,
+        identity: &AgentIdentity,
+        seat: &RunSeat,
+        settled: Result<DelegationExecutionOutcome, DelegationExecutionError>,
+    ) {
+        let seated = seat.seated();
+        let answer = settled.map_err(|error| DelegationRunFailure {
+            error,
+            helper_session_id: seated.as_ref().and_then(|seated| seated.session_id.clone()),
+            helper_hidden_from_caller: seated.as_ref().and_then(|seated| seated.hidden_from_caller),
+        });
+        let unheard = match caller {
+            Some(caller) => match caller.send(answer) {
+                Ok(()) => return,
+                Err(unheard) => unheard,
+            },
+            None => answer,
+        };
+        let (settled, retirement_error) = match &unheard {
+            Ok(outcome) => (
+                "the helper's turn completed".to_string(),
+                outcome.retirement_error().map(str::to_owned),
+            ),
+            Err(failure) => (
+                failure.error.to_string(),
+                match &failure.error {
+                    DelegationExecutionError::WorkAdmission {
+                        retirement_error, ..
+                    }
+                    | DelegationExecutionError::Turn {
+                        retirement_error, ..
+                    } => retirement_error.as_ref().map(ToString::to_string),
+                    _ => None,
+                },
+            ),
+        };
+        tracing::warn!(
+            mob_id = %self.handle.mob_id(),
+            member = %identity,
+            settled = %settled,
+            retirement_error = ?retirement_error,
+            "a delegation settled with nobody left to answer"
+        );
+    }
+
+    /// What `start` reads of the helper its spawn just seated, for the run
+    /// that owns it: the incarnation at once, then, while the helper's
+    /// roster row is there, whether the mob's member tool audience hides it
+    /// from the member the call was made for, and its session.
+    async fn observe_seat(&self, seat: &RunSeat, spawn: &SpawnResult) {
+        seat.seat(spawn);
+        let identity = &spawn.agent_identity;
+        let hidden = !self
+            .handle
+            .members_hidden_from(seat.caller.as_ref(), std::slice::from_ref(identity))
+            .await
+            .is_empty();
+        let session_id = self
+            .seated_scope(identity, &spawn.agent_runtime_id, spawn.fence_token)
+            .await
+            .ok()
+            .flatten()
+            .map(|scope| scope.session_id().clone());
+        match (session_id.as_ref(), seat.wait_ends) {
+            (Some(session_id), Some(wait_ends)) => {
+                self.bound_helper_tool_calls(seat, identity, session_id, wait_ends)
+                    .await;
+            }
+            // The helper's session could not be read at its seat: its tool
+            // calls run under their own deadlines alone, and the log says so.
+            (None, Some(_)) => tracing::debug!(
+                mob_id = %self.handle.mob_id(),
+                member = %identity,
+                "a delegation's helper runs without an inner deadline: its session could not \
+                 be read when it was seated"
+            ),
+            // A wait too long to name a moment bounds nothing.
+            (_, None) => {}
+        }
+        seat.note(|seated| {
+            seated.hidden_from_caller = Some(hidden);
+            seated.session_id = session_id;
+        });
+        #[cfg(any(test, feature = "test-support"))]
+        hold_run_if_requested(identity, RunHoldPoint::Seated).await;
+    }
+
+    /// Bound the tool calls of the helper a bounded run just seated by what
+    /// the run's caller has left: the helper's session, on this host's
+    /// runtime, gets an outer bound that ends when the caller stops waiting
+    /// (`wait_ends`) and keeps [`Self::HELPER_REPORT_RESERVE`] back. The
+    /// helper's agent loop then cuts a slow tool inside the helper, early
+    /// enough for the helper to report, and a `delegate` the helper makes
+    /// itself reads the same bound as its call's deadline.
+    ///
+    /// Set before the helper's turn is admitted, so its first tool call
+    /// runs under it. The bound fails open: a helper gets none, and its
+    /// tools run under their own deadlines alone, as before, when this
+    /// host's runtime holds no bindings for its session at that moment (a
+    /// helper placed on another host; bindings that are not published yet),
+    /// when its session could not be read at the seat, when the mob runs
+    /// without the runtime adapter, and from the moment its session is
+    /// registered anew during the run (the new registration's bindings hold
+    /// a slot of their own, which nobody set). The run lifts the bound when
+    /// it is over ([`RunSeat::lift_tool_bound`]).
+    async fn bound_helper_tool_calls(
+        &self,
+        seat: &RunSeat,
+        identity: &AgentIdentity,
+        session_id: &meerkat_core::SessionId,
+        wait_ends: meerkat_core::time_compat::Instant,
+    ) {
+        #[cfg(feature = "runtime-adapter")]
+        let slot = match self.handle.runtime_adapter.as_ref() {
+            Some(runtime) => runtime.session_tool_call_outer_bound(session_id).await,
+            None => None,
+        };
+        #[cfg(not(feature = "runtime-adapter"))]
+        let slot: Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> = None;
+        match slot {
+            Some(slot) => {
+                slot.set(meerkat_core::ToolCallOuterBound::new(
+                    wait_ends,
+                    Self::HELPER_REPORT_RESERVE,
+                ));
+                seat.keep_tool_bound(slot);
+            }
+            None => tracing::debug!(
+                mob_id = %self.handle.mob_id(),
+                member = %identity,
+                session_id = %session_id,
+                "a delegation's helper runs without an inner deadline: this host's runtime \
+                 holds no bindings for its session"
+            ),
+        }
+    }
+
+    /// The delivery scope MobMachine holds for `identity` now, if it names
+    /// the incarnation `runtime_id` and `fence_token` name. `Ok(None)` when
+    /// MobMachine holds another incarnation under the identity, or none:
+    /// the scope of another incarnation is not this run's to act on. `Err`
+    /// when the incarnation is current and its scope cannot be read.
+    async fn seated_scope(
+        &self,
+        identity: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+        fence_token: FenceToken,
+    ) -> Result<Option<MemberDeliveryScope>, MobError> {
+        match self.handle.capture_member_delivery_scope(identity).await {
+            Ok(scope) if scope.runtime_id() == runtime_id && scope.fence_token() == fence_token => {
+                Ok(Some(scope))
+            }
+            Ok(_) | Err(MobError::MemberNotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Retire the incarnation a run seated, under the delivery scope
+    /// MobMachine holds for it when the run ends: a scope read at the seat
+    /// names a session the member may have been bound away from since. A
+    /// scope that names another incarnation, or a refusal that says another
+    /// incarnation is current, ends it as not current; a mob that no longer
+    /// takes commands is final. A refusal that says the scope moved has the
+    /// scope read again. Any other failure is retried within
+    /// [`ENDED_RUN_RETIRE_RETRY`]: a failed read by another read, a failed
+    /// retire under the scope it was made under, since MobMachine may have
+    /// admitted that retire (the member then has no session binding to read
+    /// a scope from) and admits the same scope again.
+    async fn retire_seated(
+        &self,
+        cleanup: &MobHandle,
+        identity: &AgentIdentity,
+        seat: &RunSeat,
+        seated: &SeatedHelper,
+    ) -> SeatedRetire {
+        let started = meerkat_core::time_compat::Instant::now();
+        // The scope of a retire that failed, kept for its retry.
+        let mut kept: Option<MemberDeliveryScope> = None;
+        loop {
+            let scope = match kept.take() {
+                Some(scope) => Ok(scope),
+                None => match self
+                    .seated_scope(identity, &seated.runtime_id, seated.fence_token)
+                    .await
+                {
+                    Ok(Some(scope)) => {
+                        seat.note(|seated| seated.session_id = Some(scope.session_id().clone()));
+                        Ok(scope)
+                    }
+                    Ok(None) => return SeatedRetire::NotCurrent,
+                    Err(error) => Err(error),
+                },
+            };
+            let failure = match scope {
+                Ok(scope) => match cleanup.retire_at_scope(&scope).await {
+                    Ok(()) => return SeatedRetire::Retired,
+                    // The member's session was bound again since the scope
+                    // was read: the next attempt reads it anew.
+                    Err(error)
+                        if matches!(
+                            lifecycle_refusal(&error),
+                            MobError::StaleDeliveryScope { .. }
+                        ) =>
+                    {
+                        error
+                    }
+                    Err(error) if names_another_incarnation(&error) => {
+                        return SeatedRetire::NotCurrent;
+                    }
+                    Err(error) if mob_no_longer_runs(&error) => {
+                        return SeatedRetire::Failed(error);
+                    }
+                    Err(error) => {
+                        kept = Some(scope);
+                        error
+                    }
+                },
+                Err(error) => error,
+            };
+            if started.elapsed() >= ENDED_RUN_RETIRE_RETRY {
+                return SeatedRetire::Failed(failure);
+            }
+            tracing::debug!(
+                member = %identity,
+                error = %failure,
+                "retiring the helper of an ended delegation failed; retrying"
+            );
+            tokio::time::sleep(ENDED_RUN_RETIRE_RETRY_PAUSE).await;
         }
     }
 
@@ -1262,6 +2301,136 @@ impl DelegationExecutionService {
     }
 }
 
+/// Where a test holds a bounded delegation's run.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RunHoldPoint {
+    /// In `start`, once the helper is seated and was read, before its
+    /// turn's admission.
+    Seated,
+    /// Once the run limit has elapsed, before the helper is cancelled.
+    LimitElapsed,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+type DelegationRunHold = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(any(test, feature = "test-support"))]
+type DelegationRunHoldEnds = (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+);
+
+#[cfg(any(test, feature = "test-support"))]
+static DELEGATION_RUN_HOLDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(AgentIdentity, RunHoldPoint), DelegationRunHold>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(any(test, feature = "test-support"))]
+static DELEGATION_RUNS_TO_LOSE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<AgentIdentity>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(any(test, feature = "test-support"))]
+fn hold_run_for_test(identity: AgentIdentity, point: RunHoldPoint) -> DelegationRunHoldEnds {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    DELEGATION_RUN_HOLDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((identity, point), (entered_tx, release_rx));
+    (entered_rx, release_tx)
+}
+
+/// Hold the next bounded delegation of the helper `identity` at the moment
+/// its run limit has elapsed, before it cancels the helper. The receiver
+/// resolves when a run reaches that point; sending on (or dropping) the
+/// returned sender lets it go on. Exposed only by test builds, for the rows
+/// that decide what happens between the limit and the cancel.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_delegation_limit_for_test(identity: AgentIdentity) -> DelegationRunHoldEnds {
+    hold_run_for_test(identity, RunHoldPoint::LimitElapsed)
+}
+
+/// Hold the next bounded delegation of the helper `identity` inside its
+/// start: the helper is seated, its turn is not admitted yet. The ends are
+/// those of [`hold_delegation_limit_for_test`]. Exposed only by test builds,
+/// for the rows of a start that outlasts the run limit.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_delegation_start_for_test(identity: AgentIdentity) -> DelegationRunHoldEnds {
+    hold_run_for_test(identity, RunHoldPoint::Seated)
+}
+
+/// Make the task of the next bounded delegation of the helper `identity`
+/// unwind once its helper is seated and its turn admitted, as a defect in
+/// the run would. Exposed only by test builds, for the row of a lost run.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn lose_delegation_run_for_test(identity: AgentIdentity) {
+    DELEGATION_RUNS_TO_LOSE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(identity);
+}
+
+/// The slot of the outer bound on the tool calls of member `identity` of
+/// the mob `handle` serves, as this host's runtime holds it for the
+/// member's session: the slot a bounded delegation run sets for its helper
+/// and lifts when the run is over. `None` when the member has no session or
+/// the runtime holds no bindings for it. Exposed only by test builds, for
+/// the rows of the bound's set and lift.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub async fn helper_tool_bound_slot_for_test(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> Option<Arc<meerkat_core::ToolCallOuterBoundSlot>> {
+    let session_id = handle.resolve_bridge_session_id(identity).await?;
+    #[cfg(feature = "runtime-adapter")]
+    {
+        handle
+            .runtime_adapter
+            .as_ref()?
+            .session_tool_call_outer_bound(&session_id)
+            .await
+    }
+    #[cfg(not(feature = "runtime-adapter"))]
+    {
+        let _ = session_id;
+        None
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn hold_run_if_requested(identity: &AgentIdentity, point: RunHoldPoint) {
+    let hold = DELEGATION_RUN_HOLDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&(identity.clone(), point));
+    if let Some((entered, release)) = hold {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::panic)]
+fn lose_run_if_requested(identity: &AgentIdentity) {
+    let lose = DELEGATION_RUNS_TO_LOSE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(identity);
+    assert!(
+        !lose,
+        "a test asked for the bounded delegation run of `{identity}` to be lost"
+    );
+}
+
 fn trusted_descriptor_from_runtime(
     name: &str,
     peer_id: PeerId,
@@ -1337,4 +2506,169 @@ async fn notify_peer_added(
         })
         .await
         .is_ok()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod helper_end_tests {
+    use super::*;
+
+    /// A run that is over lifts the bound it put on its helper's tool
+    /// calls: a helper that outlives its run is not cut by a wait that has
+    /// ended. Lifting twice, or with nothing bound, does nothing.
+    #[test]
+    fn a_run_that_is_over_lifts_the_bound_on_its_helpers_tool_calls() {
+        let seat = RunSeat::new(None, None);
+        seat.lift_tool_bound();
+        let slot = Arc::new(meerkat_core::ToolCallOuterBoundSlot::default());
+        slot.set(meerkat_core::ToolCallOuterBound::new(
+            meerkat_core::time_compat::Instant::now(),
+            DelegationExecutionService::HELPER_REPORT_RESERVE,
+        ));
+        seat.keep_tool_bound(Arc::clone(&slot));
+        assert!(slot.get().is_some(), "the helper's tool calls are bounded");
+        seat.lift_tool_bound();
+        assert_eq!(slot.get(), None, "the bound is lifted with the run");
+        seat.lift_tool_bound();
+        assert_eq!(slot.get(), None);
+    }
+    use crate::MobState;
+
+    fn member() -> AgentIdentity {
+        AgentIdentity::from("helper")
+    }
+
+    fn not_running() -> MobError {
+        MobError::InvalidTransition {
+            from: MobState::Completed,
+            to: MobState::Running,
+        }
+    }
+
+    /// The ends a helper comes to once its delegation ended without its
+    /// result, from the answer of the fenced cancel and what the scoped
+    /// retire came to: each pair here is one typed value.
+    #[test]
+    fn the_cancel_and_the_retire_classify_the_helpers_end() {
+        // Cancelled and retired: both went through.
+        let ended = DelegationHelperEnded::of(Ok(()), SeatedRetire::Retired);
+        assert_eq!(ended.end, DelegationHelperEnd::CancelledAndRetired);
+        assert_eq!((ended.cancel_error, ended.retirement_error), (None, None));
+
+        // The incarnation was gone when the cancel named it: whatever the
+        // retire then comes to, nothing of this call's was left.
+        for retire in [SeatedRetire::Retired, SeatedRetire::NotCurrent] {
+            let ended = DelegationHelperEnded::of(Err(MobError::MemberNotFound(member())), retire);
+            assert_eq!(ended.end, DelegationHelperEnd::AlreadyGone);
+            assert_eq!((ended.cancel_error, ended.retirement_error), (None, None));
+        }
+
+        // The cancel went through (the run was idle) and MobMachine holds
+        // another incarnation by the time of the retire.
+        let ended = DelegationHelperEnded::of(Ok(()), SeatedRetire::NotCurrent);
+        assert_eq!(ended.end, DelegationHelperEnd::AlreadyGone);
+
+        // The mob no longer takes commands.
+        for stopped in [not_running(), MobError::ActorCommandChannelClosed] {
+            let ended =
+                DelegationHelperEnded::of(Err(not_running()), SeatedRetire::Failed(stopped));
+            assert_eq!(ended.end, DelegationHelperEnd::MobNotRunning);
+            assert_eq!((ended.cancel_error, ended.retirement_error), (None, None));
+        }
+
+        // The retirement failed: the helper stays, and the answer says why.
+        let ended = DelegationHelperEnded::of(
+            Ok(()),
+            SeatedRetire::Failed(MobError::Internal("archive failed".into())),
+        );
+        assert_eq!(ended.end, DelegationHelperEnd::RetirementFailed);
+        assert!(
+            ended
+                .retirement_error
+                .as_deref()
+                .is_some_and(|error| error.contains("archive failed")),
+            "{ended:?}"
+        );
+        assert!(ended.to_string().contains("still a member"), "{ended}");
+
+        // A helper whose scope cannot be read is not reported gone: it
+        // stays a member, and the answer says so.
+        let ended = DelegationHelperEnded::of(
+            Ok(()),
+            SeatedRetire::Failed(MobError::DeliveryScopeUnavailable {
+                agent_identity: member(),
+                reason: "member has no session binding to scope a delivery to".to_string(),
+            }),
+        );
+        assert_eq!(ended.end, DelegationHelperEnd::RetirementFailed);
+        assert!(ended.to_string().contains("still a member"), "{ended}");
+
+        // A cancel that failed for another reason is kept beside a retire
+        // that went through: the helper is gone, and the failure is told.
+        let ended = DelegationHelperEnded::of(
+            Err(MobError::Internal("cancel failed".into())),
+            SeatedRetire::Retired,
+        );
+        assert_eq!(ended.end, DelegationHelperEnd::CancelledAndRetired);
+        assert!(
+            ended
+                .cancel_error
+                .as_deref()
+                .is_some_and(|error| error.contains("cancel failed")),
+            "{ended:?}"
+        );
+
+        // An end that had not finished when the caller had to be answered.
+        let ended = DelegationHelperEnded::pending();
+        assert_eq!(ended.end, DelegationHelperEnd::EndPending);
+        assert_eq!((ended.cancel_error, ended.retirement_error), (None, None));
+    }
+
+    /// A refusal carried under a shared lifecycle failure is read as the
+    /// refusal it carries.
+    #[test]
+    fn a_shared_lifecycle_failure_is_classified_by_what_it_carries() {
+        let shared =
+            MobError::SharedRetirementFailure(Arc::new(MobError::MemberNotFound(member())));
+        assert!(names_another_incarnation(&shared));
+        assert!(!mob_no_longer_runs(&shared));
+        let shared = MobError::SharedLifecycleFailure(Arc::new(not_running()));
+        assert!(mob_no_longer_runs(&shared));
+        assert!(!names_another_incarnation(&shared));
+        assert!(!names_another_incarnation(&MobError::Internal("x".into())));
+    }
+
+    #[test]
+    fn every_end_has_a_stable_name() {
+        for (end, name) in [
+            (
+                DelegationHelperEnd::CancelledAndRetired,
+                "cancelled_and_retired",
+            ),
+            (DelegationHelperEnd::AlreadyGone, "already_gone"),
+            (DelegationHelperEnd::MobNotRunning, "mob_not_running"),
+            (DelegationHelperEnd::RetirementFailed, "retirement_failed"),
+            (DelegationHelperEnd::EndPending, "end_pending"),
+            (DelegationHelperEnd::Retired, "retired"),
+            (DelegationHelperEnd::NotSeated, "not_seated"),
+            (DelegationHelperEnd::Unknown, "unknown"),
+        ] {
+            assert_eq!(end.as_str(), name);
+            assert!(
+                DelegationHelperEnd::ALL.contains(&end),
+                "{name} is in the list of every end"
+            );
+        }
+        let mut names: Vec<&str> = DelegationHelperEnd::ALL
+            .iter()
+            .map(|end| end.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            DelegationHelperEnd::ALL.len(),
+            "every end is listed once"
+        );
+    }
 }

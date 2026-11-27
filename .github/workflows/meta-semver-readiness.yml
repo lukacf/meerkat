@@ -52,7 +52,10 @@ jobs:
     # Only crates that differ from the published baseline are rebuilt and the
     # baseline is one checkout of its tag, so a release measurement is a
     # minutes-scale job. Anything longer is a regression, not a slow day.
-    timeout-minutes: 45
+    # The limit is sized for the other path: when the newest release carries
+    # no baseline rustdoc asset, the gate measures against the published
+    # crates, and the tool then builds both sides itself with no compile cache.
+    timeout-minutes: 75
     steps:
       - name: Checkout candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

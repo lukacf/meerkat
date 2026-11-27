@@ -55,6 +55,92 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.19
+
+If you are upgrading from 0.9.18, check callers that stage model switches or
+handle `delegate` errors. If you plan to roll back, keep a backup from before
+setting `tools.web_search` on a mob profile.
+
+### Staged model switches: do not resend the input
+
+A `brain_swap` result of `staged` or `already_staged` does not mean the switch
+succeeded. If the target rejects the current reasoning level, the switch is
+denied with `CapabilityPolicy`. **The input runs on the original model.** Check
+the routing record or the host log; the agent gets no later turn notice. To use
+the target, choose a supported level or explicitly clear the held level, then
+request a new switch. On the stock host, a buildable target with no source of
+supported levels is refused. If an existing source is temporarily unreadable,
+the switch can take effect unchecked; a request on the target can still fail.
+
+Rust hosts constructing `RequestFiniteSwitchTurn` or `RequestUntilChangedSwitchTurn`
+must supply `target_reasoning_effort` and `inspected_current_identity` and update
+named patterns (or use `..`). `None` is not a compatibility verdict. Update
+exhaustive `TransitionId` matches for the six reasoning-effort refusal variants:
+finite and until-changed switches each have idle, attached, and running cases.
+Custom `SessionLlmReconfigureHost` implementations that need the target identity
+should implement `inspect_target_session_llm_identity`.
+
+### Mob profiles: preserve rollback options before setting web search
+
+Rust struct literals for `ToolConfig`, `PortableToolConfig`, `WireMobToolConfig`
+and `MobToolConfigInput` need the new `web_search: Option<bool>` field. Use
+`web_search: None` to leave the choice unset. A per-spawn override takes
+precedence; a local member can store that override even if its profile omits the
+key. A grant can open the tool despite `web_search = false`; the setting is not
+an access boundary.
+
+By source, versions 0.9.15-0.9.18 ignore the key in a mob profile and can drop
+it on rewrite. Strict portable and wire forms reject it. Do not rely on `false`
+to keep search disabled after downgrade, or assume an older host can reopen a
+placed member's stored spec. Restore from a stopped backup known to work with
+the older version. A build from the 0.9.16 tag refused a placed member's
+stored profile in an earlier test. Reading state written by this change with a
+released 0.9.18 runtime was not verified. See [Web search](/guides/mobs#web-search).
+
+### Delegated helpers: update timeout and permission handlers
+
+When `delegate` ends its own wait, handle `execution_failed` with
+`data.kind = delegate_helper_ended`. Read `reason` and `helper` before acting:
+cleanup can still be pending. Hosts watching tool events should also handle
+`ToolExecutionCompleted` with an error, not just `ToolExecutionTimedOut`.
+Keep handling the generic timeout: it can still occur before a helper is
+created or when an earlier outer deadline expires. `max_run_secs` can shorten
+the wait; to allow a longer wait, change `[tools.tool_timeouts] delegate`.
+This is not a deadline on a long model call or on a remote helper's tools.
+
+A control-scope refusal at helper seating or objective binding is now
+`access_denied`, without helper IDs. For a 0.9.18 caller, the same refusal is
+`execution_failed` with the `control scope denied` message and no typed data.
+Do not treat every `execution_failed` as a permission error or retry an
+unchanged denied call. Rust dispatchers that forward the tools' catalog must
+also forward `AgentToolDispatcher::dispatch_resolved_with_context` to preserve
+the resolved deadline. See [Delegate: its wait and how it ends](/reference/builtin-tools#delegate-its-wait-and-how-it-ends).
+
+### Self-hosted endpoints: read allowed strings from `enum`
+
+If your endpoint inspects Meerkat's tool schemas, read closed string choices
+from `enum`, not per-choice descriptions. For an optional parameter, omit it
+rather than assuming `null` is accepted. This affects the configured self-hosted
+Chat Completions and Responses paths, not direct OpenAI or third-party tool
+schemas. Request construction was checked, not acceptance by a live endpoint.
+
+### Meta Python: check comparisons against identity outcomes
+
+If mypy or pyright flags a comparison on the `outcome` of `identities.operation()`,
+check the string against the result variants. For example, `state.outcome == "refused"`
+narrows the result so you can read `state.refusal`. The annotations are more
+precise; the strings and objects returned at runtime have not changed.
+
+### Competing MCP resumes: check history before retrying
+
+When two `meerkat_resume` calls overlap on the same session and one rebuilds it,
+an error from the plain resume does not tell you whether its prompt ran. Alongside
+`-32003` (`session_resume_required`), you may see untyped errors such as `-32603`
+(`Agent error: agent error: Internal error: Runtime not ready: destroyed`) or
+`-32005` (`request cancelled`). Wait for the other resume to answer, read the
+session's history with `meerkat_history`, and resend the prompt only if it is
+absent. This limitation also applies to 0.9.18.
+
 ## Upgrading to 0.9.18
 
 This section is for systems running 0.9.17. The full list of changes is in
@@ -6191,9 +6277,22 @@ that prefix. For a mob named `team`, the scan skips the old `team.db` without
 opening it. Not seeing that mob after restore does not mean its data was
 deleted.
 
+The unprefixed filename is the one every release from 0.5.2 through 0.8.30
+wrote. Both forms escape the mob ID the same way: each byte other than an
+ASCII letter, a digit, `-` or `_` becomes `%` followed by two uppercase
+hexadecimal digits, so a `.` in the ID is written `%2E`.
+
+`rkat storage doctor` and `rkat storage migrate` do not apply the scan's
+filter. Both list every `.db` file in the `mobs` directory of each realm
+they inspect, whatever its name, and neither reports that the scan skips
+one. A file in their output is therefore not necessarily a mob the host
+restored.
+
 0.9.18 still filters by filename. If the old mob ID itself began with
 `mob--`, its old filename already passes that filter: for the mob
 `mob--team`, 0.8.30 wrote `mob--team.db`. In this case 0.9.18 can decode
-the whole filename stem and compare it with the ID in the store. This is not a general
+the whole filename stem and compare it with the ID in the store. The 0.9.18
+CHANGELOG sentence that the name an earlier release gave a store "is the
+mob's own as before" describes this case and no other. This is not a general
 migration of older stores. These rules were read from the tagged source;
 an upgrade with an actual 0.8.30 store was not tested.

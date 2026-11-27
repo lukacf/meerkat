@@ -2964,10 +2964,32 @@ async fn launch_roster(
     tokio::sync::mpsc::UnboundedReceiver<String>,
     Arc<FailNextSession>,
 ) {
+    launch_defined(
+        state,
+        in_process_definition(mob_id),
+        governed,
+        deciders,
+        roster,
+    )
+    .await
+}
+
+/// [`launch_roster`], of the mob `definition` defines.
+async fn launch_defined(
+    state: &Path,
+    definition: MobDefinition,
+    governed: bool,
+    deciders: bool,
+    roster: Arc<dyn RosterProvider>,
+) -> (
+    UnifiedRuntime,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    Arc<FailNextSession>,
+) {
     let (asked_tx, asked) = tokio::sync::mpsc::unbounded_channel();
     let fail_next_session = Arc::new(FailNextSession::default());
     let mut builder = UnifiedRuntimeBuilder::default()
-        .definition(in_process_definition(mob_id))
+        .definition(definition)
         .persistent_state(state)
         .continuity_from_state_dir(state)
         .await
@@ -3788,6 +3810,601 @@ async fn one_request_id_holds_one_decision_whatever_is_asked_under_it() {
         decision_of(&ask("r-1", scout()).await),
         decision,
         "the one decision still holds the operation"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// The decision the operation `operation` reads as held, as the host reads
+/// it: the id of its decision.
+async fn decision_read(
+    family: &Arc<dyn IdentityFamily>,
+    mob: &meerkat_mob::MobHandle,
+    host: &ChangeRequester,
+    operation: &OperationId,
+) -> String {
+    match family
+        .read(mob, host, IdentityRead::Operation(operation.clone()))
+        .await
+    {
+        Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome))) => {
+            decision_of(&outcome)
+        }
+        other => panic!("the operation reads its held decision: {other:?}"),
+    }
+}
+
+/// End the launch `runtime` so that the next launch can reopen its state
+/// directory in this process: the teardown is read settled, and the wait is
+/// for this lifetime's execution custody.
+async fn ended_for_a_reopen(runtime: UnifiedRuntime, state: &Path) {
+    let report = runtime.shutdown().await;
+    custody_wait::teardown_settled(&report);
+    drop(runtime);
+    custody_wait::predecessor_custody_released(state).await;
+}
+
+/// A held change asked again answers its decision, also when the launch's
+/// policy now denies it. A create is held; the next launch has a policy
+/// with no rule, which denies every create. The same request under the
+/// same id is the held request: it answers `pending_decision` with the
+/// decision it was held under, as the operation's read does, and not the
+/// refusal a new request gets. What the policy says now is asked when the
+/// decision is carried out, never when the held request is asked again.
+/// The same create under a fresh id is a new request, and is denied.
+///
+/// RED before a request under a held operation answered the held state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_change_asked_again_under_a_policy_that_now_denies_it_answers_its_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "held-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let held = asked_create(
+        &runtime.identity_family().expect("the family"),
+        &runtime.mob_handle(),
+        &host,
+        "held-1",
+        scout(),
+    )
+    .await;
+    let decision_id = decision_of(&held);
+    ended_for_a_reopen(runtime, temp.path()).await;
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    let denies = IdentityCreationPolicy::parse(&json!({"enabled": true}))
+        .expect("the policy parses")
+        .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(denies), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+
+    let fresh = asked_create(&family, &mob, &host, "fresh-1", scout()).await;
+    assert_eq!(
+        refusal_of(&fresh).0,
+        "change_denied",
+        "the policy of this launch denies the create as a new request: {fresh:?}"
+    );
+    assert_eq!(
+        decision_read(&family, &mob, &host, &operation).await,
+        decision_id,
+        "the operation still reads its held decision"
+    );
+    let again = asked_create(&family, &mob, &host, "held-1", scout()).await;
+    assert_eq!(
+        again.token(),
+        "pending_decision",
+        "the held request asked again answers its decision, not a new request's refusal: \
+         {again:?}"
+    );
+    assert_eq!(decision_of(&again), decision_id, "{again:?}");
+    assert!(
+        family
+            .read(&mob, &host, IdentityRead::Get(GetAgent::new("scout")))
+            .await
+            .is_err(),
+        "nothing was created"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// [`in_process_definition`], with or without the profile `courier`.
+fn definition_with_courier(mob_id: &str, courier: bool) -> MobDefinition {
+    let mut definition = in_process_definition(mob_id);
+    if courier {
+        let worker = definition
+            .profiles
+            .get(&ProfileName::from("worker"))
+            .expect("the definition has the profile worker")
+            .clone();
+        definition
+            .profiles
+            .insert(ProfileName::from("courier"), worker);
+    }
+    definition
+}
+
+/// A held change asked again answers its decision, also when the mob's
+/// definition no longer has the profile it names. A create of an agent of
+/// the profile `courier` is held; the host then declares a definition
+/// without that profile and starts again. The same request under the same
+/// id answers `pending_decision` with the decision it was held under, as
+/// the operation's read does, and not `profile_unknown`. The same create
+/// under a fresh id is a new request, and is refused `profile_unknown`.
+///
+/// RED before a request under a held operation answered the held state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_change_asked_again_after_its_profile_left_the_definition_answers_its_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "held-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "courier"}]);
+
+    let (runtime, _asked, _fail_next_session) = launch_defined(
+        temp.path(),
+        definition_with_courier(&mob_id, true),
+        false,
+        true,
+        Arc::new(InProcessRoster),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let held = asked_create(
+        &runtime.identity_family().expect("the family"),
+        &runtime.mob_handle(),
+        &host,
+        "held-1",
+        scout(),
+    )
+    .await;
+    let decision_id = decision_of(&held);
+    ended_for_a_reopen(runtime, temp.path()).await;
+
+    // The edited definition is declared as the stored one's successor: a
+    // persistent mob pins its definition, and a start that carries an
+    // undeclared edit is refused as divergent.
+    let without = definition_with_courier(&mob_id, false);
+    {
+        let storage = meerkat_mob::MobStorage::persistent(temp.path().join("event_log.sqlite3"))
+            .expect("open the mob store");
+        meerkat_meta::spec_update_ceremony::declare_spec_update(&storage, &mob_id, &without, 1)
+            .await
+            .expect("declare the definition without the profile");
+    }
+    let (runtime, _asked, _fail_next_session) =
+        launch_defined(temp.path(), without, false, true, Arc::new(InProcessRoster)).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+
+    let fresh = asked_create(&family, &mob, &host, "fresh-1", scout()).await;
+    assert_eq!(
+        refusal_of(&fresh).0,
+        "profile_unknown",
+        "the definition of this launch has no such profile for a new request: {fresh:?}"
+    );
+    assert_eq!(
+        decision_read(&family, &mob, &host, &operation).await,
+        decision_id,
+        "the operation still reads its held decision"
+    );
+    let again = asked_create(&family, &mob, &host, "held-1", scout()).await;
+    assert_eq!(
+        again.token(),
+        "pending_decision",
+        "the held request asked again answers its decision, not a new request's refusal: \
+         {again:?}"
+    );
+    assert_eq!(decision_of(&again), decision_id, "{again:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// The host's own check, which a row turns against every request.
+#[derive(Default)]
+struct TurningHooks {
+    refuses: AtomicBool,
+}
+
+impl IdentityHostHooks for TurningHooks {
+    fn validate(&self, _request: &IdentityRequest) -> Result<(), ValidationRefusal> {
+        if self.refuses.load(Ordering::Acquire) {
+            return Err(ValidationRefusal::new("the host takes no change now"));
+        }
+        Ok(())
+    }
+
+    fn consequences(
+        &self,
+        _request: &IdentityRequest,
+    ) -> Result<Vec<ConsequenceLine>, HookRefusal> {
+        Ok(Vec::new())
+    }
+}
+
+/// A held change asked again answers its decision, also when the host's own
+/// check has turned against it since. The held request is compared before
+/// the check is asked again: it answers `pending_decision` with the
+/// decision it was held under. Another request under the same id is still
+/// answered by the check (`validation_refused`), as a request under a fresh
+/// id is: the check is not passed by for a request the decision does not
+/// hold.
+///
+/// RED before the held request was compared ahead of the host's check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_change_asked_again_after_the_hosts_check_turned_against_it_answers_its_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    let hooks = Arc::new(TurningHooks::default());
+    assert!(
+        runtime.attach_identity_policy(
+            held_policy(),
+            IdentityFamilyOptions::new()
+                .with_host_hooks(Arc::clone(&hooks) as Arc<dyn IdentityHostHooks>)
+        )
+    );
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+
+    let decision_id = decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await);
+    hooks.refuses.store(true, Ordering::Release);
+
+    let fresh = asked_create(&family, &mob, &host, "r-2", scout()).await;
+    assert_eq!(
+        refusal_of(&fresh).0,
+        "validation_refused",
+        "the host's check refuses the create as a new request: {fresh:?}"
+    );
+    let other = asked_create(
+        &family,
+        &mob,
+        &host,
+        "r-1",
+        json!([{"name": "other", "profile": "worker"}]),
+    )
+    .await;
+    assert_eq!(
+        refusal_of(&other).0,
+        "validation_refused",
+        "another request under the held id is answered by the check: {other:?}"
+    );
+    let again = asked_create(&family, &mob, &host, "r-1", scout()).await;
+    assert_eq!(
+        again.token(),
+        "pending_decision",
+        "the held request asked again answers its decision, not the check's refusal: {again:?}"
+    );
+    assert_eq!(decision_of(&again), decision_id, "{again:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// What the answer above costs. A request that the judgment refuses has no
+/// normalized form, so it cannot be compared with the request a decision
+/// holds; all that can be told of it is its change kind and the agents it
+/// names. Under an operation a decision holds, a request of the held
+/// change's kind that names the held change's agents and cannot be judged
+/// answers the decision as it stands: here another create of `scout`, of a
+/// profile the mob does not define, under the id of the held create of
+/// `scout` reads that create's `pending_decision` and not
+/// `profile_unknown`. Nothing is held or written for it: the operation
+/// reads its one decision and no agent was created. Under a fresh id the
+/// same request is refused `profile_unknown`.
+///
+/// RED before a request under a held operation answered the held state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_of_the_held_kind_and_agents_that_cannot_be_judged_reads_the_held_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "r-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+    let unjudged = || json!([{"name": "scout", "profile": "no-such-profile"}]);
+
+    let decision_id = decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await);
+    let fresh = asked_create(&family, &mob, &host, "r-2", unjudged()).await;
+    assert_eq!(refusal_of(&fresh).0, "profile_unknown", "{fresh:?}");
+
+    let other = asked_create(&family, &mob, &host, "r-1", unjudged()).await;
+    assert_eq!(
+        other.token(),
+        "pending_decision",
+        "a request of the held kind and agents that the judgment refuses reads the held \
+         decision: {other:?}"
+    );
+    assert_eq!(decision_of(&other), decision_id, "{other:?}");
+    assert_eq!(
+        decision_read(&family, &mob, &host, &operation).await,
+        decision_id,
+        "the operation reads its one decision"
+    );
+    assert!(
+        family
+            .read(&mob, &host, IdentityRead::Get(GetAgent::new("scout")))
+            .await
+            .is_err(),
+        "nothing was created for either request"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A request that the judgment refuses, under an operation a decision
+/// holds, is not answered the held decision when what it asks already
+/// shows it is another request: another change kind, or other agents. It
+/// is `operation_reused`, as any other request under the id is. Under the
+/// id of a held create of `scout`: a create of another agent that cannot
+/// be judged, an archive of an agent with a digest that is no longer its
+/// spec's, and an archive of a name no agent holds. Each is refused by its
+/// own cause under a fresh id (`profile_unknown`, `stale_spec`,
+/// `identity_unknown`). The held request still answers its decision.
+///
+/// RED before the held state was answered only to a request of the held
+/// change's kind and agents: all three read the held create's
+/// `pending_decision` (the last two also before any of this, when
+/// `stale_spec` and `identity_unknown` answered the held state to any
+/// request under the id).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_of_another_kind_or_other_agents_that_cannot_be_judged_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "r-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+    let digest_of = |name: &'static str| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest.clone(),
+                other => panic!("a get answers {name}: {other:?}"),
+            }
+        }
+    };
+
+    let made = asked_create(
+        &family,
+        &mob,
+        &host,
+        "r-0",
+        json!([{"name": "alpha", "profile": "worker"}]),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let decision_id = decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await);
+    // A digest that is a spec's, and not the spec of the agent it is sent
+    // for: the configured agent's, sent for the created one.
+    let stale = digest_of(HOST_A).await;
+    assert_ne!(stale, digest_of("alpha").await, "the two specs differ");
+
+    let mut wrong = Vec::new();
+    for (what, cause, change) in [
+        (
+            "a create of another agent that cannot be judged",
+            "profile_unknown",
+            create_of(json!([{"name": "other", "profile": "no-such-profile"}])),
+        ),
+        (
+            "an archive of an agent with a stale digest",
+            "stale_spec",
+            IdentityChangeSpec::Archive(agent_ref("alpha", &stale)),
+        ),
+        (
+            "an archive of a name no agent holds",
+            "identity_unknown",
+            IdentityChangeSpec::Archive(agent_ref("nobody", &stale)),
+        ),
+    ] {
+        let fresh = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(
+                    OperationId::for_request(&host.recorded(), &format!("fresh-{cause}"))
+                        .expect("a request id"),
+                    change.clone(),
+                ),
+            )
+            .await;
+        match fresh.refusal() {
+            Some(refusal) if refusal.kind_token() == cause => {}
+            _ => wrong.push(format!(
+                "{what}, under a fresh id, answers {} and not {cause}",
+                fresh.to_json()
+            )),
+        }
+        let under = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(operation.clone(), change),
+            )
+            .await;
+        match under.refusal() {
+            Some(refusal) if refusal.kind_token() == "operation_reused" => {}
+            _ => wrong.push(format!(
+                "{what}, under the held id, answers {}",
+                under.to_json()
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert_eq!(
+        decision_of(&asked_create(&family, &mob, &host, "r-1", scout()).await),
+        decision_id,
+        "the held request still answers its decision"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A decision that ended is the answer of its operation for good, whatever
+/// is asked under it: the held request, another request the host's own
+/// check refuses, a change of an agent the host configures, and a request
+/// that cannot be judged all answer how the decision ended
+/// (`decision_closed`), and none of them the refusal a new request gets.
+///
+/// RED before the held state answered ahead of the owner's rule, the
+/// host's check and the judgment's refusals: the three other requests were
+/// answered `validation_refused`, `owner_read_only` and `profile_unknown`.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_an_ended_decision_every_request_answers_how_it_ended() {
+    use meerkat_meta::identity_creation::WithdrawRequest;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(
+        held_policy(),
+        IdentityFamilyOptions::new().with_host_hooks(Arc::new(NamingHooks))
+    ));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "r-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker"}]);
+
+    let held = asked_create(&family, &mob, &host, "r-1", scout()).await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    // Of the host, its operator withdraws a held change.
+    family
+        .withdraw(
+            &mob,
+            &ChangeRequester::host_operator("ops"),
+            WithdrawRequest::new(operation.clone()),
+        )
+        .await
+        .expect("the host's operator withdraws the held create");
+
+    let configured = match family
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new(HOST_A)))
+        .await
+    {
+        Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest.clone(),
+        other => panic!("a get answers {HOST_A}: {other:?}"),
+    };
+    let mut wrong = Vec::new();
+    for (what, change) in [
+        ("the held request", create_of(scout())),
+        (
+            "a create the host's check refuses",
+            create_of(json!([{"name": "forbidden", "profile": "worker"}])),
+        ),
+        (
+            "an archive of an agent the host configures",
+            IdentityChangeSpec::Archive(agent_ref(HOST_A, &configured)),
+        ),
+        (
+            "a create that cannot be judged",
+            create_of(json!([{"name": "other", "profile": "no-such-profile"}])),
+        ),
+    ] {
+        let answer = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(operation.clone(), change),
+            )
+            .await;
+        match answer.refusal() {
+            Some(refusal) if refusal.kind_token() == "decision_closed" => {}
+            _ => wrong.push(format!("{what} answers {}", answer.to_json())),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// [`held_policy`]'s creates, under the peer rules `peers`.
+fn held_policy_giving_peers(peers: Value) -> Arc<IdentityCreationPolicy> {
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": peers,
+            "approval": {"rules": [
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"identity": ["scout"]}, "outcome": approval},
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// NOT CURED, and pinned as it is: a held request asked again that still
+/// normalizes, but to another normalized form than the one the decision
+/// holds, is refused `operation_reused`, while the operation still reads
+/// its decision. A normalized request states what the rules gave it (here
+/// the rule each peer is given under), and the held request is compared by
+/// the digest of that form. A create with a peer is held while the peer
+/// rules' default gives the peer; the next launch's policy gives the same
+/// peer under a named rule. The same request under the same id normalizes,
+/// its form names the other rule, and it is taken for another request.
+/// Telling it apart would take an identity of the request as it was sent,
+/// kept with the decision; the held body has none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_change_asked_again_that_normalizes_to_another_form_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "held-1").expect("a request id");
+    let scout = || json!([{"name": "scout", "profile": "worker", "peers": [HOST_A]}]);
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    assert!(runtime.attach_identity_policy(
+        held_policy_giving_peers(json!({"default": "allow"})),
+        IdentityFamilyOptions::new()
+    ));
+    let held = asked_create(
+        &runtime.identity_family().expect("the family"),
+        &runtime.mob_handle(),
+        &host,
+        "held-1",
+        scout(),
+    )
+    .await;
+    let decision_id = decision_of(&held);
+    ended_for_a_reopen(runtime, temp.path()).await;
+
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    assert!(runtime.attach_identity_policy(
+        held_policy_giving_peers(json!({
+            "rules": [{"id": "workers", "target": {"profile": ["worker"]}, "outcome": "allow"}],
+            "default": "allow",
+        })),
+        IdentityFamilyOptions::new()
+    ));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+
+    let again = asked_create(&family, &mob, &host, "held-1", scout()).await;
+    assert_eq!(
+        refusal_of(&again).0,
+        "operation_reused",
+        "the same request, normalized to another form, is taken for another: {again:?}"
+    );
+    assert_eq!(
+        decision_read(&family, &mob, &host, &operation).await,
+        decision_id,
+        "the operation still reads its held decision"
     );
     let _ = runtime.shutdown().await;
 }

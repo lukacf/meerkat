@@ -4,6 +4,12 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+### Upgrade notes
+
+- `DispatchInput.connector` now accepts `correlation_id` and `idempotency_key` together, or neither. **Behavior change:** a correlation-only call previously returned an input that was refused at dispatch; it now raises `ValueError` before dispatch. Pass both keywords for keyed input, omit both for unkeyed input, and handle invalid pairs where you construct the input. `idempotency_key` is a new helper keyword; supplying it alone also raises `ValueError`. The gateway rule and wire format do not change.
+
+## 0.9.19
+
 ### Added
 
 - Python identity results can be narrowed by their `outcome` string. For
@@ -16,8 +22,6 @@ All notable changes to the Python SDK are documented here.
 - Type checkers can now report mistakes that a `str` annotation
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
-
-- `DispatchInput.connector` now accepts `correlation_id` and `idempotency_key` together, or neither. **Behavior change:** a correlation-only call previously returned an input that was refused at dispatch; it now raises `ValueError` before dispatch. Pass both keywords for keyed input, omit both for unkeyed input, and handle invalid pairs where you construct the input. `idempotency_key` is a new helper keyword; supplying it alone also raises `ValueError`. The gateway rule and wire format do not change.
 
 ## 0.9.18
 

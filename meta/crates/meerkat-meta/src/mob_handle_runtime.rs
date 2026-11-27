@@ -3038,6 +3038,75 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        self.dispatch_with_plan(call, context, None).await
+    }
+
+    /// The resolved plan reaches the wrapped mob tools: `delegate` reads the
+    /// call's outside bound from it, so that it ends, typed, before that
+    /// bound cuts it. Like the trait's default, only a Fast plan is lowered.
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        match plan.mode() {
+            meerkat_core::ToolExecutionMode::Fast => {
+                self.dispatch_with_plan(call, context, Some(plan)).await
+            }
+            meerkat_core::ToolExecutionMode::Streaming
+            | meerkat_core::ToolExecutionMode::Detached => {
+                Err(meerkat_core::ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::ExecutionModeOwnerUnavailable,
+                ))
+            }
+        }
+    }
+
+    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_bridge_session_id: meerkat_core::types::SessionId,
+    ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| meerkat_core::agent::OpsLifecycleBindError::SharedOwnership)?;
+        let outcome = owned
+            .inner
+            .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
+        let was_bound = outcome.was_bound();
+        let dispatcher = Arc::new(Self {
+            inner: outcome.into_dispatcher(),
+            implicit_delegate_retirement_overrides: owned.implicit_delegate_retirement_overrides,
+            console_spawn_sink: owned.console_spawn_sink,
+            identity_plane: owned.identity_plane,
+            spawner_comms_name: owned.spawner_comms_name,
+            member_auth_binding: owned.member_auth_binding,
+            member_auth_binding_recorded: owned.member_auth_binding_recorded,
+            realm_profiles: owned.realm_profiles,
+            caller: owned.caller,
+        });
+        Ok(if was_bound {
+            meerkat_core::agent::BindOutcome::Bound(dispatcher)
+        } else {
+            meerkat_core::agent::BindOutcome::Skipped(dispatcher)
+        })
+    }
+}
+
+impl AutoWireParentMobToolDispatcher {
+    /// One call of the wrapped mob tools, with the plan the agent loop
+    /// resolved for it when the call came with one.
+    async fn dispatch_with_plan(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         // A member private to a person convenes no council: its participants
         // would be forks of shared members carrying that person's question.
         if call.name == "council"
@@ -3247,7 +3316,7 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             }
         }
         if call.name == "delegate" {
-            return self.dispatch_delegate(call, context).await;
+            return self.dispatch_delegate(call, context, plan).await;
         }
         if call.name == "mob_spawn_member" {
             return self.dispatch_mob_spawn_member(call, context).await;
@@ -3272,39 +3341,6 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             return Ok(outcome);
         }
         self.inner.dispatch_with_context(call, context).await
-    }
-
-    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
-        self.inner.capabilities()
-    }
-
-    fn bind_ops_lifecycle(
-        self: Arc<Self>,
-        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-        owner_bridge_session_id: meerkat_core::types::SessionId,
-    ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
-        let owned = Arc::try_unwrap(self)
-            .map_err(|_| meerkat_core::agent::OpsLifecycleBindError::SharedOwnership)?;
-        let outcome = owned
-            .inner
-            .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
-        let was_bound = outcome.was_bound();
-        let dispatcher = Arc::new(Self {
-            inner: outcome.into_dispatcher(),
-            implicit_delegate_retirement_overrides: owned.implicit_delegate_retirement_overrides,
-            console_spawn_sink: owned.console_spawn_sink,
-            identity_plane: owned.identity_plane,
-            spawner_comms_name: owned.spawner_comms_name,
-            member_auth_binding: owned.member_auth_binding,
-            member_auth_binding_recorded: owned.member_auth_binding_recorded,
-            realm_profiles: owned.realm_profiles,
-            caller: owned.caller,
-        });
-        Ok(if was_bound {
-            meerkat_core::agent::BindOutcome::Bound(dispatcher)
-        } else {
-            meerkat_core::agent::BindOutcome::Skipped(dispatcher)
-        })
     }
 }
 
@@ -3559,6 +3595,7 @@ impl AutoWireParentMobToolDispatcher {
         &self,
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         let mut args = serde_json::from_str::<Value>(call.args.get()).map_err(|error| {
             meerkat_core::ToolError::invalid_arguments(call.name, error.to_string())
@@ -3574,7 +3611,16 @@ impl AutoWireParentMobToolDispatcher {
             name: call.name,
             args: &args,
         };
-        let outcome = self.inner.dispatch_with_context(call, context).await?;
+        // The plan was resolved for this call; the arguments rewritten above
+        // leave its tool, mode and deadlines as they are.
+        let outcome = match plan {
+            Some(plan) => {
+                self.inner
+                    .dispatch_resolved_with_context(call, context, plan)
+                    .await?
+            }
+            None => self.inner.dispatch_with_context(call, context).await?,
+        };
 
         self.register_idle_retire_override_from_outcome(&outcome, idle_retire_override, &[])
             .await;
@@ -16852,6 +16898,128 @@ mod tests {
         assert!(inner.last_bound_is(Some(&authority)));
         meerkat_core::AgentToolDispatcher::bind_session_mob_tool_authority(&wrapper, None);
         assert!(inner.last_bound_is(None));
+    }
+
+    /// What the wrapped mob tools were handed for one call: the bound of
+    /// the plan it came with, if it came with one, and its arguments.
+    type HandedCall = (Option<Option<std::time::Duration>>, String);
+
+    /// Mob tools that record how each `delegate` call reached them.
+    struct PlanProbe {
+        tools: Arc<[Arc<meerkat_core::types::ToolDef>]>,
+        handed: std::sync::Mutex<Vec<HandedCall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for PlanProbe {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            self.handed
+                .lock()
+                .unwrap()
+                .push((None, call.args.get().to_string()));
+            Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+                meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
+            ))
+        }
+
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+            _context: &meerkat_core::ToolDispatchContext,
+            plan: &meerkat_core::ResolvedToolExecutionPlan,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            self.handed.lock().unwrap().push((
+                Some(plan.deadlines().effective_timeout()),
+                call.args.get().to_string(),
+            ));
+            Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+                meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
+            ))
+        }
+    }
+
+    /// A `delegate` call the agent loop resolved a plan for reaches the
+    /// wrapped mob tools with that plan: it holds the call's outside bound,
+    /// which `delegate` ends before. The wrapper's own argument is taken out
+    /// either way, and a call that came with no plan reaches them with none.
+    #[tokio::test]
+    async fn the_parent_mob_tool_wrapper_hands_delegate_its_resolved_plan() {
+        use meerkat_core::AgentToolDispatcher as _;
+        let inner = Arc::new(PlanProbe {
+            tools: vec![Arc::new(meerkat_core::types::ToolDef::new(
+                "delegate",
+                "Delegate a task to a helper agent.",
+                serde_json::json!({"type": "object", "properties": {}}),
+            ))]
+            .into(),
+            handed: std::sync::Mutex::new(Vec::new()),
+        });
+        let wrapper = AutoWireParentMobToolDispatcher {
+            inner: inner.clone(),
+            ..wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default())
+        };
+        let args = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "task": "summarize",
+                "member_id": "helper",
+                "result_label": "helper_result",
+                "max_text_bytes": 4096,
+                "idle_retire_secs": 30,
+            })
+            .to_string(),
+        )
+        .expect("delegate arguments");
+        let call = meerkat_core::types::ToolCallView {
+            id: "call-delegate",
+            name: "delegate",
+            args: &args,
+        };
+        let context = meerkat_core::ToolDispatchContext::default();
+        let operator_bound = std::time::Duration::from_secs(90);
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::per_tool_override(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    operator_bound,
+                ),
+            ])
+            .expect("deadline chain"),
+        );
+        let plan = wrapper
+            .resolve_execution_plan(call, &context, &resolution)
+            .expect("the delegate plan resolves through the wrapper");
+
+        wrapper
+            .dispatch_resolved_with_context(call, &context, &plan)
+            .await
+            .expect("a planned delegate call");
+        wrapper
+            .dispatch_with_context(call, &context)
+            .await
+            .expect("a delegate call with no plan");
+
+        let handed = inner.handed.lock().unwrap().clone();
+        assert_eq!(handed.len(), 2, "{handed:?}");
+        assert_eq!(
+            handed[0].0,
+            Some(Some(operator_bound)),
+            "the planned call reaches the mob tools with its plan's bound"
+        );
+        assert_eq!(handed[1].0, None, "a call with no plan reaches them plain");
+        for (_, arguments) in &handed {
+            assert!(
+                arguments.contains("\"member_id\":\"helper\"")
+                    && !arguments.contains("idle_retire_secs"),
+                "the wrapper's own argument is taken out: {arguments}"
+            );
+        }
     }
 
     fn wrapper_with_overrides(

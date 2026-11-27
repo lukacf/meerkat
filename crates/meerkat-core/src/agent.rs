@@ -971,6 +971,17 @@ pub struct ToolDispatchContext {
     /// stated that the session's build mounts the mob tools
     /// ([`Self::with_mob_tools_held_stated`]).
     mob_tools_held_stated: bool,
+    /// When the dispatcher of this call started the timer its deadline
+    /// counts from, if it says so (the agent loop does, per call). A timing
+    /// fact of one dispatch, not part of the context's identity: equality
+    /// ignores it.
+    dispatch_started: Option<crate::time_compat::Instant>,
+    /// How long the session's outer bound allows this call from the start
+    /// of its dispatch ([`crate::ToolCallOuterBound`]), when the session
+    /// runs under one: the agent loop says so per call, as it adds the same
+    /// duration to the call's deadline chain. A timing fact of one
+    /// dispatch, not part of the context's identity: equality ignores it.
+    outer_call_bound: Option<std::time::Duration>,
 }
 
 /// The reply capabilities of one turn: the turn-start list, parsed once when
@@ -1788,6 +1799,43 @@ impl ToolDispatchContext {
         self.read_only_execution_required = true;
     }
 
+    /// When the dispatcher of this call started the timer its deadline
+    /// counts from: the agent loop sets it for every call it dispatches,
+    /// before the call's plan is resolved and before the call waits for a
+    /// dispatch slot. A tool that owns its wait reads it to end before that
+    /// deadline, whatever time the call spent before it reached the tool.
+    /// `None` when the dispatcher did not say.
+    pub const fn dispatch_started(&self) -> Option<crate::time_compat::Instant> {
+        self.dispatch_started
+    }
+
+    /// Say when this call's dispatch started (see [`Self::dispatch_started`]).
+    #[must_use]
+    pub fn with_dispatch_started(mut self, dispatch_started: crate::time_compat::Instant) -> Self {
+        self.dispatch_started = Some(dispatch_started);
+        self
+    }
+
+    /// How long the calling session's outer bound allows this call, counted
+    /// from the start of its dispatch ([`Self::dispatch_started`]): the
+    /// session runs for a caller that stops waiting, and its agent loop
+    /// bounds each tool call by what that caller has left less the room the
+    /// session needs to report ([`crate::ToolCallOuterBound`]). The same
+    /// duration is a contributor of the call's deadline chain; a tool that
+    /// owns its wait reads it here to tell that bound from the call's other
+    /// deadlines. `None` for a session nobody bounds.
+    pub const fn outer_call_bound(&self) -> Option<std::time::Duration> {
+        self.outer_call_bound
+    }
+
+    /// Say what the calling session's outer bound allows this call (see
+    /// [`Self::outer_call_bound`]).
+    #[must_use]
+    pub fn with_outer_call_bound(mut self, allowed: std::time::Duration) -> Self {
+        self.outer_call_bound = Some(allowed);
+        self
+    }
+
     pub fn from_current_turn_input(input: &crate::types::ContentInput) -> Self {
         let blocks = match input {
             crate::types::ContentInput::Text(_) => None,
@@ -1817,6 +1865,8 @@ impl ToolDispatchContext {
             live_tool_narrowing: None,
             host_default_build_stated: false,
             mob_tools_held_stated: false,
+            dispatch_started: None,
+            outer_call_bound: None,
         }
     }
 
@@ -5905,6 +5955,11 @@ where
     /// to decide whether to emit the `[MCP_PENDING]` system notice.
     pub(crate) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
+    /// The session's outer bound on its tool calls, when its runtime
+    /// bindings carry the slot for one ([`crate::ToolCallOuterBoundSlot`]).
+    /// Read at each tool batch: a bound in force adds one contributor to
+    /// every call's deadline chain.
+    pub(crate) tool_call_outer_bound: Option<Arc<crate::ToolCallOuterBoundSlot>>,
     /// Producer end of the typed cancel-after-boundary command channel.
     ///
     /// Retained so [`Agent::cancel_after_boundary_handle`] can hand cloned

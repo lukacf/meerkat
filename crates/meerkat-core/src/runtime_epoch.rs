@@ -236,6 +236,10 @@ pub struct SessionRuntimeBindings {
     /// Hand-off of the session's interrupted-run evidence from agent
     /// construction (host process custody) to runtime materialization.
     interrupted_tool_evidence: Arc<crate::tool_process::InterruptedToolEvidenceSlot>,
+    /// The slot of the session's outer bound on its tool calls: a host that
+    /// runs the session for a bounded caller sets it, the session's agent
+    /// loop reads it. Process-local and never persisted.
+    tool_call_outer_bound: Arc<crate::ToolCallOuterBoundSlot>,
     /// Present only when the runtime has an installed native work host: the
     /// host's authority for each configured MCP server of this session,
     /// asked before discovery, spawn or first use. A configured row is not
@@ -312,6 +316,7 @@ impl SessionRuntimeBindings {
             compaction_commit_coordinator,
             post_commit_hooks,
             interrupted_tool_evidence: Arc::default(),
+            tool_call_outer_bound: Arc::default(),
             configured_mcp_attachment: None,
             tool_surface_gate: None,
             mcp_observation: None,
@@ -494,6 +499,15 @@ impl SessionRuntimeBindings {
         &self.interrupted_tool_evidence
     }
 
+    /// The slot of the session's outer bound on its tool calls, shared by
+    /// every clone of these bindings ([`crate::ToolCallOuterBoundSlot`]).
+    /// The agent builder hands it to the agent loop; a host that runs the
+    /// session for a bounded caller sets the bound through the runtime that
+    /// holds the session's bindings.
+    pub fn tool_call_outer_bound(&self) -> &Arc<crate::ToolCallOuterBoundSlot> {
+        &self.tool_call_outer_bound
+    }
+
     #[doc(hidden)]
     pub fn __runtime_authority(&self) -> &(dyn Any + Send + Sync) {
         self.runtime_authority.as_ref()
@@ -535,6 +549,7 @@ impl SessionRuntimeBindings {
             compaction_commit_coordinator: Arc::clone(&self.compaction_commit_coordinator),
             post_commit_hooks: Arc::clone(&self.post_commit_hooks),
             interrupted_tool_evidence: Arc::clone(&self.interrupted_tool_evidence),
+            tool_call_outer_bound: Arc::clone(&self.tool_call_outer_bound),
             configured_mcp_attachment: self.configured_mcp_attachment.clone(),
             tool_surface_gate: self.tool_surface_gate.clone(),
             mcp_observation: self.mcp_observation.clone(),

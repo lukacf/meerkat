@@ -31,8 +31,9 @@ use meerkat_mob::runtime::bridge_protocol::BridgeRejectionCause;
 use meerkat_mob::{AgentIdentity, MobEventKind, SpawnMemberSpec};
 use support::{
     ControllingMob, HostFixtureOptions, PeerCommsEndpoint, REAL_COMMS_TEST_LOCK, ScriptedHostPeer,
-    create_controlling_mob, member_identity_of, send_peer_text, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
+    create_controlling_mob, member_client_replying_from_file, member_identity_of, send_peer_text,
+    spawn_host_daemon_fixture, spawn_peer_comms_endpoint, spawn_scripted_host_peer,
+    spawn_scripted_member_turn_responder,
 };
 
 const WAIT: Duration = Duration::from_mins(1);
@@ -454,6 +455,297 @@ async fn host_restart_reinstalls_wired_peer_trust_without_manual_drive() {
             meerkat_core::comms::PeerDeliveryOutcome::Acked
         ),
         "post-restart delivery must be receiver-acked, got {receipt:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+// ==========================================================================
+// A placed member's reply after its host was stopped and came back on the
+// same binding carries what the host holds at that turn
+// ==========================================================================
+
+/// The rows of `member`'s transcript that follow its input row containing
+/// `prompt`, as wire JSON, read through the controlling handle's member
+/// history. `None` until an assistant row follows that input row.
+async fn reply_rows_after(
+    controlling: &ControllingMob,
+    member: &str,
+    prompt: &str,
+) -> Option<Vec<String>> {
+    let page = controlling
+        .handle
+        .member_history(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity(member),
+            None,
+            None,
+        )
+        .await
+        .ok()?;
+    let rows: Vec<serde_json::Value> = page
+        .page
+        .messages
+        .iter()
+        .filter_map(|row| serde_json::to_value(row).ok())
+        .collect();
+    let input = rows
+        .iter()
+        .position(|row| row["role"] != "block_assistant" && row.to_string().contains(prompt))?;
+    let after = &rows[input + 1..];
+    after
+        .iter()
+        .any(|row| row["role"] == "block_assistant")
+        .then(|| after.iter().map(ToString::to_string).collect())
+}
+
+/// [`reply_rows_after`], once the reply is there.
+async fn reply_rows(controlling: &ControllingMob, member: &str, prompt: &str) -> Vec<String> {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(rows) = reply_rows_after(controlling, member, prompt).await {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {member}'s reply to {prompt}"))
+}
+
+/// The controlling mob's roster row of the host `host_id`: its id, bind
+/// phase and authority epoch.
+fn bound_host_row(
+    controlling: &ControllingMob,
+    host_id: &str,
+) -> (
+    String,
+    meerkat_contracts::wire::WireHostBindPhase,
+    Option<u64>,
+) {
+    let hosts = controlling.handle.hosts().expect("host roster projection");
+    let row = hosts
+        .hosts
+        .iter()
+        .find(|row| row.host_id.0 == host_id)
+        .unwrap_or_else(|| panic!("no roster row for host {host_id}: {hosts:?}"));
+    (row.host_id.0.clone(), row.bind_phase, row.authority_epoch)
+}
+
+/// A value only the member host holds reaches the controlling mob through
+/// the placed member's ordinary reply, and after the host was stopped and
+/// came back on the same binding the next reply carries the value the host
+/// holds at that turn.
+///
+/// The value is a file on the host's side. The member's model stand-in reads
+/// it again for every turn and keeps no copy; the controlling mob is never
+/// handed it. The value changes twice: while the host is down, and again
+/// once the host is back and the member is ready, before the second turn.
+/// The second turn's reply carries the last value and neither earlier one,
+/// so a value read once when the host came back and kept would fail it.
+///
+/// The stop is the fixture's partition: the host daemon is fully quiesced
+/// and keeps its identity, address, binding rows and member realm, and the
+/// restore boots it over them. No bind follows the first one: the
+/// controlling roster's row of the host and the host's own binding record,
+/// read again after the second turn, are the same as before the stop, and
+/// the member keeps its session.
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_reply_after_host_restart_carries_what_the_host_holds_then() {
+    const BEFORE: &str = "host-only-value-alpha-7f3a";
+    const WHILE_DOWN: &str = "host-only-value-bravo-91c2";
+    const LATEST: &str = "host-only-value-charlie-5d8e";
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+
+    let host_side = tempfile::tempdir().expect("host-side directory");
+    let value_file = host_side.path().join("value");
+    std::fs::write(&value_file, BEFORE).expect("write the host's value");
+    // One client for both incarnations of the host daemon: what it answers
+    // is what the file holds when a turn asks.
+    let member_client = member_client_replying_from_file(&value_file);
+
+    let mut opts = HostFixtureOptions::named("xhw-fresh-host-b").with_member_build();
+    opts.member_llm_client = Some(Arc::clone(&member_client));
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhw-fresh").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let mob_id = controlling.mob_id.to_string();
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 materializes on host B");
+
+    let b2_before = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row before the stop");
+    // The public placed-member event subscription is the consumer that makes
+    // readiness observable; it is held across the stop.
+    let b2_events = controlling
+        .handle
+        .subscribe_agent_events(&identity("b2"))
+        .await
+        .expect("subscribe to b2 events through the public API");
+    wait_until("initial public remote-member readiness", || async {
+        public_remote_member_ready(
+            &controlling,
+            "b2",
+            &report.host_id,
+            &b2_before.session_id,
+            &b2_events,
+        )
+        .await
+    })
+    .await;
+
+    let roster_before = bound_host_row(&controlling, &report.host_id);
+    assert_eq!(
+        roster_before,
+        (
+            report.host_id.clone(),
+            meerkat_contracts::wire::WireHostBindPhase::Bound,
+            Some(report.epoch),
+        ),
+        "the host is bound at the bind's epoch before the stop"
+    );
+    let binding_before = fixture.host_binding_record(&mob_id).await;
+
+    // Turn one: the reply carries the value the host holds.
+    controlling
+        .handle
+        .member(&identity("b2"))
+        .await
+        .expect("b2 handle")
+        .send("restart-row-turn-one", HandlingMode::Queue)
+        .await
+        .expect("turn one admits");
+    let first = reply_rows(&controlling, "b2", "restart-row-turn-one").await;
+    assert!(
+        first.iter().any(|row| row.contains(BEFORE)),
+        "turn one's reply carries the host's value: {first:?}"
+    );
+    assert!(
+        !first
+            .iter()
+            .any(|row| row.contains(WHILE_DOWN) || row.contains(LATEST)),
+        "turn one's reply cannot carry a value the host did not hold yet: {first:?}"
+    );
+
+    // The stop. The host's value changes while the host is down.
+    let partitioned = fixture.partition().await;
+    wait_until("public reachability to observe the host outage", || async {
+        let Ok(snapshot) = controlling.handle.member_status(&identity("b2")).await else {
+            return false;
+        };
+        snapshot.control_reachability != Some(meerkat_contracts::wire::WireReachability::Reachable)
+            || snapshot.comms_reachability
+                != Some(meerkat_contracts::wire::WireReachability::Reachable)
+    })
+    .await;
+    std::fs::write(&value_file, WHILE_DOWN).expect("change the host's value while it is down");
+    let fixture = partitioned
+        .restore_with_member_llm_client(member_client)
+        .await;
+
+    // The same binding: no bind followed the first one.
+    let binding_after = fixture.host_binding_record(&mob_id).await;
+    assert_eq!(
+        (
+            &binding_after.supervisor_peer_id,
+            binding_after.epoch,
+            binding_after.binding_generation,
+        ),
+        (
+            &binding_before.supervisor_peer_id,
+            binding_before.epoch,
+            binding_before.binding_generation,
+        ),
+        "the host's binding record is the one from before the stop"
+    );
+    let b2_after = binding_after
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row survives the stop");
+    assert_eq!(
+        b2_after.session_id, b2_before.session_id,
+        "the member keeps its session across the stop"
+    );
+    wait_until("public remote-member readiness after the stop", || async {
+        public_remote_member_ready(
+            &controlling,
+            "b2",
+            &report.host_id,
+            &b2_after.session_id,
+            &b2_events,
+        )
+        .await
+    })
+    .await;
+    assert_eq!(
+        bound_host_row(&controlling, &report.host_id),
+        roster_before,
+        "the controlling roster's row of the host is the one from before the stop"
+    );
+
+    // The host's value changes again, now that the host is back and the
+    // member is ready: a value read once when the host came back, and kept,
+    // is not this one.
+    std::fs::write(&value_file, LATEST).expect("change the host's value once it is back");
+
+    // Turn two: the reply carries the value the host holds now.
+    controlling
+        .handle
+        .member(&identity("b2"))
+        .await
+        .expect("b2 handle after the stop")
+        .send("restart-row-turn-two", HandlingMode::Queue)
+        .await
+        .expect("turn two admits");
+    let second = reply_rows(&controlling, "b2", "restart-row-turn-two").await;
+    assert!(
+        second.iter().any(|row| row.contains(LATEST)),
+        "turn two's reply carries the value the host holds at that turn: {second:?}"
+    );
+    assert!(
+        !second
+            .iter()
+            .any(|row| row.contains(BEFORE) || row.contains(WHILE_DOWN)),
+        "turn two's reply carries no earlier value: {second:?}"
+    );
+
+    // Still the same binding after the turn: nothing bound again on the way.
+    let binding_at_the_end = fixture.host_binding_record(&mob_id).await;
+    assert_eq!(
+        (
+            &binding_at_the_end.supervisor_peer_id,
+            binding_at_the_end.epoch,
+            binding_at_the_end.binding_generation,
+        ),
+        (
+            &binding_before.supervisor_peer_id,
+            binding_before.epoch,
+            binding_before.binding_generation,
+        ),
+        "the host's binding record after turn two is the one from before the stop"
+    );
+    assert_eq!(
+        binding_at_the_end
+            .materialized
+            .get("b2")
+            .map(|row| row.session_id.clone()),
+        Some(b2_before.session_id.clone()),
+        "the member's session after turn two is the one from before the stop"
+    );
+    assert_eq!(
+        bound_host_row(&controlling, &report.host_id),
+        roster_before,
+        "the controlling roster's row of the host after turn two is the one from before the stop"
     );
 
     fixture.shutdown().await;

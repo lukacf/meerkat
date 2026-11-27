@@ -492,9 +492,13 @@ impl UnifiedRuntime {
         // terminal teardown) are conservative on a mob that did not quiesce.
         // Phases 3 and 4 continue either way. A candidate launch stops
         // nothing ([`Self::stop_mob_unless_candidate`]).
+        let stop_started = std::time::Instant::now();
         let mob_stop = self
             .stop_mob_unless_candidate(meerkat_mob::StopOptions::default().leave_runs_running())
             .await;
+        let stop_elapsed = stop_started.elapsed();
+        let stop_cut_while_waiting_on = mob_stop.cut_while_waiting_on;
+        let mob_stop = mob_stop.result;
         // Shutdown is terminal: the delivery owner stops with the mob rather
         // than when the last runtime clone happens to drop. Undelivered rows
         // stay pending in the durable inbox.
@@ -549,6 +553,18 @@ impl UnifiedRuntime {
         } else {
             crate::child_mob_storage::ChildMobStandDownOutcome::NotConfigured
         };
+        // The skip above changes nothing here: it is said once, with what was
+        // observed of the stop.
+        if let Err(stop_error) = &mob_stop {
+            Self::warn_mob_teardown_skipped(
+                &self.default_mob().mob_runtime,
+                stop_error,
+                stop_cut_while_waiting_on,
+                stop_elapsed,
+                &mob_terminal_shutdown,
+                &child_mob_stand_down,
+            );
+        }
 
         // The member teardown above is bounded, so it can end before a stdio
         // close's own bound, and an agent's release of its MCP router is not a
@@ -840,6 +856,7 @@ impl UnifiedRuntime {
     async fn stop_mob(&self) -> Result<(), MobRuntimeError> {
         self.stop_mob_with(meerkat_mob::StopOptions::default())
             .await
+            .result
     }
 
     /// [`Self::stop_mob_with`] for a shutdown's teardown, where a candidate
@@ -851,29 +868,87 @@ impl UnifiedRuntime {
     async fn stop_mob_unless_candidate(
         &self,
         options: meerkat_mob::StopOptions,
-    ) -> Result<(), MobRuntimeError> {
+    ) -> super::mob_stop::StopAttempt {
         if !self.speaks_for_composition() {
             tracing::info!(
                 "candidate launch: the mob is not stopped before its keep shutdown, so no stop \
                  is journaled in the shared mob store"
             );
-            return Ok(());
+            return super::mob_stop::StopAttempt::answered(Ok(()));
         }
         self.stop_mob_with(options).await
     }
 
-    /// [`Self::stop_mob`] with `options` for the mob's Stop.
+    /// [`Self::stop_mob`] with `options` for the mob's Stop: its result, and
+    /// what the stop was waiting on if its budget ran out.
     async fn stop_mob_with(
         &self,
         options: meerkat_mob::StopOptions,
-    ) -> Result<(), MobRuntimeError> {
+    ) -> super::mob_stop::StopAttempt {
         // A stopped mob holds no link to another mob of this process.
         self.close_cross_mob_links();
-        super::mob_stop::settle_flow_runs_then_stop(
+        super::mob_stop::attempt_settle_flow_runs_then_stop(
             &super::mob_stop::HandleStopTarget(&self.mob_handle(), options),
             super::mob_stop::MOB_STOP_FLOW_SETTLE_BUDGET,
         )
         .await
+    }
+
+    /// The one warning of a shutdown that skips the mob's terminal teardown
+    /// because the mob's stop did not complete. It changes nothing: the
+    /// skip, the report and every later phase are as they were.
+    ///
+    /// It says only what was observed, and nothing of the stop error's own
+    /// text: a kind, ids, counts and typed states. The field `stop` says how
+    /// the stop ROUTINE ended ([`super::mob_stop::stop_end`]), which is not
+    /// always an answer to a Stop: the routine also subscribes, lists and
+    /// cancels. Where its bound ran out with nothing recorded, "the mob did
+    /// not answer within the bound", and `stop_was_waiting_on` names the one
+    /// thing it had asked and had no answer to: the line does not say that a
+    /// Stop ran, runs or will finish, and does not call it refused. The
+    /// mob's lifecycle is printed as its handles read it when the line is
+    /// written, without asking the actor: a snapshot of what the actor last
+    /// published, which may change the next instant, and in which "a Stop
+    /// owed" covers a Stop that began and failed as well as one in progress,
+    /// and "nothing owed" covers a Stop that is queued as well as one that
+    /// was refused.
+    ///
+    /// It takes the mob's runtime from its caller and reads no mob of its
+    /// own: the shutdown that calls it is the one that says which mob.
+    fn warn_mob_teardown_skipped(
+        mob_runtime: &crate::mob_handle_runtime::MobRuntime,
+        stop_error: &MobRuntimeError,
+        stop_cut_while_waiting_on: Option<super::mob_stop::StopWaitPoint>,
+        stop_elapsed: Duration,
+        mob_terminal_shutdown: &MobTerminalShutdownOutcome,
+        child_mob_stand_down: &crate::child_mob_storage::ChildMobStandDownOutcome,
+    ) {
+        let end = super::mob_stop::stop_end(stop_error);
+        let stop_was_waiting_on = stop_cut_while_waiting_on.map_or(
+            "not_cut_by_the_bound",
+            super::mob_stop::StopWaitPoint::as_str,
+        );
+        let lifecycle = mob_runtime.handle().lifecycle_observation();
+        tracing::warn!(
+            mob_id = %mob_runtime.mob_id(),
+            stop = %end.kind.as_str(),
+            stop_error_kind = %end.error_kind.as_str(),
+            invalid_transition = %end.invalid_transition_label(),
+            stop_was_waiting_on = %stop_was_waiting_on,
+            stop_bound_ms = u64::try_from(super::mob_stop::MOB_STOP_FLOW_SETTLE_BUDGET.as_millis())
+                .unwrap_or(u64::MAX),
+            stop_elapsed_ms = u64::try_from(stop_elapsed.as_millis()).unwrap_or(u64::MAX),
+            unsettled_flow_runs = end.unsettled_flow_runs,
+            mob_terminal_shutdown = %mob_terminal_shutdown.diagnostic_label(),
+            child_mob_stand_down = ?child_mob_stand_down,
+            identity_authority_attached = mob_runtime.installed_identity_runtime().is_some(),
+            lifecycle_phase_read_now = ?lifecycle.phase,
+            owed_intent_read_now = ?lifecycle.owed_intent,
+            "the mob's stop routine did not complete: the mob's terminal teardown is skipped, \
+             and so is the stand-down of child mobs where this runtime owns a child root (the \
+             field child_mob_stand_down says which); shutdown goes on to close the event router \
+             and stop the modules"
+        );
     }
 
     /// Let the mob's in-flight turns finish before a graceful shutdown:
@@ -951,6 +1026,7 @@ impl UnifiedRuntime {
         if let Err(error) = self
             .stop_mob_with(meerkat_mob::StopOptions::default().leave_runs_running())
             .await
+            .result
         {
             return report(super::InFlightDrainOutcome::StopFailed {
                 error: error.to_string(),
@@ -1422,6 +1498,299 @@ comms = true
         let failed = MobStopOutcome::Failed(injected_refusal("actor task dropped"));
         assert!(!failed.teardown_may_proceed());
         assert!(!failed.stopped_cleanly());
+    }
+
+    /// What a `tracing_subscriber::fmt` subscriber writes on the thread that
+    /// holds its guard.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        /// Capture this thread's log lines until the guard drops.
+        fn begin(&self) -> (tracing::Dispatch, tracing::subscriber::DefaultGuard) {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(self.clone())
+                .with_ansi(false)
+                .finish();
+            // A second registered Dispatch keeps callsite interest from being
+            // cached `never` by threads without a subscriber.
+            let anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+            (anchor, tracing::subscriber::set_default(subscriber))
+        }
+
+        fn lines_with(&self, text: &str) -> Vec<String> {
+            String::from_utf8_lossy(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .lines()
+            .filter(|line| line.contains(text))
+            .map(str::to_string)
+            .collect()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The words of the one warning a shutdown logs when it skips the mob's
+    /// terminal teardown.
+    const TEARDOWN_SKIPPED: &str = "the mob's terminal teardown is skipped";
+
+    /// The value of the field `name` in a line the fmt subscriber wrote, for
+    /// a value that holds no space.
+    fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+        let start = line.find(&format!(" {name}="))? + name.len() + 2;
+        line[start..].split(' ').next()
+    }
+
+    /// A Stop that gets no answer inside its bound: the shutdown skips the
+    /// terminal teardown as it does today, with the report it gives today,
+    /// and says so in one warning that tells what it observed: the mob did
+    /// not answer within the bound, and the stop routine was waiting on the
+    /// Stop's answer. It does not say the Stop was refused, ran, runs or
+    /// will finish, and it holds nothing of the error's own text. The
+    /// error's text does not speak of flow runs that nobody was settling.
+    #[tokio::test]
+    async fn an_unanswered_stop_is_logged_once_as_unanswered_with_the_report_it_has_today() {
+        let runtime = empty_runtime("stop-unanswered").await;
+        super::super::mob_stop::unanswered_stop_for_test::arm("stop-unanswered");
+        let log = CapturedLog::default();
+        let logged = log.begin();
+        let report = runtime.shutdown().await;
+        drop(logged);
+
+        // The report, value for value, as it is without this change.
+        assert_eq!(
+            format!("{:?}", report.mob_stop),
+            "Err(MobStopFlowRunsUnsettled(MobStopFlowRunsUnsettled { runs: [], last_refusal: \
+             None, budget: 10s }))"
+        );
+        assert_eq!(
+            format!("{:?}", report.mob_terminal_shutdown),
+            "SkippedMobStopFailed"
+        );
+        assert_eq!(
+            format!("{:?}", report.child_mob_stand_down),
+            "NotConfigured"
+        );
+        assert_eq!(
+            report.identity_authority_release,
+            IdentityAuthorityReleaseOutcome::NotConfigured
+        );
+        assert!(!report.cleanup_completed());
+
+        let text = report
+            .mob_stop
+            .as_ref()
+            .expect_err("the stop did not answer")
+            .to_string();
+        assert_eq!(
+            text,
+            "mob stop did not complete within 10s: the mob did not answer in time; no flow run \
+             was being settled and no stop refusal was recorded"
+        );
+
+        let lines = log.lines_with(TEARDOWN_SKIPPED);
+        assert_eq!(lines.len(), 1, "one warning: {lines:?}");
+        let line = lines[0].as_str();
+        assert!(line.contains(" WARN "), "{line}");
+        assert_eq!(field(line, "mob_id"), Some("stop-unanswered"), "{line}");
+        assert_eq!(
+            field(line, "stop"),
+            Some("mob_did_not_answer_within_bound"),
+            "{line}"
+        );
+        assert_eq!(
+            field(line, "stop_error_kind"),
+            Some("bound_ran_out"),
+            "{line}"
+        );
+        assert_eq!(field(line, "invalid_transition"), Some("none"), "{line}");
+        assert_eq!(
+            field(line, "stop_was_waiting_on"),
+            Some("stop_answer"),
+            "{line}"
+        );
+        assert_eq!(field(line, "stop_bound_ms"), Some("10000"), "{line}");
+        let elapsed_ms: u64 = field(line, "stop_elapsed_ms")
+            .and_then(|elapsed| elapsed.parse().ok())
+            .expect("the elapsed time of the stop");
+        assert!(elapsed_ms >= 10_000, "{line}");
+        assert_eq!(field(line, "unsettled_flow_runs"), Some("0"), "{line}");
+        assert_eq!(
+            field(line, "mob_terminal_shutdown"),
+            Some("skipped_mob_stop_failed"),
+            "{line}"
+        );
+        assert_eq!(
+            field(line, "child_mob_stand_down"),
+            Some("NotConfigured"),
+            "{line}"
+        );
+        // Whether an identity runtime is attached to the mob when the line
+        // is written: the skip leaves what is attached as it is.
+        let attached = runtime
+            .default_mob()
+            .mob_runtime
+            .installed_identity_runtime()
+            .is_some();
+        assert_eq!(
+            field(line, "identity_authority_attached"),
+            Some(if attached { "true" } else { "false" }),
+            "{line}"
+        );
+        // What the mob's handles read of its lifecycle when the line was
+        // written; the stand-in sent no Stop, so nothing is owed.
+        assert_eq!(
+            field(line, "lifecycle_phase_read_now"),
+            Some("Running"),
+            "{line}"
+        );
+        assert_eq!(field(line, "owed_intent_read_now"), Some("None"), "{line}");
+        // A kind, ids and counts: nothing of the error's own text.
+        assert_eq!(field(line, "stop_error"), None, "{line}");
+        for error_text in [text.as_str(), "did not answer in time", "no stop refusal"] {
+            assert!(!line.contains(error_text), "{error_text}: {line}");
+        }
+        for claim in [
+            "refused",
+            "flow runs",
+            "still running",
+            "is executing",
+            "will finish",
+        ] {
+            assert!(!line.contains(claim), "{claim}: {line}");
+        }
+    }
+
+    /// A Stop the mob refuses: the same skip and the same report as today,
+    /// one warning, and neither the warning nor the error's text describes
+    /// the Stop as unanswered. The warning names the error's kind and the
+    /// transition the mob refused, and holds nothing of the error's text.
+    #[tokio::test]
+    async fn a_refused_stop_is_logged_once_as_ended_with_an_error_and_never_as_unanswered() {
+        let runtime = empty_runtime("stop-refused").await;
+        runtime
+            .mob_handle()
+            .complete()
+            .await
+            .expect("the mob completes");
+        let log = CapturedLog::default();
+        let logged = log.begin();
+        let report = runtime.shutdown().await;
+        drop(logged);
+
+        // The report as it is without this change: a completed mob refuses
+        // Stop, and the refusal is returned as is.
+        let refusal = match &report.mob_stop {
+            Err(
+                refusal @ MobRuntimeError::Mob(meerkat_mob::MobError::InvalidTransition {
+                    from: meerkat_mob::MobState::Completed,
+                    to: meerkat_mob::MobState::Stopped,
+                }),
+            ) => refusal.to_string(),
+            other => panic!("a completed mob refuses Stop with InvalidTransition: {other:?}"),
+        };
+        assert_eq!(
+            format!("{:?}", report.mob_terminal_shutdown),
+            "SkippedMobStopFailed"
+        );
+        assert_eq!(
+            format!("{:?}", report.child_mob_stand_down),
+            "NotConfigured"
+        );
+        assert_eq!(
+            report.identity_authority_release,
+            IdentityAuthorityReleaseOutcome::NotConfigured
+        );
+        assert!(!report.cleanup_completed());
+        for unanswered in ["did not answer", "did not complete within"] {
+            assert!(!refusal.contains(unanswered), "{unanswered}: {refusal}");
+        }
+
+        let lines = log.lines_with(TEARDOWN_SKIPPED);
+        assert_eq!(lines.len(), 1, "one warning: {lines:?}");
+        let line = lines[0].as_str();
+        assert!(line.contains(" WARN "), "{line}");
+        assert_eq!(field(line, "mob_id"), Some("stop-refused"), "{line}");
+        assert_eq!(field(line, "stop"), Some("ended_with_an_error"), "{line}");
+        assert_eq!(
+            field(line, "stop_error_kind"),
+            Some("invalid_transition"),
+            "{line}"
+        );
+        assert_eq!(
+            field(line, "invalid_transition"),
+            Some("Completed_to_Stopped"),
+            "{line}"
+        );
+        assert_eq!(field(line, "unsettled_flow_runs"), Some("0"), "{line}");
+        assert_eq!(
+            field(line, "stop_was_waiting_on"),
+            Some("not_cut_by_the_bound"),
+            "{line}"
+        );
+        assert_eq!(
+            field(line, "mob_terminal_shutdown"),
+            Some("skipped_mob_stop_failed"),
+            "{line}"
+        );
+        // A kind and typed states: nothing of the refusal's own text.
+        assert_eq!(field(line, "stop_error"), None, "{line}");
+        assert!(!line.contains(&refusal), "the refusal's own text: {line}");
+        for unanswered in ["did_not_answer", "did not answer"] {
+            assert!(!line.contains(unanswered), "{unanswered}: {line}");
+        }
+    }
+
+    /// A shutdown whose Stop is answered logs no skipped teardown, and its
+    /// report is the clean one.
+    #[tokio::test]
+    async fn a_clean_shutdown_logs_no_skipped_teardown() {
+        let runtime = empty_runtime("stop-clean").await;
+        let log = CapturedLog::default();
+        let logged = log.begin();
+        let report = runtime.shutdown().await;
+        drop(logged);
+
+        assert_eq!(format!("{:?}", report.mob_stop), "Ok(())");
+        assert!(
+            matches!(
+                &report.mob_terminal_shutdown,
+                MobTerminalShutdownOutcome::Completed(members) if members.is_clean()
+            ),
+            "{:?}",
+            report.mob_terminal_shutdown
+        );
+        assert_eq!(
+            format!("{:?}", report.child_mob_stand_down),
+            "NotConfigured"
+        );
+        assert!(report.cleanup_completed());
+        let lines = log.lines_with(TEARDOWN_SKIPPED);
+        assert!(lines.is_empty(), "{lines:?}");
     }
 }
 

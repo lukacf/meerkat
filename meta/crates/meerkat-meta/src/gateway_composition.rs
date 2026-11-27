@@ -1134,6 +1134,9 @@ async fn observe_runtime_shutdown(
                 tracing::warn!(
                     drain_timed_out = report.drain.timed_out,
                     mob_stop = ?report.mob_stop,
+                    // What became of the mob's terminal teardown: a skipped
+                    // one is otherwise visible only in the report.
+                    mob_terminal_shutdown = %report.mob_terminal_shutdown.diagnostic_label(),
                     identity_authority_release = ?report.identity_authority_release,
                     orphan_processes = report.module_shutdown.orphan_processes,
                     "gateway runtime shutdown completed without cleanup attestation"
@@ -3472,6 +3475,57 @@ default_binding = "local"
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    /// The warning a gateway logs for a shutdown whose cleanup is not
+    /// attested names what became of the mob's terminal teardown, beside
+    /// the stop's result: a skipped teardown is visible in the one line an
+    /// operator of a shipped gateway reads.
+    #[tokio::test]
+    async fn the_unattested_shutdown_warning_names_the_terminal_teardown_outcome()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = crate::unified_runtime::lifecycle::stop_degrade_tests::empty_runtime(
+            "gateway-warning-terminal-outcome",
+        )
+        .await;
+        runtime.mob_handle().complete().await?;
+        // A completed mob refuses Stop, so the shutdown skips the teardown.
+        let report = runtime.shutdown().await;
+        assert!(!report.cleanup_completed());
+        assert_eq!(
+            format!("{:?}", report.mob_terminal_shutdown),
+            "SkippedMobStopFailed"
+        );
+
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .finish();
+        // A second registered Dispatch keeps callsite interest from being
+        // cached `never` by threads without a subscriber.
+        let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let logged = tracing::subscriber::set_default(subscriber);
+        let observed = observe_runtime_shutdown(
+            tokio::spawn(async move { report }),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        drop(logged);
+
+        assert!(observed.is_some(), "the report is handed on");
+        let log = writer.contents();
+        let warning = log
+            .lines()
+            .find(|line| {
+                line.contains("gateway runtime shutdown completed without cleanup attestation")
+            })
+            .ok_or("the warning of an unattested shutdown was not logged")?;
+        assert!(
+            warning.contains(" mob_terminal_shutdown=skipped_mob_stop_failed"),
+            "{warning}"
+        );
+        Ok(())
     }
 
     /// A panic must leave an ERROR line in the tracing stream naming the

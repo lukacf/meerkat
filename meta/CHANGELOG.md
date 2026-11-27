@@ -165,6 +165,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A shutdown that skips the mob's terminal teardown now says so, and says
+  only what it saw. When the mob's stop does not complete,
+  `UnifiedRuntime::shutdown` logs one warning. It says how the stop routine
+  ended: the mob did not answer within the bound, flow runs were left
+  unsettled at the bound, the Stop was still refused at the bound, or the
+  routine ended with an error. It also gives the kind of the error, the state
+  transition the mob refused where there is one, what the routine was waiting
+  on when its bound ran out, the bound and the elapsed time, and the mob's
+  lifecycle as its handles read it at that moment. It says that the terminal
+  teardown is skipped, and with it the stand-down of child mobs where the
+  runtime owns a child root. The line holds kinds, ids and counts, and none
+  of the error's text. Before, the runtime logged nothing on this path.
+  The text of `MobRuntimeError::MobStopFlowRunsUnsettled` no longer speaks of
+  unsettled flow runs when no run was being settled and no refusal was
+  recorded: it says the mob did not answer in time. A caller sees the changed
+  text in two places: the error's `Display`, and the `error` string of an
+  in-flight drain report whose outcome is `stop_failed`, which is that same
+  text. The report's fields and outcome values are unchanged. The gateways'
+  warning for a shutdown whose cleanup is not attested also names the
+  terminal teardown's outcome. Nothing else changes: the same skip, the same
+  report values, the same error kinds and the same wire shape.
+
 - Console chat, two fixes. The notice for the reasoning effort a request was
   sent with (`request_reasoning_effort_resolved`) no longer appears in a
   chat. Telemetry of the event and peer notices are unchanged. And answering

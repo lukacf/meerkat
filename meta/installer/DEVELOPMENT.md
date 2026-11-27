@@ -114,11 +114,21 @@ Python packages installed where its tests run, as `pip freeze --all` lists
 them, and the two npm lock files its job's `npm ci` steps install from), and
 the `backend` job takes each shard's newest execution across the run's
 attempts by those identities. It refuses plans that are not of its run, of
-one tested commit, one collection, one set of installed Python packages and
-one set of npm lock files; a missing or unreadable identity or toolchain
-file; and any collected folder that is not one execution's. What that rule
-rests on, and where it ends:
+one tested commit and one collection; a missing or unreadable identity or
+toolchain file; and any collected folder that is not one execution's. What
+that rule rests on, and where it ends:
 
+- The installed Python packages and the npm lock files are compared only
+  when the taken executions span more than one attempt: then they must name
+  one set of each. The shards of one attempt installed their packages
+  separately before this check existed, and an ordinary run must not fail
+  because a dependency was published between two shards' installs; so within
+  one attempt they are written (a later retry is compared with them) and the
+  step's line says they were not compared and how many sets they name. When
+  a run that joins attempts is refused for them, rerun all jobs: a rerun of
+  the failed jobs reruns only `backend` and cannot cure it. Both lock files
+  are tracked, so the tested commit already implies them; naming them adds
+  no comparison of its own.
 - The collected folders cannot show an execution that wrote nothing. A shard
   execution that fails before it uploads its plan leaves no artifact, and an
   older passed execution of that shard would then look like its newest. So

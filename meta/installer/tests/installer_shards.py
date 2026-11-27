@@ -25,10 +25,12 @@ lock files its job installed from) and again beside its toolchain file, which
 it writes only after its tests passed. The backend job collects the plans and
 toolchain files of every attempt of its run and takes, for each shard, the
 newest execution by those identities. It refuses plans that are not of its
-run, of one tested commit, one collection, one set of installed Python
-packages and one set of npm lock files, a shard without a plan, a taken plan
-without its own readable toolchain file, and any folder it is given that is
-not one execution's.
+run, of one tested commit and one collection, a shard without a plan, a taken
+plan without its own readable toolchain file, and any folder it is given that
+is not one execution's. When the taken executions span more than one attempt
+it also refuses unless they name one set of installed Python packages and one
+set of npm lock files; within one attempt those are written and not compared,
+as an ordinary run was never refused for them, and the printed line says so.
 
 What the folders cannot show: an execution that failed before it uploaded a
 plan leaves nothing, so among the folders "newest" is the newest execution
@@ -85,6 +87,12 @@ DIGEST = re.compile(r"[0-9a-f]{64}")
 SUITE = (("run_id", "run id", "GITHUB_RUN_ID"), ("commit", "tested commit", "GITHUB_SHA"),
          ("collection", "collection", None), ("packages", "set of installed Python packages", None),
          ("locks", "set of npm lock files", None))
+# Compared only when the taken executions span more than one attempt. The
+# shards of one attempt installed their packages separately before this check
+# existed, and an ordinary run is not to fail because a dependency was
+# published between two shards' installs; a retry long after the first
+# attempt is the case that joins executions that may have resolved others.
+RESOLVED = ("packages", "locks")
 
 
 def test_files():
@@ -275,11 +283,12 @@ def select(shards, plans, environ=None):
         missing = ", ".join(str(shard) for shard in range(shards) if shard not in newest)
         problems.append(f"{len(chosen)} shard plans instead of {shards}")
         problems.append(f"no plan of shard {missing}")
+    joined = len({value["run_attempt"] for _, value in chosen}) > 1
     for field, label, variable in SUITE:
         said = {}
         for folder, value in chosen:
             said.setdefault(value[field], []).append(folder.name)
-        if len(said) > 1:
+        if len(said) > 1 and (joined or field not in RESOLVED):
             most = max(said, key=lambda value: (len(said[value]), value))
             others = "; ".join(f"{', '.join(names)} has {value[:12]}" for value, names in sorted(said.items())
                                if value != most)
@@ -321,10 +330,21 @@ def verify(shards, plans, expected_files=None, environ=None):
         attempts.setdefault(value["run_attempt"], []).append(str(value["shard"]))
     taken = "; ".join(f"attempt {attempt}: shard{'s' if len(mine) > 1 else ''} {', '.join(mine)}"
                       for attempt, mine in sorted(attempts.items()))
+    environ = os.environ if environ is None else environ
+    whose = ("of this run and commit" if environ.get("GITHUB_RUN_ID") and environ.get("GITHUB_SHA") else
+             "of one run and one commit (not compared with this job's own: its run id or commit is not in the "
+             "environment)")
+    if len(attempts) > 1:
+        suite = (f"{whose}, of one collection, one set of installed Python packages and one set of npm lock files, "
+                 "and the shard jobs' result is success.")
+    else:
+        sets = [len({value[field] for _, value in chosen}) for field in RESOLVED]
+        suite = (f"{whose} and of one collection, and the shard jobs' result is success. Their installed Python "
+                 f"packages and npm lock files were not compared, because all ran in attempt {min(attempts)}: they "
+                 f"name {sets[0]} set{'s' if sets[0] > 1 else ''} of installed Python packages and {sets[1]} "
+                 f"set{'s' if sets[1] > 1 else ''} of npm lock files.")
     print(f"Every one of {len(planned)} test files is in exactly one of the {len(chosen)} taken plans. "
-          f"The {len(chosen)} executions are of this run and commit, of one collection, one set of installed "
-          f"Python packages and one set of npm lock files, and the shard jobs' result is success. "
-          f"Plans taken: {taken}."
+          f"The {len(chosen)} executions are {suite} Plans taken: {taken}."
           + (f" Not counted, superseded: {', '.join(folder.name for folder, _ in superseded)}." if superseded else ""))
 
 

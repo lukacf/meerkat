@@ -1534,12 +1534,14 @@ impl HostAuthService {
     }
 
     /// Install `profile` as the host-registered (pre-registered,
-    /// confidential) OAuth client of `target`'s MCP credential slot in this
-    /// service's realm, for an authorization server without dynamic client
-    /// registration ([`McpOAuthClientProfile`]). From then on, the slot's
-    /// logins (the registered `https` callback and the loopback route alike)
-    /// use that client, and its code exchange and every refresh authenticate
-    /// it by the profile's method. A registered `https` redirect in the
+    /// confidential or public) OAuth client of `target`'s MCP credential
+    /// slot in this service's realm, for an authorization server without
+    /// dynamic client registration ([`McpOAuthClientProfile`]). From then
+    /// on, the slot's logins (the registered `https` callback and the
+    /// loopback route alike) use that client, and its code exchange and
+    /// every refresh authenticate it by the profile's method (a public
+    /// profile, loopback only, sends its client id and no client
+    /// authentication). A registered `https` redirect in the
     /// profile must be exactly this service's registered base (the central
     /// callback every slot of the client may share) or the slot's own
     /// redirect derived from it (the base followed by the slot's binding

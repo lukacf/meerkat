@@ -608,6 +608,24 @@ ask its user.
   the next refresh. Without a profile nothing changes: dynamic registration
   as before.
 
+  Public clients: a terminal or other native host whose client is
+  registered as public (token endpoint authentication `none`, no secret)
+  installs it with `McpOAuthClientProfile::public(issuer, client_id,
+  redirect_uri)`; `with_scopes` and `with_resource` apply as above. Its
+  redirect must be an `http` loopback redirect on `127.0.0.1` or
+  `localhost` with an explicit port (the same loopback rule as above); a
+  registered `https` redirect, the central callback included, stays a
+  confidential client's and is refused (`configuration_invalid`), and so is
+  a profile whose method is `none` and that carries a secret, or a
+  confidential method without one. The login is the same, PKCE S256
+  included, and the code exchange and every refresh send the `client_id` in
+  the request body with no client authentication (no `Authorization`
+  header, no `client_secret`), as a dynamically registered client's do. The
+  `https` token endpoint rule above holds for it too. The server's
+  `token_endpoint_auth_methods_supported` is not read, for public or
+  confidential profiles alike: the profile states how its client was
+  registered (some servers that accept public clients do not list `none`).
+
   The attempt and the credential are bound to the profile's facts, not to
   its secret. Replacing the profile with the same facts and a new secret
   keeps existing credentials refreshing with the new secret (and the next

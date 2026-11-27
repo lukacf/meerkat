@@ -2,8 +2,10 @@
 //!
 //! An authorization server that offers no dynamic client registration signs
 //! in only clients registered with it ahead of time: a client id, the exact
-//! redirect registered for it and a client secret the client authenticates
-//! with at the token endpoint. A host installs such a client for one MCP
+//! redirect registered for it and, for a confidential client, a client
+//! secret the client authenticates with at the token endpoint (a public
+//! client, [`McpOAuthClientProfile::public`], has none and relies on PKCE
+//! alone). A host installs such a client for one MCP
 //! credential slot (the server as its realm configuration defines it, in
 //! the realm the host serves, with its account selection):
 //! [`McpOAuthAuthority::install_client_profile_entered`].
@@ -20,10 +22,13 @@
 //! With a profile installed, a login neither needs nor uses dynamic
 //! registration: it authorizes as the profile's client on its registered
 //! redirect (PKCE S256 as always), and its code exchange and every refresh of
-//! the resulting credential authenticate the client by the profile's method.
+//! the resulting credential authenticate the client by the profile's method
+//! (a public profile's client sends its `client_id` and no client
+//! authentication).
 //! A credential minted under a profile refreshes only under that exact
 //! profile; with the profile removed or replaced, its refresh closes the
-//! credential as needing a new login and is never sent as a public client.
+//! credential as needing a new login, and a credential minted under a
+//! confidential profile is never sent as a public client.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -84,6 +89,10 @@ pub enum McpOAuthClientAuthMethod {
     ClientSecretBasic,
     /// `client_id` and `client_secret` in the token request body.
     ClientSecretPost,
+    /// A public client ([`McpOAuthClientProfile::public`]): `client_id` in
+    /// the token request body, no secret and no client authentication;
+    /// PKCE S256 binds the code to its attempt.
+    None,
 }
 
 impl McpOAuthClientAuthMethod {
@@ -92,6 +101,7 @@ impl McpOAuthClientAuthMethod {
         match self {
             Self::ClientSecretBasic => "client_secret_basic",
             Self::ClientSecretPost => "client_secret_post",
+            Self::None => "none",
         }
     }
 }
@@ -136,24 +146,32 @@ impl Drop for McpOAuthClientSecret {
     }
 }
 
-/// A host-registered (pre-registered, confidential) OAuth client for one MCP
-/// credential slot, for an authorization server that offers no dynamic
-/// client registration. Install it with
+/// A host-registered (pre-registered) OAuth client for one MCP credential
+/// slot, for an authorization server that offers no dynamic client
+/// registration: a confidential client ([`Self::new`]) or a public one
+/// ([`Self::public`]). Install it with
 /// [`McpOAuthAuthority::install_client_profile_entered`].
 ///
 /// - `issuer`: the authorization server the client is registered with. The
 ///   server's protected resource metadata must name it. Under an `https`
-///   issuer the token endpoint, where the secret is sent, must use `https`
-///   too; only an `http` loopback issuer keeps loopback endpoints.
+///   issuer the token endpoint, where the secret (or a public client's code
+///   and refresh token) is sent, must use `https` too; only an `http`
+///   loopback issuer keeps loopback endpoints.
 /// - `client_id` and `redirect_uri`: the registered client and its exact
 ///   registered redirect: the host's registered `https` redirect base itself
 ///   (one central callback for every slot of the client, told apart by
 ///   state), the target's own registered `https` callback
 ///   ([`McpOAuthAuthority::registered_redirect_uri`]), or an `http` loopback
 ///   redirect on `127.0.0.1` or `localhost` with an explicit port. A login
-///   uses exactly this redirect, byte for byte.
+///   uses exactly this redirect, byte for byte. A public client takes only
+///   the loopback redirect.
 /// - `auth_method` and the secret: how the code exchange and every refresh
-///   authenticate the client.
+///   authenticate the client. A public client
+///   ([`McpOAuthClientAuthMethod::None`]) has no secret: its token requests
+///   carry its `client_id` and no client authentication. A profile whose
+///   method and secret disagree (a secret for `None`, none or an empty one
+///   for a confidential method) is refused at install and replace
+///   ([`McpOAuthClientProfileRefusal::Invalid`], `"client secret"`).
 /// - [`Self::with_scopes`]: the scopes the client requests, in place of the
 ///   ones the server's challenge or resource metadata names (for a client
 ///   registered for fewer scopes than the server lists).
@@ -168,12 +186,13 @@ pub struct McpOAuthClientProfile {
     client_id: String,
     redirect_uri: String,
     auth_method: McpOAuthClientAuthMethod,
-    secret: McpOAuthClientSecret,
+    secret: Option<McpOAuthClientSecret>,
     scopes: Option<BTreeSet<String>>,
     resource: Option<String>,
 }
 
 impl McpOAuthClientProfile {
+    /// A confidential client, authenticated by `auth_method` with `secret`.
     pub fn new(
         issuer: impl Into<String>,
         client_id: impl Into<String>,
@@ -186,7 +205,27 @@ impl McpOAuthClientProfile {
             client_id: client_id.into(),
             redirect_uri: redirect_uri.into(),
             auth_method,
-            secret,
+            secret: Some(secret),
+            scopes: None,
+            resource: None,
+        }
+    }
+
+    /// A public client (RFC 6749 section 2.1; `token_endpoint_auth_method`
+    /// `none`): a client id, no secret, PKCE S256 only, as a native
+    /// application registers ahead of time. `redirect_uri` must be an
+    /// `http` loopback redirect with an explicit port.
+    pub fn public(
+        issuer: impl Into<String>,
+        client_id: impl Into<String>,
+        redirect_uri: impl Into<String>,
+    ) -> Self {
+        Self {
+            issuer: issuer.into(),
+            client_id: client_id.into(),
+            redirect_uri: redirect_uri.into(),
+            auth_method: McpOAuthClientAuthMethod::None,
+            secret: None,
             scopes: None,
             resource: None,
         }
@@ -332,10 +371,25 @@ impl ClientProfileRecord {
         target: &McpServerIdentity,
         profile: &McpOAuthClientProfile,
     ) -> Result<Self, McpOAuthClientProfileRefusal> {
-        if profile.secret.expose().is_empty()
-            || profile.secret.expose().len() > MAX_FIELD_LEN
-            || profile.secret.expose().chars().any(char::is_control)
-        {
+        // A public client has no secret; a confidential one a valid secret.
+        let secret_fits = match (profile.auth_method, &profile.secret) {
+            (McpOAuthClientAuthMethod::None, secret) => secret.is_none(),
+            (
+                McpOAuthClientAuthMethod::ClientSecretBasic
+                | McpOAuthClientAuthMethod::ClientSecretPost,
+                Some(secret),
+            ) => {
+                !secret.expose().is_empty()
+                    && secret.expose().len() <= MAX_FIELD_LEN
+                    && !secret.expose().chars().any(char::is_control)
+            }
+            (
+                McpOAuthClientAuthMethod::ClientSecretBasic
+                | McpOAuthClientAuthMethod::ClientSecretPost,
+                None,
+            ) => false,
+        };
+        if !secret_fits {
             return Err(McpOAuthClientProfileRefusal::Invalid("client secret"));
         }
         let record = Self {
@@ -362,9 +416,14 @@ impl ClientProfileRecord {
         if !valid_atom(&self.client_id) {
             return Err(Invalid("client id"));
         }
-        if !valid_registered_redirect(&self.redirect_uri)
-            && loopback_redirect_parts(&self.redirect_uri).is_none()
-        {
+        let loopback = loopback_redirect_parts(&self.redirect_uri).is_some();
+        if !valid_registered_redirect(&self.redirect_uri) && !loopback {
+            return Err(Invalid("redirect URI"));
+        }
+        // A public client is a native application on a loopback redirect;
+        // a registered `https` redirect (the central callback among them)
+        // stays a confidential client's.
+        if self.auth_method == McpOAuthClientAuthMethod::None && !loopback {
             return Err(Invalid("redirect URI"));
         }
         if let Some(scopes) = &self.scopes
@@ -427,7 +486,8 @@ impl ClientProfileRecord {
 /// secret, for one login or refresh.
 pub(super) struct BoundClientProfile {
     record: ClientProfileRecord,
-    secret: McpOAuthClientSecret,
+    /// The secret of a confidential profile; `None` for a public one.
+    secret: Option<McpOAuthClientSecret>,
     binding: String,
 }
 
@@ -462,15 +522,24 @@ impl BoundClientProfile {
             .unwrap_or(&self.record.server_url)
     }
 
-    /// How a token request authenticates this client.
+    /// How a token request authenticates this client. A public profile's
+    /// requests carry its `client_id` and no client authentication, as a
+    /// dynamically registered client's do. A confidential method always
+    /// authenticates by that method, never as a public client: its row
+    /// holds a secret ([`bound_profile_from_row`]).
     pub(super) fn client_authentication(&self) -> OAuthClientAuthentication<'_> {
+        let secret = self
+            .secret
+            .as_ref()
+            .map_or("", McpOAuthClientSecret::expose);
         match self.record.auth_method {
             McpOAuthClientAuthMethod::ClientSecretBasic => {
-                OAuthClientAuthentication::SecretBasic(self.secret.expose())
+                OAuthClientAuthentication::SecretBasic(secret)
             }
             McpOAuthClientAuthMethod::ClientSecretPost => {
-                OAuthClientAuthentication::SecretPost(self.secret.expose())
+                OAuthClientAuthentication::SecretPost(secret)
             }
+            McpOAuthClientAuthMethod::None => OAuthClientAuthentication::Public,
         }
     }
 
@@ -540,11 +609,16 @@ fn bound_profile_from_row(
     if !record.matches_slot(target) || record.validate().is_err() {
         return Err(mismatch());
     }
-    let secret = row
-        .primary_secret
-        .filter(|secret| !secret.is_empty())
-        .map(McpOAuthClientSecret::new)
-        .ok_or_else(mismatch)?;
+    // A confidential profile's row holds its secret; a public one's none.
+    let secret = match (record.auth_method, row.primary_secret) {
+        (McpOAuthClientAuthMethod::None, None) => None,
+        (
+            McpOAuthClientAuthMethod::ClientSecretBasic
+            | McpOAuthClientAuthMethod::ClientSecretPost,
+            Some(secret),
+        ) if !secret.is_empty() => Some(McpOAuthClientSecret::new(secret)),
+        _ => return Err(mismatch()),
+    };
     Ok(BoundClientProfile {
         binding: record.binding(),
         record,
@@ -571,12 +645,13 @@ pub(super) async fn load_client_profile(
         .transpose()
 }
 
-/// The custody row of `record` with `secret`.
+/// The custody row of `record` with `secret` (none for a public profile).
 fn client_profile_row(
     record: &ClientProfileRecord,
-    secret: &McpOAuthClientSecret,
+    secret: Option<&McpOAuthClientSecret>,
 ) -> Result<PersistedTokens, McpOAuthError> {
-    let mut row = PersistedTokens::api_key(secret.expose());
+    let mut row = PersistedTokens::api_key(String::new());
+    row.primary_secret = secret.map(|secret| secret.expose().to_owned());
     row.auth_mode = PersistedAuthMode::McpOauthClient;
     row.metadata = serde_json::json!({
         CLIENT_PROFILE_FIELD: serde_json::to_value(record).map_err(|error| {
@@ -616,9 +691,9 @@ fn profile_record(
 /// One profile update of a slot.
 enum ProfileUpdate {
     /// Store a profile where none is installed.
-    Install(ClientProfileRecord, McpOAuthClientSecret),
+    Install(ClientProfileRecord, Option<McpOAuthClientSecret>),
     /// Store a profile over the one installed.
-    Replace(ClientProfileRecord, McpOAuthClientSecret),
+    Replace(ClientProfileRecord, Option<McpOAuthClientSecret>),
     /// Remove whatever the slot's profile key holds.
     Remove,
 }
@@ -831,7 +906,7 @@ async fn write_profile_update(
     let written = async {
         match update {
             ProfileUpdate::Install(record, secret) | ProfileUpdate::Replace(record, secret) => {
-                let row = client_profile_row(&record, &secret)?;
+                let row = client_profile_row(&record, secret.as_ref())?;
                 store
                     .save_for(fence, key, &row, TokenStoreAccess::Interactive)
                     .await
@@ -1058,7 +1133,7 @@ mod tests {
             assert!(!accepted(profile(redirect)), "{redirect:?} must be refused");
         }
         let mut no_secret = profile("http://127.0.0.1:3118/callback");
-        no_secret.secret = McpOAuthClientSecret::new("");
+        no_secret.secret = Some(McpOAuthClientSecret::new(""));
         assert_eq!(
             ClientProfileRecord::for_target(&target, &no_secret).err(),
             Some(McpOAuthClientProfileRefusal::Invalid("client secret"))
@@ -1099,7 +1174,7 @@ mod tests {
         };
         let base = binding(profile("http://127.0.0.1:3118/callback"), &target);
         let mut rotated = profile("http://127.0.0.1:3118/callback");
-        rotated.secret = McpOAuthClientSecret::new("another-secret");
+        rotated.secret = Some(McpOAuthClientSecret::new("another-secret"));
         assert_eq!(binding(rotated, &target), base, "a rotated secret keeps it");
         let mut other_client = profile("http://127.0.0.1:3118/callback");
         other_client.client_id = "other-client".into();
@@ -1145,7 +1220,7 @@ mod tests {
         let record =
             ClientProfileRecord::for_target(&target, &profile("http://127.0.0.1:3118/callback"))
                 .unwrap();
-        let row = client_profile_row(&record, &McpOAuthClientSecret::new(SECRET)).unwrap();
+        let row = client_profile_row(&record, Some(&McpOAuthClientSecret::new(SECRET))).unwrap();
         let bound = bound_profile_from_row(&target, row.clone()).unwrap();
         assert_eq!(bound.binding(), record.binding());
         assert!(is_client_profile_binding(bound.binding()));
@@ -1179,5 +1254,158 @@ mod tests {
         // secret, never in its facts.
         assert!(!row.metadata.to_string().contains(SECRET));
         assert!(!format!("{row:?}").contains(SECRET));
+    }
+
+    fn public_profile(redirect: &str) -> McpOAuthClientProfile {
+        McpOAuthClientProfile::public("https://mcp.example.test", "public-client", redirect)
+    }
+
+    #[test]
+    fn a_public_profile_has_no_secret_and_only_a_loopback_redirect() {
+        let target = target();
+        let validated = |profile: McpOAuthClientProfile| {
+            ClientProfileRecord::for_target(&target, &profile).map(|_| ())
+        };
+        let public = public_profile("http://127.0.0.1:3118/callback");
+        assert_eq!(public.auth_method(), McpOAuthClientAuthMethod::None);
+        assert_eq!(McpOAuthClientAuthMethod::None.as_str(), "none");
+        assert_eq!(
+            serde_json::to_value(McpOAuthClientAuthMethod::None).unwrap(),
+            serde_json::json!("none")
+        );
+        assert_eq!(validated(public), Ok(()));
+        assert_eq!(
+            validated(
+                public_profile("http://localhost:3118/mcp/oauth/callback")
+                    .with_scopes(["read", "offline_access"])
+                    .with_resource("https://mcp.example.test")
+            ),
+            Ok(())
+        );
+        // The loopback rule is the confidential profiles' rule: no other
+        // loopback host, an explicit port. A registered `https` redirect,
+        // the central callback included, stays a confidential client's.
+        for redirect in [
+            "http://[::1]:3118/callback",
+            "http://127.0.0.1/callback",
+            "http://host.example:3118/callback",
+            "https://host.example/mcp/oauth/callback/remote-AbC123dEf456GhI7",
+        ] {
+            assert_eq!(
+                validated(public_profile(redirect)),
+                Err(McpOAuthClientProfileRefusal::Invalid("redirect URI")),
+                "{redirect:?} must be refused"
+            );
+        }
+        // Method and secret must agree: no secret with `none`, none for a
+        // confidential method.
+        for secret in [SECRET, ""] {
+            let with_secret = McpOAuthClientProfile::new(
+                "https://mcp.example.test",
+                "public-client",
+                "http://127.0.0.1:3118/callback",
+                McpOAuthClientAuthMethod::None,
+                McpOAuthClientSecret::new(secret),
+            );
+            assert_eq!(
+                validated(with_secret),
+                Err(McpOAuthClientProfileRefusal::Invalid("client secret"))
+            );
+        }
+        for method in [
+            McpOAuthClientAuthMethod::ClientSecretBasic,
+            McpOAuthClientAuthMethod::ClientSecretPost,
+        ] {
+            let mut secretless = public_profile("http://127.0.0.1:3118/callback");
+            secretless.auth_method = method;
+            assert_eq!(
+                validated(secretless),
+                Err(McpOAuthClientProfileRefusal::Invalid("client secret"))
+            );
+        }
+        // A public client is another profile than a confidential one with
+        // the same facts.
+        let mut post = public_profile("http://127.0.0.1:3118/callback");
+        post.auth_method = McpOAuthClientAuthMethod::ClientSecretPost;
+        post.secret = Some(McpOAuthClientSecret::new(SECRET));
+        assert_ne!(
+            ClientProfileRecord::for_target(&target, &post)
+                .unwrap()
+                .binding(),
+            ClientProfileRecord::for_target(
+                &target,
+                &public_profile("http://127.0.0.1:3118/callback")
+            )
+            .unwrap()
+            .binding()
+        );
+    }
+
+    #[test]
+    fn a_public_profile_row_holds_no_secret_and_authenticates_as_a_public_client() {
+        let target = target();
+        let record = ClientProfileRecord::for_target(
+            &target,
+            &public_profile("http://127.0.0.1:3118/callback"),
+        )
+        .unwrap();
+        let row = client_profile_row(&record, None).unwrap();
+        assert_eq!(row.primary_secret, None);
+        assert_eq!(
+            row.metadata[CLIENT_PROFILE_FIELD]["auth_method"],
+            serde_json::json!("none")
+        );
+        let bound = bound_profile_from_row(&target, row.clone()).unwrap();
+        assert!(matches!(
+            bound.client_authentication(),
+            OAuthClientAuthentication::Public
+        ));
+        let stored = bound.stored_client();
+        assert_eq!(stored.token_endpoint_auth_method, "none");
+        assert_eq!(stored.client_secret, None);
+        assert_eq!(stored.client_profile.as_deref(), Some(bound.binding()));
+        assert_eq!(
+            bound.installed().auth_method,
+            McpOAuthClientAuthMethod::None
+        );
+        // A public profile's row with a secret is not a valid profile.
+        let mut with_secret = row;
+        with_secret.primary_secret = Some(SECRET.to_owned());
+        assert!(matches!(
+            bound_profile_from_row(&target, with_secret),
+            Err(McpOAuthError::ClientProfile {
+                refusal: McpOAuthClientProfileRefusal::BindingMismatch,
+                ..
+            })
+        ));
+    }
+
+    /// A confidential profile's row as the release before public profiles
+    /// wrote it still loads, with its method and secret.
+    #[test]
+    fn a_confidential_profile_row_written_before_public_profiles_still_loads() {
+        let target = target();
+        let mut row = PersistedTokens::api_key(SECRET);
+        row.auth_mode = PersistedAuthMode::McpOauthClient;
+        row.metadata = serde_json::json!({
+            "mcp_oauth_client": {
+                "slot": target.binding_slug(),
+                "server_name": "remote",
+                "server_url": "https://mcp.example.test/mcp",
+                "issuer": "https://mcp.example.test",
+                "client_id": "registered-client",
+                "redirect_uri": "http://127.0.0.1:3118/callback",
+                "auth_method": "client_secret_basic",
+            }
+        });
+        let bound = bound_profile_from_row(&target, row).unwrap();
+        assert_eq!(
+            bound.installed().auth_method,
+            McpOAuthClientAuthMethod::ClientSecretBasic
+        );
+        assert!(matches!(
+            bound.client_authentication(),
+            OAuthClientAuthentication::SecretBasic(SECRET)
+        ));
     }
 }

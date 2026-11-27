@@ -388,7 +388,8 @@ struct TestState {
     authorization_server_override: Mutex<Option<String>>,
 }
 
-/// The confidential client a token endpoint authenticates.
+/// The pre-registered client a token endpoint authenticates (for a public
+/// one, `secret` is unused: it must send no secret and no Basic header).
 #[derive(Clone)]
 struct RequiredClientAuth {
     method: McpOAuthClientAuthMethod,
@@ -410,6 +411,11 @@ impl RequiredClientAuth {
                 authorization.is_none()
                     && body.get("client_id") == Some(&self.client_id)
                     && body.get("client_secret") == Some(&self.secret)
+            }
+            McpOAuthClientAuthMethod::None => {
+                authorization.is_none()
+                    && body.get("client_id") == Some(&self.client_id)
+                    && !body.contains_key("client_secret")
             }
             _ => false,
         }
@@ -8753,6 +8759,11 @@ fn assert_fixed_client_authenticated(
             assert_eq!(body["client_id"], FIXED_CLIENT_ID, "request {index}");
             assert_eq!(body["client_secret"], secret, "request {index}");
         }
+        McpOAuthClientAuthMethod::None => {
+            assert_eq!(authorization, None, "token request {index} sends no Basic");
+            assert_eq!(body["client_id"], FIXED_CLIENT_ID, "request {index}");
+            assert!(body.get("client_secret").is_none(), "request {index}");
+        }
         other => panic!("unexpected client authentication method {other:?}"),
     }
 }
@@ -9510,6 +9521,235 @@ async fn loopback_fixed_client_binds_its_registered_redirect_and_authenticates()
             .unwrap()
             .is_none()
     );
+}
+
+/// A free loopback redirect on `127.0.0.1` for a fixed client.
+fn free_loopback_redirect() -> String {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    format!("http://127.0.0.1:{port}/mcp/oauth/callback")
+}
+
+/// A public pre-registered client (client id, no secret) against an
+/// authorization server without dynamic registration: the loopback login
+/// binds the profile's redirect, requests the profile's scopes with PKCE
+/// S256 and registers nothing; the code exchange and every refresh send the
+/// `client_id` with no client authentication (no Basic header, no
+/// `client_secret`). With the profile removed, the credential's refresh
+/// ends typed and sends nothing.
+#[tokio::test]
+async fn public_fixed_client_logs_in_and_refreshes_without_registration() {
+    let method = McpOAuthClientAuthMethod::None;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    state.rotate_refresh_tokens.store(true, Ordering::SeqCst);
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "fixed-public");
+    let redirect = free_loopback_redirect();
+    // The fixture's server names only `mcp.read` and advertises no
+    // `offline_access`: a request for it comes from the profile alone.
+    authority
+        .install_client_profile_entered(
+            &target,
+            McpOAuthClientProfile::public(&base, FIXED_CLIENT_ID, &redirect)
+                .with_scopes(["mcp.read", "offline_access"]),
+            Some(&registered_base()),
+            admit_all(),
+        )
+        .await
+        .expect("the host installs the public client");
+    let installed = authority.client_profile(&target).await.unwrap().unwrap();
+    assert_eq!(installed.auth_method, McpOAuthClientAuthMethod::None);
+    assert_eq!(installed.redirect_uri, redirect);
+    let profile_row = store.load(&client_profile_key(&target)).await.unwrap();
+    assert_eq!(
+        profile_row.unwrap().primary_secret,
+        None,
+        "no secret is kept"
+    );
+
+    let pending = started_loopback_login(&authority, &target).await;
+    assert_eq!(pending.start().redirect_uri, redirect);
+    let query: HashMap<String, String> = reqwest::Url::parse(&pending.start().authorize_url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    assert_eq!(query["client_id"], FIXED_CLIENT_ID);
+    assert_eq!(query["redirect_uri"], redirect);
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert!(!query["code_challenge"].is_empty());
+    assert!(!query.contains_key("client_secret"));
+    assert_eq!(
+        authorize_scopes(&pending.start().authorize_url),
+        ["mcp.read".to_owned(), "offline_access".to_owned()].into(),
+        "the profile's scopes are requested: {}",
+        pending.start().authorize_url
+    );
+    follow_authorize(&pending.start().authorize_url).await;
+    let complete = pending
+        .complete(MCP_INTERACTIVE_LOGIN_TIMEOUT)
+        .await
+        .expect("the public client completes without registration");
+    assert_eq!(complete.account_id.as_deref(), Some("fixture-account-42"));
+    {
+        let requests = state.token_requests.lock();
+        assert_eq!(requests[0]["grant_type"], "authorization_code");
+        assert_eq!(requests[0]["redirect_uri"], redirect.as_str());
+        assert!(
+            requests[0]["code_verifier"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty())
+        );
+    }
+    assert_fixed_client_authenticated(&state, 0, method, "");
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(
+        !state
+            .request_paths
+            .lock()
+            .iter()
+            .any(|path| path == "/register"),
+        "nothing is registered"
+    );
+
+    let key = target.token_key().unwrap();
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(stored.metadata["client"]["client_id"], FIXED_CLIENT_ID);
+    assert_eq!(
+        stored.metadata["client"]["token_endpoint_auth_method"],
+        "none"
+    );
+    assert!(stored.metadata["client"].get("client_secret").is_none());
+    assert!(stored.metadata["client"]["client_profile"].is_string());
+
+    for (round, presented) in [(1, "refresh-token-1"), (2, "refresh-token-2")] {
+        expire_stored_credential(&authority, store.as_ref(), &target).await;
+        assert_eq!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("access-token"),
+            "refresh {round} lands"
+        );
+        {
+            let requests = state.token_requests.lock();
+            assert_eq!(requests[round]["grant_type"], "refresh_token");
+            assert_eq!(requests[round]["refresh_token"], presented);
+        }
+        assert_fixed_client_authenticated(&state, round, method, "");
+    }
+    assert_eq!(state.token_requests.lock().len(), 3);
+
+    // Removed, the profile no longer refreshes the credential: the refresh
+    // ends typed and nothing is sent or registered.
+    authority
+        .remove_client_profile_entered(&target, admit_all())
+        .await
+        .unwrap();
+    expire_stored_credential(&authority, store.as_ref(), &target).await;
+    let refused = authority.stored_bearer_token(&target).await;
+    assert!(
+        matches!(refused, Err(McpOAuthError::ReauthRequired { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(state.token_requests.lock().len(), 3);
+    assert!(state.registration_requests.lock().is_empty());
+}
+
+/// A public profile follows the profiles' redirect rule and holds no
+/// secret: a non-loopback, `[::1]` or port-less redirect, a registered
+/// `https` redirect (the slot's own or the central base), and a secret
+/// beside method `none` are each refused typed at install and write
+/// nothing; a public profile is no client for the registered callback.
+#[tokio::test]
+async fn a_public_profile_install_refuses_a_secret_and_any_non_loopback_redirect() {
+    let (base, state) = spawn_fixed_client_fixture(McpOAuthClientAuthMethod::None).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "fixed-public-refusals");
+    let derived = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let central = registered_base().as_str().to_owned();
+    for redirect in [
+        derived.as_str(),
+        central.as_str(),
+        "http://[::1]:3118/callback",
+        "http://127.0.0.1/callback",
+        "http://host.example:3118/callback",
+    ] {
+        assert_eq!(
+            client_profile_refusal(
+                authority
+                    .install_client_profile_entered(
+                        &target,
+                        McpOAuthClientProfile::public(&base, FIXED_CLIENT_ID, redirect),
+                        Some(&registered_base()),
+                        admit_all(),
+                    )
+                    .await
+            ),
+            McpOAuthClientProfileRefusal::Invalid("redirect URI"),
+            "{redirect:?}"
+        );
+    }
+    let redirect = free_loopback_redirect();
+    assert_eq!(
+        client_profile_refusal(
+            authority
+                .install_client_profile_entered(
+                    &target,
+                    fixed_client_profile(
+                        &base,
+                        &redirect,
+                        McpOAuthClientAuthMethod::None,
+                        FIXED_CLIENT_SECRET
+                    ),
+                    Some(&registered_base()),
+                    admit_all(),
+                )
+                .await
+        ),
+        McpOAuthClientProfileRefusal::Invalid("client secret")
+    );
+    assert_eq!(
+        installed_client_id(&authority, &target).await,
+        None,
+        "nothing was written"
+    );
+
+    authority
+        .install_client_profile_entered(
+            &target,
+            McpOAuthClientProfile::public(&base, FIXED_CLIENT_ID, &redirect),
+            Some(&registered_base()),
+            admit_all(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        authority
+            .registered_login_redirect_uri(&target, &registered_base())
+            .await
+            .unwrap(),
+        None,
+        "a public profile has no registered redirect"
+    );
+    assert_eq!(
+        client_profile_refusal(
+            authority
+                .login_start_registered(&target, &registered_base(), None)
+                .await
+        ),
+        McpOAuthClientProfileRefusal::RedirectMismatch
+    );
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+    assert!(state.token_requests.lock().is_empty());
 }
 
 /// A server whose resource metadata names its origin for an endpoint under

@@ -4781,7 +4781,8 @@ impl McpOAuthAuthority {
             .transpose()?;
         require_https_or_loopback(target, &authorization_endpoint, "authorization endpoint")?;
         require_https_or_loopback(target, &token_endpoint, "token endpoint")?;
-        // A host-registered client sends its secret to the token endpoint.
+        // A host-registered client sends its secret to the token endpoint (a
+        // public one its code and refresh token, under the same rule).
         if registration == ClientRegistration::HostRegistered {
             require_client_secret_endpoint(target, &auth_server, &token_endpoint)?;
         }

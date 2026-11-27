@@ -100,6 +100,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  accessSync,
+  constants,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -107,6 +109,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -140,12 +143,46 @@ const WAIT_MS = 30_000;
 // How long a row watches before it says that no further notice was observed.
 const QUIET_MS = 500;
 
-const skip =
-  !(gatewayBin && existsSync(gatewayBin) && seededState) &&
+const NEEDS =
   "these rows need both META_RPC_GATEWAY_BIN (a built rpc_gateway) and " +
-    "META_SDK_HELD_QUESTION_STATE (a directory seeded by the ignored Rust test " +
-    `${SEED_STEP} of the Meta crate's decision_notice_at_opening target, ` +
-    "run by name with --ignored)";
+  "META_SDK_HELD_QUESTION_STATE (a directory seeded by the ignored Rust test " +
+  `${SEED_STEP} of the Meta crate's decision_notice_at_opening target, ` +
+  "run by name with --ignored)";
+
+/** Whether `path` is a file this process may execute. */
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why the rows are skipped, or `false` when they run. A row is skipped only
+ * for a variable that is NOT SET. A gateway variable that is set and names
+ * no executable file is not a reason to skip: the row runs and fails
+ * (`theGatewayIsExecutable`), as it does for a seeded directory that was
+ * supplied and is wrong.
+ */
+function whySkipped(): string | false {
+  if (!gatewayBin) return `META_RPC_GATEWAY_BIN is not set: ${NEEDS}`;
+  if (isExecutableFile(gatewayBin) && !seededState) {
+    return `META_SDK_HELD_QUESTION_STATE is not set: ${NEEDS}`;
+  }
+  return false;
+}
+
+const skip = whySkipped();
+
+/** Fail the row for a gateway path that was supplied and is wrong. */
+function theGatewayIsExecutable(): void {
+  assert.ok(
+    isExecutableFile(gatewayBin),
+    `META_RPC_GATEWAY_BIN names no executable file: ${gatewayBin}`,
+  );
+}
 
 // The whole environment of the gateway process is an allow list: the names
 // below, passed on from this process when set, and the homes a row sets.
@@ -361,6 +398,7 @@ async function withGatewayOver(
 
 describe("a question set pending before the gateway starts", { skip }, () => {
   it("is noticed to the host before any list", async () => {
+    theGatewayIsExecutable();
     const state = seededDirectory();
     const { seededId, note } = seedOf(state);
     await withGatewayOver(state, note, async (runtime, notices) => {
@@ -419,6 +457,7 @@ describe("a question set pending before the gateway starts", { skip }, () => {
   });
 
   it("is not read and not answered on a launch without a roster", async () => {
+    theGatewayIsExecutable();
     const state = seededDirectory();
     const { seededId, note } = seedOf(state);
     // A launch without a roster, as the first row's: its gateway serves no
@@ -486,6 +525,7 @@ describe("a question set pending before the gateway starts", { skip }, () => {
   });
 
   it("is read and answered by the host with the id its notice names", async () => {
+    theGatewayIsExecutable();
     const state = seededDirectory();
     const { seededId, note } = seedOf(state);
     await withGatewayOver(state, note, async (runtime, notices) => {

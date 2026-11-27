@@ -138,12 +138,41 @@ _WAIT_SECONDS = 30.0
 # How long the row watches before it says that no further notice was observed.
 _QUIET_SECONDS = 0.5
 
-_SKIP_REASON = (
+_NEEDS = (
     "this row needs both META_GATEWAY_BIN (a built rpc_gateway) and "
     "META_SDK_HELD_QUESTION_STATE (a directory seeded by the ignored Rust test "
     f"{_SEED_STEP} of the Meta crate's decision_notice_at_opening target, "
     "run by name with --ignored)"
 )
+
+
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _why_skipped() -> str | None:
+    """Why the rows are skipped, or ``None`` when they run.
+
+    A row is skipped only for a variable that is NOT SET. A gateway
+    variable that is set and names no executable file is not a reason to
+    skip: the row runs and fails (:func:`_the_gateway_is_executable`), as
+    it does for a seeded directory that was supplied and is wrong.
+    """
+    if not _GATEWAY_BIN:
+        return f"META_GATEWAY_BIN is not set: {_NEEDS}"
+    if _is_executable_file(_GATEWAY_BIN) and not _SEEDED_STATE:
+        return f"META_SDK_HELD_QUESTION_STATE is not set: {_NEEDS}"
+    return None
+
+
+_SKIP_REASON = _why_skipped()
+
+
+def _the_gateway_is_executable() -> None:
+    """Fail the row for a gateway path that was supplied and is wrong."""
+    assert _is_executable_file(_GATEWAY_BIN), (
+        f"META_GATEWAY_BIN names no executable file: {_GATEWAY_BIN}"
+    )
 
 # The whole environment of the gateway process is an allow list: the names
 # below, passed on from this process when set, and the homes the row sets.
@@ -308,14 +337,12 @@ def _runtime_over(state: Path, *, roster: Any | None = None) -> MetaRuntime:
     return MetaRuntime(builder._config)
 
 
-@pytest.mark.skipif(
-    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
-    reason=_SKIP_REASON,
-)
+@pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 @pytest.mark.asyncio
 async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_any_list(
     tmp_path, monkeypatch
 ):
+    _the_gateway_is_executable()
     state = _seeded_state()
     seeded_id, note = _seed(state)
     _only_the_allow_list_is_inherited(tmp_path, monkeypatch)
@@ -373,14 +400,12 @@ async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_an
         await runtime.shutdown()
 
 
-@pytest.mark.skipif(
-    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
-    reason=_SKIP_REASON,
-)
+@pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 @pytest.mark.asyncio
 async def test_without_a_roster_the_noticed_question_set_is_not_read_and_not_answered(
     tmp_path, monkeypatch
 ):
+    _the_gateway_is_executable()
     state = _seeded_state()
     seeded_id, note = _seed(state)
     _only_the_allow_list_is_inherited(tmp_path, monkeypatch)
@@ -439,14 +464,12 @@ async def test_without_a_roster_the_noticed_question_set_is_not_read_and_not_ans
         await runtime.shutdown()
 
 
-@pytest.mark.skipif(
-    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
-    reason=_SKIP_REASON,
-)
+@pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 @pytest.mark.asyncio
 async def test_the_host_reads_and_answers_the_question_set_its_notice_names(
     tmp_path, monkeypatch
 ):
+    _the_gateway_is_executable()
     state = _seeded_state()
     seeded_id, note = _seed(state)
     _only_the_allow_list_is_inherited(tmp_path, monkeypatch)

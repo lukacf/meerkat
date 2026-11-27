@@ -37,6 +37,91 @@ pub enum ToolCatalogDeferredEligibility {
     DeferredEligible { provenance: ToolProvenance },
 }
 
+/// A stock tool family a host may let wait behind the deferred catalog
+/// ([`StockToolDeferralPolicy`]).
+///
+/// Only a family whose tools were checked for what must stay in every
+/// request can be named, and the comms family is the only one so far. More
+/// may be added later: code outside this crate that matches on the enum
+/// needs a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum StockToolSourceKind {
+    /// The comms tools (provenance kind [`ToolSourceKind::Comms`]).
+    Comms,
+}
+
+impl StockToolSourceKind {
+    /// The provenance kind this family's tools carry.
+    #[must_use]
+    pub const fn source_kind(self) -> ToolSourceKind {
+        match self {
+            Self::Comms => ToolSourceKind::Comms,
+        }
+    }
+}
+
+/// Which stock tool families a host lets wait behind the deferred catalog.
+///
+/// Host build configuration, constant for the process: a host sets it once
+/// where it composes its sessions (the agent factory's
+/// `stock_tool_deferral`). The default names no family, and then nothing
+/// about a session's catalog, requests or tool binding digests changes.
+///
+/// A named family's tools become deferred-eligible in the session's composed
+/// catalog ([`crate::StockDeferralDispatcher`] states the exact rule and
+/// what stays in every request). Whether the session then defers is decided
+/// as for any deferred-eligible tool
+/// ([`select_catalog_mode_from_snapshot`]): a session whose catalog is not
+/// exact defers nothing, and one whose catalog is exact defers from
+/// [`DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD`] deferred-eligible tools or
+/// [`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`] bytes of their definitions.
+///
+/// In practice opting in changes the first model request of a session with
+/// an exact catalog that mounts the comms tools. Three of them may wait,
+/// which reaches the tool count on its own, so such a session starts in the
+/// deferred mode: its first request carries the two catalog control tools in
+/// their place, and the model loads a tool before its first call of it (two
+/// more model requests for that tool, once).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StockToolDeferralPolicy {
+    deferrable: std::collections::BTreeSet<StockToolSourceKind>,
+}
+
+impl StockToolDeferralPolicy {
+    /// The policy that names no family (the default).
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// This policy with `kind` also allowed to wait behind the catalog.
+    #[must_use]
+    pub fn deferring(mut self, kind: StockToolSourceKind) -> Self {
+        self.deferrable.insert(kind);
+        self
+    }
+
+    /// Whether `kind`'s tools may wait behind the catalog.
+    #[must_use]
+    pub fn allows(&self, kind: StockToolSourceKind) -> bool {
+        self.deferrable.contains(&kind)
+    }
+
+    /// Whether the policy names no family.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.deferrable.is_empty()
+    }
+
+    /// Whether a tool of provenance kind `kind` belongs to a named family.
+    pub(crate) fn allows_source_kind(&self, kind: &ToolSourceKind) -> bool {
+        self.deferrable
+            .iter()
+            .any(|allowed| allowed.source_kind() == *kind)
+    }
+}
+
 /// Precedence-resolved catalog entry for one canonical tool name.
 ///
 /// Entries represent the canonical winner for a tool identity even when that

@@ -121,9 +121,9 @@ pub use agent::dispatcher::{
     comms_tool_defs,
 };
 pub use mcp::tools::{
-    CommsToolCallError, RuntimeCommsCommandHandle, ToolContext, comms_tool_operation_target,
-    comms_tool_unavailable_reason, handle_tools_call, handle_tools_call_typed,
-    handle_tools_call_with_context, tools_list,
+    CommsToolCallError, PEER_ANSWER_TOOL_NAMES, RuntimeCommsCommandHandle, ToolContext,
+    comms_tool_operation_target, comms_tool_unavailable_reason, handle_tools_call,
+    handle_tools_call_typed, handle_tools_call_with_context, tools_list,
 };
 
 // Capability registration

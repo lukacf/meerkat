@@ -187,6 +187,7 @@ pub mod skills;
 pub mod skills_config;
 pub mod slow_await;
 pub mod state;
+pub mod stock_tool_deferral;
 pub mod storage_diagnostics;
 pub mod storage_durability;
 pub mod storage_layout;
@@ -682,6 +683,7 @@ pub use session_store::{
     strand_layout_for_retained_history,
 };
 pub use state::LoopState;
+pub use stock_tool_deferral::StockDeferralDispatcher;
 pub use storage_diagnostics::{
     DatabaseInventory, DiagnoseScope, FindingSeverity, SqliteLockProfileReport,
     SqliteMemoryStatisticsSwitch, StorageDiagnosis, StorageDiagnosticsError, StorageFinding,
@@ -707,6 +709,7 @@ pub use tool_application::{
     ToolApplicationOperation, ToolApplicationRequest, ToolApplicationSettlement,
 };
 pub use tool_bundle::RegisteredToolBundleDispatcher;
+pub use tool_catalog::{StockToolDeferralPolicy, StockToolSourceKind};
 pub use tool_catalog::{
     ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolCatalogView,

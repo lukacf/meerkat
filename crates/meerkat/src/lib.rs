@@ -337,6 +337,7 @@ pub use meerkat_core::{
     TranscriptRewriteCommit, TranscriptRewriteReason, TranscriptRewriteRecord,
     TranscriptRewriteSelection, TranscriptRewriteSemantic,
 };
+pub use meerkat_core::{StockToolDeferralPolicy, StockToolSourceKind};
 
 // Re-export client types
 pub use meerkat_client::{

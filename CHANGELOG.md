@@ -48,6 +48,76 @@ them.
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
   - `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+- Behaviour-only (not measured by the gate): `meerkat-tools`, `meerkat-core`:
+  session-filtered search and notices. `tool_catalog_search` returns no row
+  for a tool the session's tool filters do not allow, or that a closed tool
+  grant gate holds back, and does not count it in `total_matches`. This
+  changes what a caller of search sees: such a tool used to be returned
+  with its name, its description and the status `blocked_by_filter`. That
+  status is no longer produced, and neither the name nor the description
+  of a filtered or gated tool is in a search result; for a gated tool, the
+  description could be read there before a grant and no longer can. The
+  deferred-catalog notice and its typed delta do not offer a tool the
+  filters do not allow: it is not announced as available, and a tool that
+  was never offered is never named. A tool that was announced, is still
+  deferred, and is later disallowed is reported once as no longer
+  available, as a tool its source dropped is. A search whose tool scope
+  cannot be read names no entry: it returns no result and
+  `temporarily_unavailable` as its `empty_result_status`, where it
+  returned one row per deferrable entry. This covers search and notices
+  only. Tool load and call behavior is unchanged. A reader of search
+  results that looked for a `blocked_by_filter` row to learn that a tool
+  is denied finds no row now; read a denial from the host's own tool
+  policy.
+
+### Added
+
+- `meerkat`, `meerkat-core`, `meerkat-comms`: a Rust host can let the stock
+  comms tools wait behind the deferred tool catalog instead of sending them
+  in every model request. `AgentFactory::stock_tool_deferral` takes a
+  `StockToolDeferralPolicy` that names the family
+  (`StockToolSourceKind::Comms`; both types are exported by `meerkat-core`
+  and by `meerkat`). The default policy names no family and changes
+  nothing: every catalog, tool binding digest and request is as before. In
+  a session that factory builds whose tool catalog is exact, `send_message`,
+  `send_request` and `peers` are deferred-eligible and follow the ordinary
+  rule (the deferred mode starts at two eligible tools or 160 bytes of
+  their definitions), which the three reach on their own. Such a session
+  starts in the deferred mode: its first request carries the two control
+  tools in their place, its model loads a tool with `tool_catalog_load`
+  before it calls it (two more model requests, once for each tool it
+  uses), and its system prompt says that the comms tools are loaded first,
+  in place of the comms usage section. `reply_to_peer` and `send_response`
+  (`meerkat_comms::PEER_ANSWER_TOOL_NAMES`) never wait, so an agent a peer
+  wakes can answer in its first request. A load of a tool that never waits
+  answers `not_deferred_eligible`. The session's tool filters apply as
+  without the policy: a comms tool they do not allow is not returned by a
+  search and not offered by the notice. For a host that writes its own
+  composition, `meerkat_core::StockDeferralDispatcher` applies a policy to
+  any dispatcher; the wrapper checks nothing itself, so apply it only
+  where the final catalog is exact, as the factory does. Not included: no
+  other tool family can be named, so the mob tools stay in every request.
+  A session whose catalog is not exact defers nothing and is built exactly
+  as without the policy. Today that is every session that mounts the agent
+  mob tools or memory search, and every session one of whose other tool
+  sources reports no exact catalog (a host's own source, or the empty base
+  source of a session with neither builtin nor external tools). Only Rust
+  host code can set the policy: nothing on the wire, in a config file, an
+  SDK, a mob definition or a profile sets it, and `rkat`, `rkat-rpc`,
+  `rkat-rest` and `rkat-mcp` do not opt in. This policy has not been
+  exercised with realtime conversations. A session resumed after its host
+  opts in loads each comms tool it had inline once, and a tool binding
+  digest recorded for such a tool before the opt-in differs from its digest
+  after it. Limit, in both directions: a resumed session keeps the system
+  prompt it was created with. A session created before the opt-in still
+  carries the comms usage section while those tools wait; the
+  deferred-catalog notice names the tools that wait. A session created
+  under the policy and resumed without it keeps a prompt that tells the
+  model to load `send_message`, `send_request` and `peers` with
+  `tool_catalog_load`, while its requests list those tools inline and may
+  not offer `tool_catalog_load` at all. A tool name in a prompt confers no
+  grant: what a session can load or call is decided by its tool catalog,
+  its filters and its tool policy, not by the prompt.
 
 - `meerkat-mob`: the public struct `ToolConfig` gains the public field `web_search: Option<bool>` (the profile key `tools.web_search`, see Added). `meerkat-contracts`: the public structs `wire::PortableToolConfig`, `WireMobToolConfig` and `wire::MobToolConfigInput` gain the same field. Code that builds one of them with a struct literal adds the field; `..Default::default()` covers it.
 

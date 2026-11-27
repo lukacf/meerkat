@@ -9251,6 +9251,34 @@ mod tests {
         assert!(matches!(result, Err(ToolError::NotFound { .. })));
     }
 
+    /// The agent mob tools report no exact catalog, so a session that mounts
+    /// them never selects the deferred catalog mode, and a host's stock tool
+    /// deferral policy (`AgentFactory::stock_tool_deferral`) is not applied
+    /// to it. A change that makes this surface exact brings those sessions
+    /// under that policy and has to decide it there.
+    #[tokio::test]
+    async fn the_agent_mob_tools_report_no_exact_catalog() {
+        let surface = AgentMobToolSurface::new(
+            MobMcpState::new_in_memory(),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !surface.tools().is_empty(),
+            "precondition: the surface lists the agent mob tools"
+        );
+        assert!(!surface.tool_catalog_capabilities().exact_catalog);
+        assert_eq!(
+            meerkat_core::select_tool_catalog_mode(&surface),
+            meerkat_core::ToolCatalogMode::Inline
+        );
+    }
+
     #[tokio::test]
     async fn test_build_mob_tools_returns_empty_surface_without_operator_capabilities() {
         let state = MobMcpState::new_in_memory();

@@ -246,6 +246,43 @@ selector enters deferred mode when a source is still pending, at least two
 eligible tools exist, or their combined name, description, and schema volume
 reaches 160 bytes. These tools are not part of the general builtins gate.
 
+A Rust host can let the stock comms tools wait behind the catalog too.
+`AgentFactory::stock_tool_deferral` takes a `StockToolDeferralPolicy` that
+names the family (`StockToolSourceKind::Comms`; both types are also exported
+by the `meerkat` crate). The default policy names no family, and then every
+catalog and request is as without it. In a session that factory builds whose
+catalog is exact, `send_message`, `send_request` and `peers` are
+deferred-eligible and follow the rule above, which the three reach on their
+own: the session starts in deferred mode, its first request carries the two
+control tools in their place, the model loads a tool with `tool_catalog_load`
+before it calls it, and the system prompt says that the comms tools are
+loaded first, in place of the comms usage section. `reply_to_peer` and
+`send_response` never wait, so an agent a peer wakes can answer in its first
+request, and a load of one answers `not_deferred_eligible`. The session's
+tool filters apply as without the policy.
+
+What this does not include. No other tool family can be named, so the mob
+tools stay in every request. A session whose catalog is not exact defers
+nothing and is built exactly as without the policy. Today that is every
+session that mounts the agent mob tools or memory search, and every session
+one of whose other tool sources reports no exact catalog (a host's own
+source, or the empty base source of a session with neither builtin nor
+external tools). Only Rust host code can set the policy: no RPC or REST
+parameter, config file, SDK option, mob definition, profile or tool call
+sets it, and the `rkat` binaries do not set it. This policy has not been
+exercised with realtime conversations.
+
+One limit, in both directions: a resumed session keeps the system prompt it
+was created with. A session created before its host opted in still carries
+the comms usage section while those tools wait; the deferred-catalog notice
+at its next boundary names the tools that wait. A session created under the
+policy and resumed without it keeps a prompt that tells the model to load
+`send_message`, `send_request` and `peers` with `tool_catalog_load`, while
+its requests list those tools inline and may not offer `tool_catalog_load`
+at all. A tool name in a prompt confers no grant: what a session can load or
+call is decided by its tool catalog, its filters and its tool policy, not by
+the prompt.
+
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and
 `PersistentSessionService::tool_catalog_view` (and the
@@ -272,9 +309,20 @@ Search deferred-eligible session tools without loading them.
 The response contains `catalog_exact`, `total_matches`, `results`, optional
 `pending_sources`, and optional `empty_result_status`. Each result reports
 `name`, `description`, `currently_callable`, and `visibility_status`:
-`loaded`, `deferred`, `blocked_by_filter`, or `temporarily_unavailable`.
+`loaded`, `deferred`, or `temporarily_unavailable`. A tool the session's tool
+filters do not allow, or that a closed tool grant gate holds back, is not
+returned and not counted: a caller of search sees neither its name nor its
+description. Such a tool used to be returned with the status
+`blocked_by_filter`, which is no longer produced; for a gated tool, the
+description could be read there before a grant and no longer can. The
+deferred-catalog notice does not offer a tool the filters do not allow: it is
+not announced as available, and a tool that was never offered is never named.
+A tool that was announced, is still deferred, and is later disallowed is
+reported once as no longer available. Tool load and call behavior is
+unchanged; only search and notices are filtered.
 `pending_source` is used only as the empty-result status while a catalog source
-is pending.
+is pending, and `temporarily_unavailable` is the empty-result status of a
+search whose tool scope cannot be read, which returns no result.
 
 **Source:** `crates/meerkat-tools/src/control_plane.rs`
 </Accordion>

@@ -39,8 +39,9 @@
  * embedding host is the one that can. That is the case the notice exists
  * for.
  *
- * The row runs when META_RPC_GATEWAY_BIN names a built rpc_gateway, and is
- * skipped otherwise.
+ * The row runs when META_RPC_GATEWAY_BIN names a built rpc_gateway. It is
+ * skipped only when the variable is not set; a variable that is set and
+ * names no executable file fails the row.
  *
  * How the row knows what the host asked
  * -------------------------------------
@@ -74,7 +75,15 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -83,10 +92,23 @@ import type { MetaRuntime } from "../src/index.js";
 import { PersistentTransport } from "../src/transport.js";
 
 // The gateway the row starts: the one this variable names, and no other.
+// The row is skipped only when the variable is not set. A variable that is
+// set and names no executable file fails the row: a path that was supplied
+// and is wrong is not a reason to skip.
 const gatewayBin = (process.env.META_RPC_GATEWAY_BIN ?? "").trim();
 const skip =
-  !(gatewayBin && existsSync(gatewayBin)) &&
-  "META_RPC_GATEWAY_BIN does not name a built rpc_gateway";
+  !gatewayBin &&
+  "META_RPC_GATEWAY_BIN is not set: the row needs it to name a built rpc_gateway";
+
+/** Whether `path` is a file this process may execute. */
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
 
 const MODEL = "question-row-fake";
 const QUESTION_KIND = "ask_user.questions";
@@ -447,6 +469,10 @@ async function until(condition: () => boolean | Promise<boolean>, what: string):
 
 describe("a question an agent asks while the host is connected", { skip }, () => {
   it("is noticed, read and answered by the host, and the agent receives the answer", async () => {
+    assert.ok(
+      isExecutableFile(gatewayBin),
+      `META_RPC_GATEWAY_BIN names no executable file: ${gatewayBin}`,
+    );
     const dir = mkdtempSync(join(tmpdir(), "meta-question-opens-"));
     const before = { ...process.env };
     // The gateway process takes this process's environment when its

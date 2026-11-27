@@ -84,11 +84,14 @@ from .test_wire_cross_mob_real_gateways import (
 )
 
 # The gateway the row starts: the one this variable names, and no other.
+# The row is skipped only when the variable is not set. A variable that is
+# set and names no executable file fails the row: a path that was supplied
+# and is wrong is not a reason to skip.
 _GATEWAY_BIN = os.environ.get("META_GATEWAY_BIN", "").strip()
 
 pytestmark = pytest.mark.skipif(
-    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN)),
-    reason="META_GATEWAY_BIN does not name a built rpc_gateway",
+    not _GATEWAY_BIN,
+    reason="META_GATEWAY_BIN is not set: the row needs it to name a built rpc_gateway",
 )
 
 _QUESTION_KIND = "ask_user.questions"
@@ -327,6 +330,9 @@ class _OneAgentRoster:
 async def test_a_question_an_agent_asks_while_the_host_is_connected_is_noticed_read_and_answered(
     tmp_path, monkeypatch
 ):
+    assert os.path.isfile(_GATEWAY_BIN) and os.access(_GATEWAY_BIN, os.X_OK), (
+        f"META_GATEWAY_BIN names no executable file: {_GATEWAY_BIN}"
+    )
     # The gateway inherits the allow list and homes of this test only, and
     # every line between it and this host is recorded from its start.
     _only_the_allow_list_is_inherited(tmp_path, monkeypatch)

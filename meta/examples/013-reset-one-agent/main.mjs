@@ -8,11 +8,14 @@ import { Meta } from '@rkat/meta-sdk';
 
 const gateway = process.env.META_GATEWAY_BIN;
 if (!gateway) throw Error('Set META_GATEWAY_BIN to the matching local rpc_gateway');
-const state = await mkdtemp(join(tmpdir(), 'reset-one-'));
+const demoRoot = await mkdtemp(join(tmpdir(), 'reset-one-'));
 const names = ['draft', 'index'];
 try {
+  // The gateway inherits this process environment. Keep Core's session
+  // identities beside Meta's persistent state, not in the caller's XDG home.
+  process.env.XDG_STATE_HOME = join(demoRoot, 'xdg-state');
   const runtime = await Meta.builder().gateway(gateway)
-    .mob(fileURLToPath(new URL('./mob.toml', import.meta.url))).persistentState(state)
+    .mob(fileURLToPath(new URL('./mob.toml', import.meta.url))).persistentState(join(demoRoot, 'meta-state'))
     .rosterProvider({async roster() { return names.map(identity => ({identity, profile:'worker', displayName:identity, addressability:'addressable', labels:{}, context:null, additionalInstructions:[]})); }})
     .build();
   try {
@@ -34,4 +37,4 @@ try {
     assert.deepEqual(after[1], before[1]);
     console.log(JSON.stringify({names,before,after}, null, 2));
   } finally { await runtime.shutdown(); }
-} finally { await rm(state, {recursive:true,force:true}); }
+} finally { await rm(demoRoot, {recursive:true,force:true}); }

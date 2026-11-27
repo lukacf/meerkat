@@ -27,6 +27,7 @@ Host programs:
 - `010-ask-the-user` (Python and TypeScript; an agent asks a person and goes on with the answer; no console; needs a provider key)
 - `011-cross-gateway-peers` (Python; two local gateways, a signed peer message and reply; requires a provider key)
 - [012-agent-workgraph](012-agent-workgraph/) (Python; a member claims a task and attaches its output as evidence)
+- [013-reset-one-agent](013-reset-one-agent/) (Node.js; reset one idle member and verify its sibling keeps its session; no provider key)
 - [TypeScript host runnable](../sdk/typescript/examples/README.md)
   (a durable source-runner schedule and its callback; no provider key)
 

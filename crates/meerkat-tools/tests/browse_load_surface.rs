@@ -734,3 +734,325 @@ async fn invoke_function_preserves_structured_arguments() {
         "typed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `skill_list_resources` and the "not found" answer.
+//
+// The `SkillSource::list_artifacts` default answers `SkillError::NotFound`
+// for every key, so that answer alone does not say the skill is missing. The
+// tool must not report a skill the skill listing shows as not found, must
+// keep an empty listing a success, and must not reveal a skill the listing
+// hides.
+// ---------------------------------------------------------------------------
+
+/// Whether `browse_skills`, filtered to the key's source, shows `key`: the
+/// skill listing a caller of the skill tools sees.
+async fn browse_shows(runtime: &Arc<SkillRuntime>, key: &SkillKey) -> bool {
+    let json = BrowseSkillsTool::new(Arc::clone(runtime))
+        .call(serde_json::json!({ "source_uuid": key.source_uuid.to_string() }))
+        .await
+        .unwrap()
+        .into_json()
+        .unwrap();
+    let source_uuid = key.source_uuid.to_string();
+    json["skills"].as_array().unwrap().iter().any(|skill| {
+        skill["source_uuid"].as_str() == Some(source_uuid.as_str())
+            && skill["skill_name"].as_str() == Some(key.skill_name.as_str())
+    })
+}
+
+/// Row A: a skill the listing shows, held by a source that answers the
+/// `list_artifacts` default (the in-memory source inherits it).
+#[tokio::test]
+async fn list_resources_of_a_listed_skill_with_no_resource_listing_does_not_say_not_found() {
+    let (runtime, primary, _secondary) = fixture_runtime();
+    let key = SkillKey {
+        source_uuid: primary.clone(),
+        skill_name: SkillName::parse("alpha").unwrap(),
+    };
+
+    // The skill listing shows the key.
+    assert!(browse_shows(&runtime, &key).await);
+
+    let err = SkillListResourcesTool::new(runtime)
+        .call(serde_json::json!({
+            "source_uuid": primary.to_string(),
+            "skill_name": "alpha",
+        }))
+        .await
+        .unwrap_err();
+    // An error, not an empty listing: the call above did not succeed.
+    let meerkat_tools::BuiltinToolError::ExecutionFailed(message) = &err else {
+        panic!("a listed skill without a resource listing is an execution failure; got {err:?}");
+    };
+
+    let not_found = SkillError::NotFound { key: key.clone() }.to_string();
+    assert!(
+        !message.contains(&not_found),
+        "a listed skill must not be reported as not found; got: {message}"
+    );
+    assert!(
+        message.contains(&format!("The skill {key} is listed")),
+        "the diagnostic names the key and says it is listed; got: {message}"
+    );
+    assert!(
+        message.contains("no source returned a resource listing for it"),
+        "the diagnostic says no source returned a resource listing; got: {message}"
+    );
+    assert!(
+        message.contains("This is not an empty listing"),
+        "the diagnostic says this is not an empty listing; got: {message}"
+    );
+    assert!(
+        message.contains("call load_skill with this key"),
+        "the diagnostic suggests one next step; got: {message}"
+    );
+    // It states the two observations only: no source is named (the fixture's
+    // source name is "project").
+    assert!(
+        !message.contains("project"),
+        "the diagnostic names no source; got: {message}"
+    );
+}
+
+/// A runtime whose one skill requires a capability the engine does not have,
+/// so the skill listing hides it.
+fn hidden_skill_runtime() -> (Arc<SkillRuntime>, SkillKey) {
+    let source = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap();
+    let mut doc = skill_doc(&source, "gated", "Gated", "# Gated\n\nbody-gated");
+    doc.descriptor.capability_requirements =
+        vec![meerkat_core::skills::CapabilityId::parse("shell").unwrap()];
+    let key = doc.descriptor.key.clone();
+    let registry = SourceIdentityRegistry::build(
+        vec![SourceIdentityRecord {
+            source_uuid: source.clone(),
+            display_name: "gated fixture".to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: format!("fixture:{source}"),
+            status: SourceIdentityStatus::Active,
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    // No capability is available to this engine.
+    let engine = DefaultSkillEngine::new(InMemorySkillSource::new(vec![doc]), Vec::new())
+        .with_source_identity_registry(Arc::new(registry));
+    (Arc::new(SkillRuntime::new(Arc::new(engine))), key)
+}
+
+/// Row E: a skill the skill listing hides from this caller stays not found,
+/// byte for byte, although a source holds it: the diagnostic of row A must
+/// never reveal it.
+#[tokio::test]
+async fn list_resources_of_a_skill_the_listing_hides_stays_not_found() {
+    let (runtime, key) = hidden_skill_runtime();
+
+    // The skill listing does not show the key.
+    assert!(!browse_shows(&runtime, &key).await);
+
+    let err = SkillListResourcesTool::new(runtime)
+        .call(serde_json::json!({
+            "source_uuid": key.source_uuid.to_string(),
+            "skill_name": key.skill_name.as_str(),
+        }))
+        .await
+        .unwrap_err();
+    let meerkat_tools::BuiltinToolError::ExecutionFailed(message) = &err else {
+        panic!("a hidden skill is an execution failure; got {err:?}");
+    };
+    assert_eq!(message, &SkillError::NotFound { key }.to_string());
+}
+
+/// Row B: a key no source holds stays not found, typed at the runtime and in
+/// the tool's text.
+#[tokio::test]
+async fn list_resources_of_a_missing_key_stays_not_found() {
+    let (runtime, primary, _secondary) = fixture_runtime();
+    let key = SkillKey {
+        source_uuid: primary.clone(),
+        skill_name: SkillName::parse("ghost").unwrap(),
+    };
+
+    match runtime.list_artifacts(&key).await {
+        Err(SkillError::NotFound { key: missing }) => assert_eq!(missing, key),
+        other => panic!("a missing key is SkillError::NotFound; got {other:?}"),
+    }
+
+    let err = SkillListResourcesTool::new(runtime)
+        .call(serde_json::json!({
+            "source_uuid": primary.to_string(),
+            "skill_name": "ghost",
+        }))
+        .await
+        .unwrap_err();
+    let meerkat_tools::BuiltinToolError::ExecutionFailed(message) = &err else {
+        panic!("a missing key is an execution failure; got {err:?}");
+    };
+    assert_eq!(message, &SkillError::NotFound { key }.to_string());
+}
+
+/// The embedded skill row C's later source serves. Registered in this test
+/// binary only; no other case here reads the embedded source.
+const LATER_SOURCE_SKILL: &str = "listed-by-a-later-source";
+const LATER_SOURCE_REFERENCE: &str = "# Guide\n\nserved by the embedded source";
+
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: LATER_SOURCE_SKILL,
+        name: "Listed By A Later Source",
+        description: "fixture: an embedded skill with one reference document",
+        scope: SkillScope::Builtin,
+        requires_capabilities: &[],
+        body: "# Listed By A Later Source\n\nbody-embedded",
+        extensions: &[("references/guide.md", LATER_SOURCE_REFERENCE)],
+    }
+}
+
+/// A composite whose first source holds the skill and inherits the
+/// `list_artifacts` default, and whose later source (embedded) holds the same
+/// key and lists its artifacts.
+fn first_cannot_list_later_can_composite()
+-> (CompositeSkillSource, Arc<SourceIdentityRegistry>, SkillKey) {
+    let builtin = SourceUuid::builtin();
+    let key = SkillKey::builtin(SkillName::parse(LATER_SOURCE_SKILL).unwrap());
+    let record = |name: &str, transport_kind: SourceTransportKind| SourceIdentityRecord {
+        source_uuid: builtin.clone(),
+        display_name: name.to_string(),
+        transport_kind,
+        fingerprint: format!("fixture:{name}"),
+        status: SourceIdentityStatus::Active,
+    };
+    let registry = Arc::new(
+        SourceIdentityRegistry::build(
+            vec![record("later-can-list", SourceTransportKind::Embedded)],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let composite = CompositeSkillSource::from_named_with_registry(
+        vec![
+            NamedSource::new(
+                record("first-cannot-list", SourceTransportKind::Filesystem),
+                SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                    &builtin,
+                    LATER_SOURCE_SKILL,
+                    "First Copy",
+                    "# First Copy\n\nbody-first",
+                )])),
+            ),
+            NamedSource::new(
+                record("later-can-list", SourceTransportKind::Embedded),
+                SourceNode::Embedded(meerkat_skills::EmbeddedSkillSource::new()),
+            ),
+        ],
+        Arc::clone(&registry),
+    );
+    (composite, registry, key)
+}
+
+/// Row C: a source that holds the skill and returns no resource listing does
+/// not stop a later source that holds it and returns one.
+#[tokio::test]
+async fn list_resources_reaches_a_later_source_that_can_list_past_one_that_cannot() {
+    let (composite, registry, key) = first_cannot_list_later_can_composite();
+    let expected = SkillArtifact {
+        path: "references/guide.md".to_string(),
+        mime_type: "text/markdown".to_string(),
+        byte_length: LATER_SOURCE_REFERENCE.len(),
+    };
+
+    // The first source holds the skill (it serves the load) and has no
+    // resource listing of its own.
+    let loaded = composite.load(&key).await.unwrap();
+    assert_eq!(loaded.descriptor.source_name, "first-cannot-list");
+    let first_alone = InMemorySkillSource::new(vec![skill_doc(
+        &SourceUuid::builtin(),
+        LATER_SOURCE_SKILL,
+        "First Copy",
+        "# First Copy\n\nbody-first",
+    )]);
+    assert!(first_alone.load(&key).await.is_ok());
+    assert!(first_alone.list_artifacts(&key).await.is_err());
+
+    // The composite answers with the later source's artifacts.
+    assert_eq!(
+        composite.list_artifacts(&key).await.unwrap(),
+        vec![expected.clone()]
+    );
+
+    // And so does the tool over the engine.
+    let engine =
+        DefaultSkillEngine::new(composite, Vec::new()).with_source_identity_registry(registry);
+    let runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
+    let json = SkillListResourcesTool::new(runtime)
+        .call(serde_json::json!({
+            "source_uuid": key.source_uuid.to_string(),
+            "skill_name": key.skill_name.as_str(),
+        }))
+        .await
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(
+        json["artifacts"],
+        serde_json::to_value(vec![expected]).unwrap()
+    );
+}
+
+/// The embedded skill of row D: its source lists artifacts and it has none.
+/// Registered in this test binary only.
+const NO_RESOURCES_SKILL: &str = "listing-source-no-resources";
+
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: NO_RESOURCES_SKILL,
+        name: "Listing Source No Resources",
+        description: "fixture: an embedded skill without a reference document",
+        scope: SkillScope::Builtin,
+        requires_capabilities: &[],
+        body: "# Listing Source No Resources\n\nbody-embedded",
+        extensions: &[],
+    }
+}
+
+/// Row D: a source that lists artifacts and has none for an existing skill
+/// answers a successful empty list: not an error, and not the diagnostic of
+/// row A.
+#[tokio::test]
+async fn list_resources_of_an_existing_skill_with_no_resources_is_an_empty_success() {
+    let key = SkillKey::builtin(SkillName::parse(NO_RESOURCES_SKILL).unwrap());
+    // The engine's default registry holds the builtin source.
+    let engine = DefaultSkillEngine::new(meerkat_skills::EmbeddedSkillSource::new(), Vec::new());
+    let runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
+    let args = serde_json::json!({
+        "source_uuid": key.source_uuid.to_string(),
+        "skill_name": key.skill_name.as_str(),
+    });
+
+    // The skill exists: the same key loads.
+    let loaded = LoadSkillTool::new(Arc::clone(&runtime))
+        .call(args.clone())
+        .await
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(loaded["skill_name"].as_str().unwrap(), NO_RESOURCES_SKILL);
+
+    assert_eq!(
+        runtime.list_artifacts(&key).await.unwrap(),
+        Vec::<SkillArtifact>::new()
+    );
+
+    let json = SkillListResourcesTool::new(runtime)
+        .call(args)
+        .await
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(json["artifacts"], serde_json::json!([]));
+    assert_eq!(json["skill_name"].as_str().unwrap(), NO_RESOURCES_SKILL);
+}

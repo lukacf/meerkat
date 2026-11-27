@@ -53,8 +53,11 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
     let root = repo_root()?;
     let policy = AuditPolicy::load()?;
     let findings = collect_findings(&root, &policy)?;
+    // Collected once: the document check below renders from these findings
+    // and does not walk the workspace again.
     let ownership_findings = ownership_ledger::collect_current_findings(&root)?;
-    let ownership_doc_in_sync = ownership_ledger::ownership_doc_is_in_sync(&root)?;
+    let ownership_doc_in_sync =
+        ownership_ledger::ownership_doc_is_in_sync(&root, &ownership_findings)?;
     let ownership_rmat_findings = ownership_findings
         .iter()
         .map(|finding| Finding {

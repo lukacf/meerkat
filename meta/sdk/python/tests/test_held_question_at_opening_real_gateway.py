@@ -7,6 +7,20 @@ tells its host of it with no list call
 ``decisions_list`` returns that one open set and writes its notice once
 more, and a later list writes none.
 
+A second row follows the notice to its end as a host would: with the id the
+notice names it reads the set (:meth:`MobHandle.gating_questions`; a set's
+``pending_id`` is the decision's id) and answers it
+(:meth:`MobHandle.gating_answer`). The set then leaves the open sets and its
+decision is no longer open.
+
+The two rows run in the order of this file, and the second one ends the set:
+a seeded directory serves ONE run of this file. The second row leaves a
+marker file beside the directory (the directory's name with the suffix
+``.sdk-held-question-answered``), and both rows refuse a directory that has
+one. The TypeScript SDK has the same two rows
+(``sdk/typescript/tests/held-question-at-opening-real-gateway.test.ts``);
+they need a seeded directory of their own.
+
 The pairing and its order
 -------------------------
 
@@ -56,15 +70,19 @@ and the SDK transport's two stderr switches are passed on when set (see
 ``_PASSED_ON``). Nothing else is inherited, so no provider key reaches the
 gateway whatever its name.
 
-What this row does not show
+What these rows do not show
 ---------------------------
 
-It runs on the revision it is run on, not on a joined line. It shows nothing
-of a restart of a gateway, of how often a notice is delivered across
-restarts, or of what a person is shown; it answers nothing and leaves the
-set open. It records the calls of the SDK's notice handler only, so a
-failed wait says that a notice was not observed by the handler in time, not
-that the gateway wrote none. There is no TypeScript row.
+They run on the revision they are run on, not on a joined line. They show
+nothing of a restart of a gateway, of how often a notice is delivered across
+restarts, or of what a person is shown. The set was seeded before the
+gateway started: a question that opens while the host is connected is not
+shown here. The second row answers as the embedding host (the stdio decide
+trusts its host and records the ``approver_id`` it names); it does not show
+that the asking agent receives the answers, since the seeded asker is no
+member of the row's mob. The rows record the calls of the SDK's notice
+handler only, so a failed wait says that a notice was not observed by the
+handler in time, not that the gateway wrote none.
 """
 from __future__ import annotations
 
@@ -79,6 +97,7 @@ import pytest
 
 from meerkat_meta.builder import Meta
 from meerkat_meta.runtime import MetaRuntime
+from meerkat_meta.types import GatingQuestionAnswer
 
 _GATEWAY_BIN = os.environ.get("META_GATEWAY_BIN", "").strip()
 _SEEDED_STATE = os.environ.get("META_SDK_HELD_QUESTION_STATE", "").strip()
@@ -86,6 +105,12 @@ _SEEDED_STATE = os.environ.get("META_SDK_HELD_QUESTION_STATE", "").strip()
 _QUESTION_KIND = "ask_user.questions"
 _SEED_STEP = "seed_a_pending_question_set_for_an_sdk_row"
 _SEED_CARRIER_SUFFIX = ".sdk-held-question-seed.json"
+# The marker the answering row leaves beside a seeded directory whose set it
+# ended: such a directory holds no open set for another run.
+_ANSWERED_MARKER_SUFFIX = ".sdk-held-question-answered"
+# The approver the answering row names. The stdio decide trusts its host and
+# records the name it gives; nobody is authenticated by it.
+_ANSWERS_AS = "sdk-held-question-row"
 
 # How long the row waits for an observation it expects.
 _WAIT_SECONDS = 30.0
@@ -135,6 +160,11 @@ def _carrier_of(state: Path) -> Path:
     return state.parent / (state.name + _SEED_CARRIER_SUFFIX)
 
 
+def _answered_marker_of(state: Path) -> Path:
+    """The marker of a seeded directory whose set was answered: beside it."""
+    return state.parent / (state.name + _ANSWERED_MARKER_SUFFIX)
+
+
 def _seeded_state() -> Path:
     """The seeded directory, or a failure that says why it is not used."""
     state = Path(_SEEDED_STATE)
@@ -157,6 +187,11 @@ def _seeded_state() -> Path:
     assert carrier.is_file() and not carrier.is_symlink(), (
         f"there is no carrier file {carrier} beside {state}: it was not seeded by "
         f"{_SEED_STEP} (run that step by name with --ignored on a fresh directory)"
+    )
+    marker = _answered_marker_of(state)
+    assert not marker.exists(), (
+        f"the question set of {state} was answered by an earlier run of this file "
+        f"({marker} says so): run {_SEED_STEP} again on a fresh directory"
     )
     return state
 
@@ -203,22 +238,14 @@ async def _answered(call: Any, what: str, note: str) -> Any:
         pytest.fail(f"{what}: not received within {_WAIT_SECONDS:g} s ({note})")
 
 
-@pytest.mark.skipif(
-    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
-    reason=_SKIP_REASON,
-)
-@pytest.mark.asyncio
-async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_any_list(
-    tmp_path, monkeypatch
-):
-    state = _seeded_state()
-    seeded_id, note = _seed(state)
+def _only_the_allow_list_is_inherited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make this process's environment the gateway's allow list.
 
-    # The gateway process takes this process's environment when its
-    # transport is built, which happens after this point. Make that
-    # environment the allow list first: remove every name that is not passed
-    # on, then set the homes to directories of this test. The names removed
-    # here come back when the test ends.
+    The gateway process takes this process's environment when its transport
+    is built, which happens after this call. Every name that is not passed on
+    is removed, then the homes are set to directories of the test. The names
+    removed here come back when the test ends.
+    """
     for name in list(os.environ):
         if name not in _PASSED_ON:
             monkeypatch.delenv(name)
@@ -229,14 +256,32 @@ async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_an
     not_allowed = sorted(set(os.environ) - set(_PASSED_ON) - set(_OWN_HOMES))
     assert not not_allowed, f"names outside the allow list would be inherited: {not_allowed}"
 
-    notices: list[dict[str, Any]] = []
-    runtime = MetaRuntime(
+
+def _runtime_over(state: Path) -> MetaRuntime:
+    """A runtime whose gateway takes the seeded directory as its state."""
+    return MetaRuntime(
         Meta.builder()
         .gateway(_GATEWAY_BIN)
         .mob_inline(_MOB_TOML)
         .persistent_state(str(state))
         ._config
     )
+
+
+@pytest.mark.skipif(
+    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
+    reason=_SKIP_REASON,
+)
+@pytest.mark.asyncio
+async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_any_list(
+    tmp_path, monkeypatch
+):
+    state = _seeded_state()
+    seeded_id, note = _seed(state)
+    _only_the_allow_list_is_inherited(tmp_path, monkeypatch)
+
+    notices: list[dict[str, Any]] = []
+    runtime = _runtime_over(state)
     runtime.on_decision_notice(notices.append)
     try:
         await _answered(runtime.connect(), "the gateway's start (connect)", note)
@@ -283,6 +328,99 @@ async def test_a_question_set_pending_at_the_gateways_start_is_noticed_before_an
         assert len(notices) == 2, (
             "a further notice was observed by the handler at the second list, "
             f"watched for {_QUIET_SECONDS:g} s after its answer: {notices}"
+        )
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.skipif(
+    not (_GATEWAY_BIN and os.path.isfile(_GATEWAY_BIN) and _SEEDED_STATE),
+    reason=_SKIP_REASON,
+)
+@pytest.mark.asyncio
+async def test_the_host_reads_and_answers_the_question_set_its_notice_names(
+    tmp_path, monkeypatch
+):
+    state = _seeded_state()
+    seeded_id, note = _seed(state)
+    _only_the_allow_list_is_inherited(tmp_path, monkeypatch)
+
+    notices: list[dict[str, Any]] = []
+    runtime = _runtime_over(state)
+    runtime.on_decision_notice(notices.append)
+    try:
+        await _answered(runtime.connect(), "the gateway's start (connect)", note)
+        handle = runtime.mob_handle()
+
+        # The notice is all the host has: the id of an open decision and its
+        # kind, which says that an agent asked a person something.
+        await _observed(notices, 1, "the notice of the seeded question set before any list", note)
+        noticed = notices[0]
+        assert noticed["event"] == "held", noticed
+        assert noticed["kind"] == _QUESTION_KIND, noticed
+        assert noticed["decision_id"] == seeded_id, (noticed, seeded_id)
+
+        # With that id the host reads what was asked: the one open set whose
+        # pending id is the decision's id.
+        open_sets = await _answered(
+            handle.gating_questions(), "the open question sets (gating_questions)", note
+        )
+        named = [one for one in open_sets if one.pending_id == noticed["decision_id"]]
+        assert len(named) == 1, (
+            f"gating_questions returned {len(named)} sets with the noticed id "
+            f"{noticed['decision_id']}: {open_sets}"
+        )
+        asked = named[0]
+        assert asked.questions, asked
+        assert all(question.choices for question in asked.questions), asked
+        assert asked.subject_digest == noticed["rendering_ref"], (asked, noticed)
+
+        # The host answers every question with its first choice, as the set
+        # it read offers them.
+        result = await _answered(
+            handle.gating_answer(
+                asked.pending_id,
+                approver_id=_ANSWERS_AS,
+                presented_digest=asked.subject_digest,
+                answers=[
+                    GatingQuestionAnswer.choice(question.id, question.choices[0].id)
+                    for question in asked.questions
+                ],
+            ),
+            "the answer's result (gating_answer)",
+            note,
+        )
+        # The set is ended from here on: say so beside the directory before
+        # anything else can fail.
+        _answered_marker_of(state).write_text(
+            json.dumps({"decision_id": seeded_id, "outcome": result.outcome}), encoding="utf-8"
+        )
+        assert result.pending_id == seeded_id, (result, seeded_id)
+        assert result.kind == "question_set", result
+        assert result.outcome == "answered", result
+
+        # The answered set is no longer among the open sets, and its
+        # decision is no longer open.
+        still_open = await _answered(
+            handle.gating_questions(), "the open question sets after the answer", note
+        )
+        assert [one.pending_id for one in still_open] == [], still_open
+        listed = await _answered(
+            handle.decisions_list(), "the list after the answer (decisions_list)", note
+        )
+        phases = {
+            row["decision_id"]: row["phase"]
+            for row in [*listed.get("decisions", []), *listed.get("statuses", [])]
+        }
+        assert seeded_id in phases, (listed, seeded_id)
+        assert phases[seeded_id] != "open", phases
+
+        # A list notices open decisions only: the ended set gets no further
+        # notice.
+        await asyncio.sleep(_QUIET_SECONDS)
+        assert len(notices) == 1, (
+            "a further notice was observed by the handler after the answer, "
+            f"watched for {_QUIET_SECONDS:g} s after the list: {notices}"
         )
     finally:
         await runtime.shutdown()

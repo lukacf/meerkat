@@ -865,6 +865,84 @@ async fn list_resources_of_a_skill_the_listing_hides_stays_not_found() {
     assert_eq!(message, &SkillError::NotFound { key }.to_string());
 }
 
+/// A source that holds one skill and whose listing fails. It inherits the
+/// `list_artifacts` default.
+struct FailingListSource {
+    doc: SkillDocument,
+}
+
+impl SkillSource for FailingListSource {
+    async fn list(&self, _filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
+        Err(SkillError::Load(
+            "fixture: the listing cannot be read".into(),
+        ))
+    }
+
+    async fn load(&self, key: &SkillKey) -> Result<SkillDocument, SkillError> {
+        if key == &self.doc.descriptor.key {
+            Ok(self.doc.clone())
+        } else {
+            Err(SkillError::NotFound { key: key.clone() })
+        }
+    }
+}
+
+/// Row F: when the skill listing itself cannot be read, the answer stays not
+/// found, byte for byte: a fact that could not be read is not taken as
+/// "listed", even for a key the source holds.
+#[tokio::test]
+async fn list_resources_stays_not_found_when_the_skill_listing_fails() {
+    let source = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap();
+    let doc = skill_doc(&source, "alpha", "Alpha", "# Alpha\n\nbody-alpha");
+    let key = doc.descriptor.key.clone();
+    let registry = SourceIdentityRegistry::build(
+        vec![SourceIdentityRecord {
+            source_uuid: source.clone(),
+            display_name: "failing listing fixture".to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: format!("fixture:{source}"),
+            status: SourceIdentityStatus::Active,
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let engine = DefaultSkillEngine::new(FailingListSource { doc }, Vec::new())
+        .with_source_identity_registry(Arc::new(registry));
+    let runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
+
+    // The skill listing fails, for the engine and for `browse_skills`.
+    let filter = SkillFilter {
+        source_uuid: Some(source.clone()),
+        ..SkillFilter::default()
+    };
+    assert!(runtime.list_all_with_provenance(&filter).await.is_err());
+    assert!(
+        BrowseSkillsTool::new(Arc::clone(&runtime))
+            .call(serde_json::json!({ "source_uuid": source.to_string() }))
+            .await
+            .is_err()
+    );
+    // The resource listing itself answers the typed not found.
+    assert!(matches!(
+        runtime.list_artifacts(&key).await,
+        Err(SkillError::NotFound { .. })
+    ));
+
+    let err = SkillListResourcesTool::new(runtime)
+        .call(serde_json::json!({
+            "source_uuid": key.source_uuid.to_string(),
+            "skill_name": key.skill_name.as_str(),
+        }))
+        .await
+        .unwrap_err();
+    let meerkat_tools::BuiltinToolError::ExecutionFailed(message) = &err else {
+        panic!("a failed skill listing is an execution failure; got {err:?}");
+    };
+    assert_eq!(message, &SkillError::NotFound { key }.to_string());
+}
+
 /// Row B: a key no source holds stays not found, typed at the runtime and in
 /// the tool's text.
 #[tokio::test]

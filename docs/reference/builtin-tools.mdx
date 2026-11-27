@@ -359,7 +359,7 @@ quarantined mobs through `mob/list` and the MCP `meerkat_mob_list` tool (see
 
 ### `delegate`: its wait and how it ends
 
-This section describes `delegate` from the release that carries this change.
+This section describes `delegate` starting in 0.9.19.
 It does not describe 0.9.18: for a `delegate` call that times out in 0.9.18,
 see [Fast Path: Delegate](/guides/mobs#fast-path-delegate).
 
@@ -1229,8 +1229,10 @@ replayed.
 An ampersand is only syntax interpreted by the selected shell. Meerkat still
 executes that shell invocation through the foreground tool path, returns the
 ordinary foreground result, and does not create a job ID or a record visible to
-`shell_jobs`, `shell_job_status`, or `shell_job_cancel`. Any child the shell
-leaves running is unmanaged and its lifetime is not guaranteed.
+`shell_jobs`, `shell_job_status`, or `shell_job_cancel`. A child started this way
+does not become a background job. Even after a normal shell exit, the runtime
+attempts to terminate that call’s process group. The shell’s exit code does not
+prove that every descendant has exited.
 
 Use `background: true` when the command must be managed as a Meerkat shell job.
 It commits and returns a stable job ID and enables durable status/list/cancel
@@ -2187,8 +2189,11 @@ and `byte_size`.
 
 <Accordion title="Skill resources and functions">
 `skill_list_resources` takes `source_uuid` and `skill_name` and returns the
-skill's artifact descriptors. `skill_read_resource` adds a required `path` and
-returns that artifact's content.
+skill's artifact descriptors. When the resource listing answers not found for
+a skill the skill listing shows, the call fails with an error that says the
+skill is listed and that no source returned a resource listing for it, not
+with `skill not found` and not with an empty list. `skill_read_resource` adds
+a required `path` and returns that artifact's content.
 
 `skill_invoke_function` takes `source_uuid`, `skill_name`, `function_name`, and
 optional JSON-object `arguments`. Its success response echoes the canonical

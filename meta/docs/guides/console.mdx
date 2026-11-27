@@ -5,7 +5,7 @@ icon: "desktop"
 ---
 
 <Note>
-This guide describes the development build. Folded Q&A history and the chat-only reasoning-notice filter are not in published Meta 0.9.18.
+Folded Q&A history and the chat-only reasoning-notice filter are available starting in Meta 0.9.19. In Meta 0.9.18, neither feature is available.
 </Note>
 
 Meta ships a web-based operator console through its HTTP composition. The
@@ -638,7 +638,7 @@ them; a question you leave out reaches it as unanswered", and that with no
 answer by the deadline the agent is told the questions timed out. Each
 question is a group of radio buttons, one per choice. A choice the agent
 recommends carries a **Recommended** chip and is never preselected. Where the
-agent allowed it, a last choice **Something else** opens a text field for the
+agent allowed it, a last choice **Write my own reply** opens a text field for the
 person's own answer (at most 280 bytes; a counter appears near the limit).
 **Clear** removes a question's answer and puts the focus on the question's
 first choice. **Send answers** sends what is chosen; **Dismiss** tells the
@@ -1089,7 +1089,9 @@ through the commands `createAgent`, `updateAgent`, `archiveAgent`,
 `listAgentRecords`, `getAgentChange`, `listAgentDirectory` and
 `planAgentChange`, from the roster and from an agent's chat and details.
 Every change carries a `request_id`: the same request under the same id
-answers the same state again and writes nothing twice.
+answers the same state again and writes nothing twice (the reference states
+the limits:
+[Requests, operations and retries](/api/rpc#requests-operations-and-retries)).
 
 ### Local action feedback
 

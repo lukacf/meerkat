@@ -155,6 +155,7 @@ struct AskingModel {
     tools: Arc<Mutex<Vec<String>>>,
     /// The id the model's provider gives its tool call.
     call_id: Arc<str>,
+    allow_free_text: bool,
 }
 
 impl AskingModel {
@@ -168,7 +169,14 @@ impl AskingModel {
             requests: Arc::default(),
             tools: Arc::default(),
             call_id: Arc::from(call_id),
+            allow_free_text: false,
         }
+    }
+
+    /// Explicitly opt this synthetic question producer into written replies.
+    fn with_written_replies(mut self) -> Self {
+        self.allow_free_text = true;
+        self
     }
 
     /// The first request whose messages hold every one of `needles`, once
@@ -227,22 +235,27 @@ impl LlmClient for AskingModel {
             .push(serde_json::to_string(&request.messages).expect("request messages serialize"));
         if asks {
             let call_id = self.call_id.to_string();
+            let allow_free_text = self.allow_free_text;
             return Box::pin(async_stream::stream! {
+                let mut args = json!({
+                    "title": "Release plan",
+                    "questions": [{
+                        "id": "day",
+                        "prompt": "Which day?",
+                        "choices": [
+                            {"id": "mon", "label": "Monday"},
+                            {"id": "fri", "label": "Friday"},
+                        ],
+                        "recommended": "mon",
+                    }],
+                });
+                if allow_free_text {
+                    args["questions"][0]["allow_free_text"] = json!(true);
+                }
                 yield Ok(LlmEvent::ToolCallComplete {
                     id: call_id,
                     name: "ask_user".to_string(),
-                    args: json!({
-                        "title": "Release plan",
-                        "questions": [{
-                            "id": "day",
-                            "prompt": "Which day?",
-                            "choices": [
-                                {"id": "mon", "label": "Monday"},
-                                {"id": "fri", "label": "Friday"},
-                            ],
-                            "recommended": "mon",
-                        }],
-                    }),
+                    args,
                     meta: None,
                 });
                 yield Ok(LlmEvent::Done {
@@ -494,6 +507,22 @@ async fn a_member_asks_a_person_and_reads_the_answer_on_its_next_turn() {
         .get(&other.decision_id)
         .expect("the other decision");
 
+    // An omitted opt-in stays strict even if the person submits prose.
+    let written_refused = console_rpc(
+        &app,
+        "meta/gating/decide",
+        json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "presented_digest": set["subject_digest"],
+            "answers": [{"question_id": "day", "answer": {
+                "kind": "free_text", "text": "Approve Friday instead."
+            }}],
+        }),
+    )
+    .await;
+    assert!(written_refused["error"].is_object(), "{written_refused}");
+
     // The person answers on the Console; the member's next turn reads it.
     let decided = console_rpc(
         &app,
@@ -596,6 +625,75 @@ async fn a_member_asks_a_person_and_reads_the_answer_on_its_next_turn() {
         passes_after.is_some_and(|passes| passes >= 1),
         "{passes_after:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_reads_its_opted_in_written_reply_as_the_actual_text() {
+    use meerkat_core::ask_user::{
+        AskUserAnswer, AskUserOutcome, AskUserQuestionAnswer, AskUserResult,
+    };
+
+    let state = tempfile::tempdir().unwrap();
+    let model = AskingModel::new().with_written_replies();
+    let runtime = runtime(state.path(), &model).await;
+    let app = runtime.build_console_json_router(decision_state());
+    send_ask(&runtime).await;
+    model
+        .request_with(&[CALL_ID, r#"\"outcome\":\"asked\""#])
+        .await;
+    let listed = console_rpc(&app, "meta/gating/questions", json!({})).await;
+    let set = &listed["result"]["question_sets"][0];
+    assert_eq!(set["origin"], json!({"identity": IDENTITY}));
+    assert_eq!(set["questions"][0]["allow_free_text"], json!(true));
+    let pending_id = set["pending_id"].as_str().expect("pending id");
+    let text = "  Wednesday, after review.\nKeep the café open.  ";
+    let decided = console_rpc(
+        &app,
+        "meta/gating/decide",
+        json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "presented_digest": set["subject_digest"],
+            "answers": [{"question_id": "day", "answer": {"kind": "free_text", "text": text}}],
+        }),
+    )
+    .await;
+    assert_eq!(decided["result"]["outcome"], json!("answered"), "{decided}");
+    // This model belongs to the original asking member, not a replacement
+    // session or a second member. Inspect the input on its next model turn.
+    let told = model
+        .request_with(&["ask_user_result\\n", r#"\"outcome\":\"answered\""#])
+        .await;
+    let messages: Vec<meerkat_core::Message> = serde_json::from_str(&told).unwrap();
+    let delivered = messages.iter().find_map(|message| {
+        let meerkat_core::Message::User(message) = message else {
+            return None;
+        };
+        let text = message.text_content();
+        let (_, body) = text.split_once("ask_user_result\n")?;
+        serde_json::Deserializer::from_str(body)
+            .into_iter::<AskUserResult>()
+            .next()?
+            .ok()
+    });
+    let listed_after = console_rpc(&app, "meta/gating/questions", json!({})).await;
+    runtime.shutdown().await;
+
+    assert_eq!(
+        delivered,
+        Some(AskUserResult::ended(
+            AskUserOutcome::Answered,
+            pending_id,
+            vec![AskUserQuestionAnswer {
+                question_id: "day".to_string(),
+                answer: AskUserAnswer::FreeText {
+                    text: text.trim().to_string(),
+                },
+            }],
+        )),
+        "the original member receives the written text, not a choice label: {told}"
+    );
+    assert_eq!(listed_after["result"], json!({"question_sets": []}));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -2728,6 +2728,207 @@ default_binding = "local"
         );
     }
 
+    /// The gateway's builder (`for_gateway`) over a factory builder that
+    /// reads `config`. The rows that compare the two builders' answers keep
+    /// the directory and the receiver alive for their whole body.
+    fn gateway_builder_over(
+        config: Config,
+    ) -> (
+        StdioCallbackAgentBuilder,
+        tempfile::TempDir,
+        mpsc::Receiver<GatewayStdoutLine>,
+    ) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let (stdout_tx, stdout_rx) = mpsc::channel(1);
+        let builder = StdioCallbackAgentBuilder::for_gateway(
+            FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), config),
+            StdioCallbackBridge::new(stdout_tx),
+            true,
+            None,
+            None,
+            &GatewayRuntimeOptions::default(),
+            None,
+        );
+        (builder, tmp, stdout_rx)
+    }
+
+    fn named_binding(realm: &str, binding: &str) -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse(realm).expect("realm id"),
+            binding: meerkat_core::BindingId::parse(binding).expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        }
+    }
+
+    /// A realm section that declares one binding, `binding`, with a backend
+    /// and an auth profile of the same name. Names only: the key is an
+    /// environment variable no row sets, and telling a binding's recorded
+    /// form reads no credential.
+    fn realm_declaring(binding: &str, parent: Option<&str>) -> meerkat_core::RealmConfigSection {
+        let mut section = meerkat_core::RealmConfigSection {
+            parent: parent.map(|parent| meerkat_core::RealmId::parse(parent).expect("realm id")),
+            ..Default::default()
+        };
+        section.backend.insert(
+            binding.to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                options: Value::Null,
+                server: None,
+            },
+        );
+        section.auth.insert(
+            binding.to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: meerkat_core::CredentialSourceSpec::Env {
+                    env: "GATEWAY_BUILDER_FORWARD_ROWS_UNSET_KEY".to_string(),
+                    fallback: Vec::new(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            binding.to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: binding.to_string(),
+                auth_profile: binding.to_string(),
+                credential_account: None,
+                default_model: None,
+                policy: Default::default(),
+                provider_default: false,
+            },
+        );
+        section
+    }
+
+    /// Three realms: `owning-parent` declares the binding `shared`,
+    /// `inheriting-child` declares nothing and has `owning-parent` as its
+    /// parent, and `unrelated-sibling` declares `sibling-only` and is on
+    /// neither's chain.
+    fn realms_with_an_inherited_binding() -> Config {
+        let mut config = Config::default();
+        config
+            .realm
+            .insert("owning-parent".to_string(), realm_declaring("shared", None));
+        config.realm.insert(
+            "inheriting-child".to_string(),
+            meerkat_core::RealmConfigSection {
+                parent: Some(meerkat_core::RealmId::parse("owning-parent").expect("realm id")),
+                ..Default::default()
+            },
+        );
+        config.realm.insert(
+            "unrelated-sibling".to_string(),
+            realm_declaring("sibling-only", None),
+        );
+        config
+    }
+
+    /// The gateway's builder tells the form a build records a named auth
+    /// binding in exactly as the factory builder it wraps tells it: stamped
+    /// with the realm that declares the binding. A live session is kept for
+    /// a member only when it records the binding the member names, as named
+    /// or in this form, and the session service asks its builder for the
+    /// form. The trait's default answers that there is no other form, so
+    /// over a builder that does not forward the question only the named
+    /// form would count. Each case states the inner builder's answer and
+    /// then holds the gateway's builder to it.
+    #[tokio::test]
+    async fn the_gateway_callback_builder_tells_a_bindings_recorded_form_as_its_inner_builder_does()
+    {
+        let (builder, _tmp, _stdout_rx) = gateway_builder_over(realms_with_an_inherited_binding());
+        for (named, recorded, case) in [
+            (
+                named_binding("owning-parent", "shared"),
+                named_binding("owning-parent", "shared"),
+                "a binding named under the realm that declares it",
+            ),
+            (
+                named_binding("inheriting-child", "shared"),
+                named_binding("owning-parent", "shared"),
+                "a binding named under a realm that inherits it from its parent",
+            ),
+            (
+                named_binding("unrelated-sibling", "sibling-only"),
+                named_binding("unrelated-sibling", "sibling-only"),
+                "a binding of a realm on no other realm's chain",
+            ),
+        ] {
+            let inner = SessionAgentBuilder::recorded_auth_binding(&builder.inner, &named)
+                .await
+                .expect("the factory builder resolves a declared binding");
+            assert_eq!(
+                inner,
+                Some(recorded),
+                "{case}: the factory builder answers the binding under its declaring realm"
+            );
+            assert_eq!(
+                SessionAgentBuilder::recorded_auth_binding(&builder, &named)
+                    .await
+                    .expect("the gateway's builder resolves a declared binding"),
+                inner,
+                "{case}: the gateway's builder answers as the factory builder it wraps"
+            );
+        }
+    }
+
+    /// A binding the factory builder does not resolve is refused by the
+    /// gateway's builder with the same error: the forward adds no fallback
+    /// and no answer of its own. Where nothing is configured, where the
+    /// realm is unknown, where the realm declares no such binding, and where
+    /// only a realm off the chain declares it, neither builder tells a
+    /// recorded form, so a caller still has the named form alone.
+    #[tokio::test]
+    async fn the_gateway_callback_builder_refuses_a_binding_its_inner_builder_refuses() {
+        let (unconfigured, _tmp_a, _stdout_rx_a) = gateway_builder_over(Config::default());
+        let (configured, _tmp_b, _stdout_rx_b) =
+            gateway_builder_over(realms_with_an_inherited_binding());
+        for (builder, named, case) in [
+            (
+                &unconfigured,
+                named_binding("owning-parent", "shared"),
+                "no realm is configured at all",
+            ),
+            (
+                &configured,
+                named_binding("never-configured", "shared"),
+                "the named realm is not configured",
+            ),
+            (
+                &configured,
+                named_binding("owning-parent", "never-declared"),
+                "the realm's chain declares no such binding",
+            ),
+            (
+                &configured,
+                named_binding("inheriting-child", "sibling-only"),
+                "only a realm off the named realm's chain declares the binding",
+            ),
+        ] {
+            let inner = SessionAgentBuilder::recorded_auth_binding(&builder.inner, &named).await;
+            let refusal = match &inner {
+                Err(error) => error.to_string(),
+                Ok(answer) => panic!("{case}: the factory builder answered {answer:?}"),
+            };
+            assert!(
+                refusal.contains("does not resolve"),
+                "{case}: the factory builder's refusal is its own: {refusal}"
+            );
+            let outer = SessionAgentBuilder::recorded_auth_binding(builder, &named).await;
+            assert_eq!(
+                format!("{outer:?}"),
+                format!("{inner:?}"),
+                "{case}: the gateway's builder refuses as the factory builder it wraps"
+            );
+        }
+    }
+
     /// Under a member auth binding the SDK build callback's answer is checked
     /// as the session services checked the request: a `resume_session_id`
     /// answer that seats the build on a stored session whose recorded tooling
@@ -16296,6 +16497,22 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         identity: &meerkat_core::SessionLlmIdentity,
     ) -> Option<meerkat_core::InstructionLowering> {
         self.inner.instruction_lowering_for_identity(identity).await
+    }
+
+    // Forwarded: the inner factory builder builds every agent and records a
+    // named auth binding stamped with the realm that declares it, so it is
+    // the builder that tells that form. This wrapper resolves no binding.
+    // The trait's default answers that there is no other form, and a session
+    // service over this builder would then compare the named form alone: a
+    // live session that recorded an inherited binding under its owning realm
+    // would not be recognised as running the binding its member names. The
+    // answer is the inner builder's, unchanged: its resolved form, and its
+    // own error for a binding it refuses.
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        self.inner.recorded_auth_binding(auth_binding).await
     }
 
     async fn abort_absent_session_compaction_stages(

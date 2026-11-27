@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The decision verbs (`meta/decisions/list`, `get`, `rendering`, `present`,
+  `decide` and `withdraw` on the stdio gateway, and the Console's
+  `meta/decisions/list`, `get`, `rendering` and `withdraw`): the message of
+  a request whose params cannot be read now names the field at fault, and
+  no longer quotes anything the request sent. A `meta/decisions/decide`
+  whose `presented_digest` is null was refused with `invalid params: invalid
+  type: null, expected a string`, which names no field. It is now refused
+  with `invalid params: presented_digest: invalid type: null, expected a
+  string`. A nested field is named by its path, and a missing field in the
+  same way: `invalid params: presentation.at_ms: invalid type: string,
+  expected u64`, `invalid params: presentation.parts_shown[0].index: invalid
+  type: null, expected u32`, `invalid params: presentation.channel_ref:
+  missing field`. Params that are no object are refused with `invalid
+  params: expected an object`, and so, at its path, is a nested object that
+  is none (`invalid params: presentation: expected an object`), except a
+  presentation's `audience`. Two refusals still print the name of the type
+  that reads the params, which is Meta's own text and nothing of the
+  request: an `audience` that is no object (`invalid params:
+  presentation.audience: invalid type: string, expected internally tagged
+  enum DecisionAudienceRequest`), and params or a nested object given as a
+  list of the wrong length (`invalid params: invalid length 0, expected
+  struct DecisionWithdrawParams with 1 element`).
+  Where the old message quoted the value it found (`invalid type: string
+  "..."`, `invalid value: integer ...`), the new one names only its kind
+  (`string`, `integer`, `floating point`, `boolean`, `null`, `sequence`,
+  `map`). An unknown field or an unknown variant is reported without the
+  name the request used, at the path of the object that holds it, with the
+  names that are accepted (``invalid params: unknown field, expected one of
+  `decision_id`, `approve`, `presented_digest`, `reason`, `attestation` ``).
+  A path is made only of the field names the verb documents and of list
+  indexes, never of a key as the request wrote it. One limit: a fault in a
+  presentation's `audience`, in its `kind` or in a field of its body, is
+  placed at `presentation.audience` and not deeper (``invalid params:
+  presentation.audience: unknown variant, expected `approver` or
+  `reviewer` ``); a field the audience lacks is still named
+  (`presentation.audience.approver_id: missing field`). The error code
+  (`-32602`) is unchanged, the error still carries no `data`, and the same
+  requests are refused as before. Only the message text changes, so a
+  client that matched the old text has to be updated; no SDK reads it.
+
+- The gateway's sentence for the refusal `authority_field_needs_approval`
+  of a change of an agent (its `detail`) says what `key` names. The `key`
+  is the first, by name, of the authority labels an agent would carry
+  after the change (on a create of several agents, of the first of them,
+  by name, that would carry one). On an update that can be a label the
+  request neither sets nor removes: when an agent carries two authority
+  labels and an update takes one of them off, `key` names the one that
+  stays. The sentence was "This label is an authority field, which only a
+  human decision sets: leave it out, or ask under a rule that requires
+  approval.", which told a caller to leave out a label it may never have
+  named. It is now "This change would give an agent a set of authority
+  labels it does not have now, which only a human decision does: `key`
+  names one of the labels that agent would carry after the change. Leave
+  authority labels out of the change, or ask under a rule that requires
+  approval." Only the text changed: the kind, its token, `key` and which
+  label it names, `retryable` and the rules that decide the refusal are as
+  they were.
+
+### Fixed
+
+- A change of an agent that waits for a person's decision answers that
+  decision when the same request is sent again under its `request_id`,
+  also after the launch's identity policy, the mob's definition or the
+  host's own check has turned against it. The request was judged again as
+  a new one before it was compared with the held one, so the retry
+  answered the new refusal (`change_denied`, `profile_unknown`,
+  `validation_refused` and so on) while `meta/identity/operation` still
+  read `pending_decision`. Now the held request answers `pending_decision`
+  with its decision, as the operation's read does. When each of the three
+  is asked is unchanged: the policy and the mob are asked again when the
+  decision is carried out, and the host's own check is asked when a change
+  is asked or planned and never when a decision is carried out. So a host
+  whose check has turned against a held change sees its refusal on a new
+  request, not on the retry and not when the change is carried out.
+
+  Answers that change under the `request_id` of a change that waits:
+
+  - A request of the held change's kind that names the same agents and
+    cannot be normalized (a profile the mob does not define, for one), or
+    for which a read failed, reads the held decision, where it was answered
+    its own refusal or the failed read. Only its change kind and the agents
+    it names are compared: its other parameters may differ from the held
+    request's, and it is still answered the held decision, not judged as a
+    new request. Nothing is held or written for it.
+  - A request of another change kind, or one that names other agents, that
+    cannot be normalized is refused `operation_reused`, where it was
+    answered its own refusal. This includes two refusals that answered the
+    held decision to any request under the id: `stale_spec` and
+    `identity_unknown` now answer it only to a request of the held kind
+    over the held agents, and `operation_reused` to any other.
+  - A request that normalizes and is not the held one is refused as before:
+    by the owner's rule, by the host's check, or `operation_reused`.
+
+  Under the `request_id` of a decision that ended without its change
+  (rejected, expired, withdrawn, or refused when it was carried out),
+  every request now answers how it ended, where one that was refused for a
+  reason of its own was answered that refusal. One case is not cured: a
+  retry that still normalizes, but to another normalized form than the one
+  held (a peer the peer rules now give under another rule, for one), is
+  still refused `operation_reused`; `meta/identity/operation` reads the
+  decision. A retry of a change that committed is unchanged, and a
+  decision that was approved and carried out is such a change. The RPC
+  reference states these limits under "Requests, operations and retries".
+
+- The stdio gateway (`rpc_gateway`) answers Meerkat's question about the
+  form a build records a named auth binding in. A build records a binding
+  stamped with the realm that declares it, so a member whose realm inherits
+  its binding from a parent realm names the binding under its own realm and
+  its session records it under the parent's. Where Meerkat would keep a
+  member's live session and not rebuild it, it keeps the session only when
+  it records the binding the member names, as named or in that recorded
+  form, and it asks the gateway's session service for the form. The
+  gateway's agent builder wraps the builder that builds every agent and did
+  not pass the question on, so only the named form counted there: by the
+  source, a live session on an inherited binding is answered as a binding
+  conflict. The builder now forwards the question and returns the wrapped
+  builder's answer unchanged: the recorded form, and the wrapped builder's
+  own error for a binding it does not resolve, which still has no other
+  form. The HTTP gateway (`meta_gateway`) uses the wrapped builder directly
+  and already answered. This was found by reading the source; no gateway
+  was run to reproduce it.
+
+## [0.9.19] - 2026-11-26
+
 ### Added
 
 - Python identity results can be narrowed by their `outcome` string. For
@@ -10708,6 +10834,14 @@ verification.
   `shutdown` now returns only once that actor's task has returned (within
   the root mob's terminal shutdown budget), so after a teardown that settled
   every member, dropping the runtime releases the custody at once.
+  Added 2026-11-26, after the release: the last clause is not a
+  guarantee. `shutdown` waits for the root mob's actor task only until its
+  terminal shutdown deadline, and its report does not prove that the task
+  has exited or that dropping the runtime frees the state directory at
+  once for another runtime in the same process. A runtime composed there
+  while the custody is still held can be refused with the typed error
+  `StorageLayoutError::RuntimeInUse`. See
+  [Shutdown](docs/guides/unified-runtime.mdx#shutdown).
 - `meta/mob_announcements/declarations/get` waits for a declarations
   reconcile in progress (at startup, at an apply, after a change in the
   gateway's set of mobs, or at a health pass retry) and answers with what

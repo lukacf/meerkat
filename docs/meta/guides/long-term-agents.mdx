@@ -4,7 +4,7 @@ description: "Move an agent your configuration declares to run-time changes, the
 icon: "users-gear"
 ---
 
-*Mirrored from Meerkat Meta main at [defd2cd35cbf](https://github.com/lukacf/meerkat/commit/defd2cd35cbf1ae360558a32deaad26d0b55706c) on 2026-11-25; Meta version 0.9.18 at that commit.*
+*Mirrored from Meerkat Meta main at [8a276c1512a0](https://github.com/lukacf/meerkat/commit/8a276c1512a096373abdbc56596bbe2cb4454261) on 2026-11-27; Meta version 0.9.19 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -162,7 +162,9 @@ Three things make this safe to automate:
 - **`request_id` names the change.** The same id and the same request return
   the same state and commit at most once. After a lost answer or a restart,
   send the same call again, or read it with `operation`. A different request
-  under the same id is refused `operation_reused`.
+  under the same id is refused, `operation_reused` in the ordinary case; the
+  reference states the limits of both
+  ([Requests, operations and retries](/meta/api/rpc#requests-operations-and-retries)).
 - **`expected_spec_digest` is the spec you read.** There is one spec digest
   on every surface, the digest of the agent's record: the same value in
   `list`, `get`, a change's outcome and the `current_digest` of a

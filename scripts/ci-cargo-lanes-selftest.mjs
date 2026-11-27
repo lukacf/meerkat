@@ -2454,7 +2454,13 @@ for (const path of [
     assert.equal(new Set(names).size, names.length, `each closure-check job uploads its sccache log under a name of its own: ${names.join(", ")}`);
   }
   // The check step itself, run with a stub scripts/repo-cargo that prints
-  // its arguments: each row checks its part's targets with its features.
+  // its arguments, and before them the build-job limit it was given: each
+  // row checks its part's targets with its features. One row gets one build
+  // job: Meta's part with every target and every feature, whose two long
+  // checks, meerkat-meta's library and its library test target, then run one
+  // after the other. META_ROW is the step's own condition, read from the
+  // workflow and evaluated on a row as GitHub evaluates it (contains() and
+  // == on strings, without regard to case), and the rows are the planner's.
   {
     const step = closureCheck.indexOf("      - name: Check the reverse-dependency closure");
     assert.ok(step >= 0, "the closure-check job has its check step");
@@ -2465,22 +2471,92 @@ for (const path of [
       if (!line.startsWith("          ")) break;
       body.push(line.slice(10));
     }
+    const conditions = closureCheck.slice(step, run).filter((line) => line.startsWith("          META_ROW: "));
+    assert.equal(conditions.length, 1, "the check step sets META_ROW once");
+    const condition = /^ {10}META_ROW: \$\{\{ (.+) \}\}$/.exec(conditions[0])?.[1];
+    assert.ok(condition, `META_ROW is one expression: ${conditions[0].trim()}`);
+    const selected = (row) =>
+      condition.split(" && ").every((term) => {
+        const holds = /^contains\(matrix\.([a-z_]+), '([^']*)'\)$/.exec(term);
+        const equals = /^matrix\.([a-z_]+) == '([^']*)'$/.exec(term);
+        assert.ok(holds || equals, `this selftest does not model the term ${term} of META_ROW`);
+        const [, key, text] = holds ?? equals;
+        assert.ok(Object.hasOwn(row, key), `the closure-check matrix carries ${key}, which META_ROW reads`);
+        const value = String(row[key]).toLowerCase();
+        return holds ? value.includes(text.toLowerCase()) : value === text.toLowerCase();
+      });
+    const plannedRows = (path) => {
+      const planned = spawnSync("node", [classifier, "--event", "push", "--format", "github", "--", path], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      assert.equal(planned.status, 0, planned.stderr);
+      const line = planned.stdout.split("\n").find((candidate) => candidate.startsWith("closure_check_matrix="));
+      assert.ok(line, `the push plan of ${path} has a closure-check matrix`);
+      return JSON.parse(line.slice("closure_check_matrix=".length)).include;
+    };
+    const shape = (row) => [row.product, row.targets, row.features];
+    // After a Core change: one row selected, the four others not.
+    const afterCore = plannedRows("crates/meerkat-core/src/lib.rs");
+    assert.deepEqual(
+      afterCore.filter(selected).map(shape),
+      [["meta", "all", "all"]],
+      "after a Core change one closure-check row gets one build job: Meta's part, every target, every feature",
+    );
+    assert.ok(afterCore.filter(selected).every((row) => row.packages.split(" ").includes("meerkat-meta")), "the row with one build job checks meerkat-meta");
+    assert.deepEqual(
+      afterCore.filter((row) => !selected(row)).map(shape).sort(),
+      [["connect", "all", "all"], ["connect", "all", "default"], ["core", "lib", "all"], ["meta", "all", "default"]],
+      "Core's part, Connect's two parts and Meta's default-features part keep Cargo's own job count",
+    );
+    // Without a Core change a part checks lib and bin targets only, so no
+    // library test target stands beside meerkat-meta's library: no row is
+    // selected.
+    for (const path of ["meta/crates/meerkat-meta/src/lib.rs", "connect/crates/meerkat-connect/src/lib.rs"]) {
+      const rows = plannedRows(path);
+      assert.ok(rows.length > 0 && rows.every((row) => row.targets === "lib"), `${path}: a push without a Core change checks lib and bin targets`);
+      assert.deepEqual(rows.filter(selected).map((row) => row.name), [], `${path}: no closure-check row gets the one-job limit`);
+    }
     const scratch = mkdtempSync(join(tmpdir(), "closure-check-step-"));
     try {
       mkdirSync(join(scratch, "scripts"));
-      writeFileSync(join(scratch, "scripts", "repo-cargo"), '#!/usr/bin/env bash\necho "$*"\n', { mode: 0o755 });
-      const command = (targets, features) => {
+      writeFileSync(
+        join(scratch, "scripts", "repo-cargo"),
+        '#!/usr/bin/env bash\necho "${CARGO_BUILD_JOBS:+CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} }$*"\n',
+        { mode: 0o755 },
+      );
+      // The caller's own job count, if it has one, is not the step's.
+      const callerEnv = { ...process.env };
+      delete callerEnv.CARGO_BUILD_JOBS;
+      const command = (row) => {
         const result = spawnSync("bash", ["-c", body.join("\n")], {
           cwd: scratch,
           encoding: "utf8",
-          env: { ...process.env, CLOSURE: "-p a -p b", ROW_TARGETS: targets, ROW_FEATURES: features, CLOSURE_CHECK_TARGETS: "lib" },
+          env: {
+            ...callerEnv,
+            CLOSURE: row.packages,
+            ROW_TARGETS: row.targets,
+            ROW_FEATURES: row.features,
+            META_ROW: String(selected(row)),
+            CLOSURE_CHECK_TARGETS: "lib",
+          },
         });
         assert.equal(result.status, 0, `the check step failed: ${result.stderr}`);
         return result.stdout.trim();
       };
-      assert.equal(command("lib", "all"), "check -p a -p b --all-features", "Core's part: lib and bin targets, every feature");
-      assert.equal(command("all", "all"), "check -p a -p b --all-targets --all-features", "a product's part after a Core change: every target, every feature");
-      assert.equal(command("all", "default"), "check -p a -p b --all-targets", "and every target with the product's default features");
+      const part = (targets, features) => ({ packages: "-p a -p b", targets, features });
+      assert.equal(command(part("lib", "all")), "check -p a -p b --all-features", "Core's part: lib and bin targets, every feature");
+      assert.equal(command(part("all", "all")), "check -p a -p b --all-targets --all-features", "a product's part after a Core change: every target, every feature");
+      assert.equal(command(part("all", "default")), "check -p a -p b --all-targets", "and every target with the product's default features");
+      // The planner's own rows: the selected one runs with one build job, and
+      // no other row's command is given a job count.
+      assert.deepEqual(
+        afterCore.map((row) => command(row)),
+        afterCore.map(
+          (row) =>
+            `${shape(row).join(",") === "meta,all,all" ? "CARGO_BUILD_JOBS=1 " : ""}check ${row.packages}` +
+            `${row.targets === "all" ? " --all-targets" : ""}${row.features === "all" ? " --all-features" : ""}`,
+        ),
+        "after a Core change only Meta's every-target, every-feature part runs with one build job",
+      );
+      assert.equal(afterCore.map((row) => command(row)).filter((line) => line.includes("CARGO_BUILD_JOBS")).length, 1, "one row of five is given a job count");
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

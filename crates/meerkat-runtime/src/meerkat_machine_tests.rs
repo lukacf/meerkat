@@ -39723,11 +39723,18 @@ async fn await_runtime_recovery_stop(machine: &Arc<MeerkatMachine>, session_id: 
 /// None mean "no census applies to this machine at all" (ephemeral, storeless)
 /// and must keep sampling directly - those two Nones are different facts that
 /// this accessor's `Option<usize>` currently conflates.
-async fn await_census_reading(mut sample: impl FnMut() -> Option<usize>) -> Option<usize> {
+///
+/// The per-session read `unsettled_run_at` is the same kind of read with
+/// more ways to miss: it answers None when the session map cannot be read
+/// and also when the session's own authority or driver cannot be taken
+/// without waiting. A row that expects it to NAME a run asks through this
+/// helper too, and asserts on the first reading it gets; a row that expects
+/// None from it keeps sampling directly.
+async fn await_census_reading<T>(mut sample: impl FnMut() -> Option<T>) -> Option<T> {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if let Some(count) = sample() {
-                return count;
+            if let Some(reading) = sample() {
+                return reading;
             }
             tokio::task::yield_now().await;
         }
@@ -62004,13 +62011,20 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
          while its loop stands",
     )
     .await;
-    let unsettled = machine
-        .unsettled_run_at(
+    // The per-session read answers None whenever the session map, or this
+    // session's authority or driver, cannot be taken without waiting, and
+    // the machine's loops and cleanup run on other threads than this row.
+    // So the row asks again while the answer is None, and asserts on the
+    // first reading that names a run.
+    let unsettled = await_census_reading(|| {
+        machine.unsettled_run_at(
             &held.session_id,
             crate::run_progress::RUN_SETTLEMENT_NOTICE,
             past_run_settlement_notice(),
         )
-        .expect("the per-session read names the unsettled run");
+    })
+    .await
+    .expect("the per-session read names the unsettled run");
     assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
     assert_eq!(
         machine.unsettled_run(&held.session_id),
@@ -62197,13 +62211,18 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
          with no loop alive",
     )
     .await;
-    let unsettled = machine
-        .unsettled_run_at(
+    // As in the row above: the per-session read answers None on a lock miss,
+    // so the row asks again while the answer is None and asserts on the
+    // first reading that names a run.
+    let unsettled = await_census_reading(|| {
+        machine.unsettled_run_at(
             &held.session_id,
             crate::run_progress::RUN_SETTLEMENT_NOTICE,
             past_run_settlement_notice(),
         )
-        .expect("the per-session read names the unsettled run with no loop alive");
+    })
+    .await
+    .expect("the per-session read names the unsettled run with no loop alive");
     assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
 
     // The run's watchdog outlives the loop that left: it is what keeps

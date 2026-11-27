@@ -5333,6 +5333,17 @@ fn mirrored_session(dir: &std::path::Path, session_id: &str) -> Option<meerkat_c
     )
 }
 
+/// The session a sessions-file row holds, decoded with the import's own
+/// decoder. For a row that keeps `row["data"]` as its reference: the session
+/// it checks and the bytes it keeps then come from one read of the file.
+fn mirror_row_session(row: &serde_json::Map<String, serde_json::Value>) -> meerkat_core::Session {
+    use base64::Engine as _;
+    let document = base64::engine::general_purpose::STANDARD
+        .decode(row["data"].as_str().unwrap())
+        .unwrap();
+    meerkat_core::Session::from_persisted_bytes(&document).expect("a current session document")
+}
+
 /// The runtime-owned continuity mirror copies each identity's current record,
 /// its committed session and the blobs that session references, in the rows
 /// the continuity export's JSON Lines provider and restore_blobs.py read.
@@ -5797,15 +5808,17 @@ async fn the_continuity_mirror_keeps_its_copy_when_the_store_loses_a_session() {
         let records = mirror_lines(&mirror_dir, "records.jsonl");
         if let Some(record) = records.first() {
             let session_id = record["session_id"].as_str().unwrap().to_string();
+            // One read of the sessions file gives both the row checked for
+            // the turn and the reference kept. The mirror replaces the file
+            // on every put, so a second read can already hold a later copy
+            // than the first.
             let sessions = mirror_lines(&mirror_dir, "sessions.jsonl");
             if let Some(row) = sessions
                 .iter()
                 .find(|row| row["session_id"] == session_id.as_str())
-                && mirrored_session(&mirror_dir, &session_id).is_some_and(|session| {
-                    serde_json::to_string(session.messages())
-                        .unwrap()
-                        .contains("keep me")
-                })
+                && serde_json::to_string(mirror_row_session(row).messages())
+                    .unwrap()
+                    .contains("keep me")
             {
                 break (session_id, row["data"].clone());
             }

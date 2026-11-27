@@ -2070,7 +2070,10 @@ class MetaRuntime:
         it, or once when the connection starts for a decision already open,
         and once at the host's first list of it. A question set a member
         asked (``kind`` ``ask_user.questions``) arrives this way with no
-        list call: read it with :meth:`MobHandle.gating_questions`.
+        list call: read it with :meth:`MobHandle.gating_questions`. That
+        read returns it on a launch with a roster only: on a launch without
+        one a set the store already holds is still noticed and the read
+        returns none, so such a notice is not a readable question.
         ``event`` is ``held`` (nothing of its content shown) or ``presented``
         (shown to the stdio operator at a list, with the rendering). A
         ``held`` notice that arrived before a handler was registered is kept

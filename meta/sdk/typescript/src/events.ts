@@ -21,6 +21,31 @@
 
 import type { SseEvent } from "./sse.js";
 
+/** Provider attribution supplied with a measured turn; string values are open. */
+export interface ProviderTokenAccounting {
+  readonly provider: string;
+  readonly model: string;
+  /** The provider's normalized input accounting. */
+  readonly presentedTokens: number;
+  readonly convention: string;
+  readonly aggregation: string;
+}
+
+/**
+ * Token counters supplied by a terminal event, without computed totals.
+ * Missing optional counters are unreported, not zero. Raw input and cache
+ * counters can overlap, so they must not be summed blindly.
+ */
+export interface Usage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheCreationTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly reasoningTokens?: number;
+  /** Per-call attribution when supplied; absent on session cumulative usage. */
+  readonly accounting?: ProviderTokenAccounting;
+}
+
 // ---------------------------------------------------------------------------
 // Session lifecycle events
 // ---------------------------------------------------------------------------
@@ -42,6 +67,8 @@ export interface RunCompletedEvent {
    * is still the raw text).
    */
   readonly structuredOutput?: unknown;
+  /** Session cumulative snapshot, not this run's increment. Do not sum snapshots. */
+  readonly usage?: Usage;
 }
 
 /**
@@ -113,6 +140,8 @@ export interface ToolResultReceivedEvent {
 export interface TurnCompletedEvent {
   readonly type: "turn_completed";
   readonly stopReason: string;
+  /** Per-call usage when measured; absence does not mean a zero-token turn. */
+  readonly usage?: Usage;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +203,72 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function tokenCount(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${path} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function accountingString(raw: Record<string, unknown>, name: string): string {
+  const value = raw[name];
+  if (typeof value !== "string") {
+    throw new Error(`usage.accounting.${name} must be a string`);
+  }
+  return value;
+}
+
+function parseUsage(raw: unknown): Usage | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isPlainRecord(raw)) throw new Error("usage must be an object");
+  const optionalCount = (name: string): number | undefined => {
+    const value = raw[name];
+    return value === undefined || value === null
+      ? undefined : tokenCount(value, `usage.${name}`);
+  };
+  const cacheCreationTokens = optionalCount("cache_creation_tokens");
+  const cacheReadTokens = optionalCount("cache_read_tokens");
+  const reasoningTokens = optionalCount("reasoning_tokens");
+  let accounting: ProviderTokenAccounting | undefined;
+  if (raw.accounting !== undefined && raw.accounting !== null) {
+    if (!isPlainRecord(raw.accounting)) throw new Error("usage.accounting must be an object");
+    accounting = {
+      provider: accountingString(raw.accounting, "provider"),
+      model: accountingString(raw.accounting, "model"),
+      presentedTokens: tokenCount(raw.accounting.presented_tokens, "usage.accounting.presented_tokens"),
+      convention: accountingString(raw.accounting, "convention"),
+      aggregation: accountingString(raw.accounting, "aggregation"),
+    };
+  }
+  return {
+    inputTokens: tokenCount(raw.input_tokens, "usage.input_tokens"),
+    outputTokens: tokenCount(raw.output_tokens, "usage.output_tokens"),
+    ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+    ...(accounting === undefined ? {} : { accounting }),
+  };
+}
+
+/**
+ * The typed usage a terminal event supplied: `undefined` when none was
+ * supplied, and also, with one `console.warn`, when the supplied value does
+ * not fit. The event itself is never lost to its usage, and no counter is
+ * made from such a value.
+ */
+function suppliedUsage(raw: unknown, eventType: string): Usage | undefined {
+  try {
+    return parseUsage(raw);
+  } catch (error) {
+    console.warn(
+      `[meta] ${eventType} carried a usage that does not fit ` +
+        `(${error instanceof Error ? error.message : String(error)}); ` +
+        "the event is delivered without usage",
+    );
+    return undefined;
+  }
+}
+
 function parseAgentErrorReport(raw: unknown): AgentErrorReport | undefined {
   if (!isPlainRecord(raw)) return undefined;
   const reason = isPlainRecord(raw.reason) ? raw.reason : undefined;
@@ -195,6 +290,7 @@ const EVENT_MAP: Record<string, EventFactory> = {
     prompt: String(raw.prompt ?? ""),
   }),
   run_completed: (raw) => {
+    const usage = suppliedUsage(raw.usage, "run_completed");
     // `structured_output` is `skip_serializing_if = "Option::is_none"`
     // upstream, so the field is absent (not `null`) when there's no
     // schema-extracted value. Mirror that on the TS side: undefined
@@ -203,6 +299,7 @@ const EVENT_MAP: Record<string, EventFactory> = {
       type: "run_completed",
       sessionId: String(raw.session_id ?? ""),
       result: String(raw.result ?? ""),
+      ...(usage === undefined ? {} : { usage }),
     };
     if (raw.structured_output !== undefined) {
       return { ...evt, structuredOutput: raw.structured_output };
@@ -243,10 +340,14 @@ const EVENT_MAP: Record<string, EventFactory> = {
     result: String(raw.result ?? ""),
     isError: Boolean(raw.is_error),
   }),
-  turn_completed: (raw) => ({
-    type: "turn_completed",
-    stopReason: String(raw.stop_reason ?? ""),
-  }),
+  turn_completed: (raw) => {
+    const usage = suppliedUsage(raw.usage, "turn_completed");
+    return {
+      type: "turn_completed",
+      stopReason: String(raw.stop_reason ?? ""),
+      ...(usage === undefined ? {} : { usage }),
+    };
+  },
   tool_execution_started: (raw) => ({
     type: "tool_execution_started",
     id: String(raw.id ?? ""),
@@ -266,6 +367,8 @@ const EVENT_MAP: Record<string, EventFactory> = {
  *
  * Unknown event types are returned as {@link UnknownEvent} for
  * forward-compatibility with newer server versions.
+ * A terminal event whose supplied usage does not fit comes back without
+ * `usage`, with one `console.warn`; missing or null usage stays absent.
  */
 export function parseAgentEvent(raw: Record<string, unknown>): AgentEvent {
   const eventType = String(raw.type ?? "");

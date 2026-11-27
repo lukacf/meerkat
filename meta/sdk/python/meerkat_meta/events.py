@@ -19,10 +19,45 @@ Mob events wrap agent events with source attribution::
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from ._sse import SseEvent
+
+_log = logging.getLogger("meerkat_meta")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderTokenAccounting:
+    """Provider attribution supplied with a measured turn.
+
+    ``presented_tokens`` is the provider's normalized input accounting.
+    Provider, convention, and aggregation remain open strings.
+    """
+
+    provider: str
+    model: str
+    presented_tokens: int
+    convention: str
+    aggregation: str
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Token counters supplied by a terminal event, without computed totals.
+
+    Missing optional counters are unreported, not zero. Measured turns may
+    carry ``accounting``; session cumulative usage does not. Raw input and
+    cache counters can overlap, so they must not be summed blindly.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    accounting: ProviderTokenAccounting | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +93,15 @@ class RunCompleted(Event):
     value parsed from ``result``. Absent (``None``) when the run had no
     schema, or schema extraction failed (in which case ``result`` is
     still the raw text).
+
+    ``usage`` is a session cumulative snapshot, not this run's increment.
+    Do not sum snapshots across runs. ``None`` means the payload carried
+    none, or one that did not fit.
     """
     session_id: str = ""
     result: str = ""
     structured_output: Any = None
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,8 +187,12 @@ class ToolResultReceived(Event):
 
 @dataclass(frozen=True, slots=True)
 class TurnCompleted(Event):
-    """An LLM turn finished."""
+    """An LLM turn finished, with per-call ``usage`` when measured.
+
+    ``None`` means usage is unavailable, not a measured zero-token turn.
+    """
     stop_reason: str = ""
+    usage: Usage | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -206,11 +250,77 @@ _EVENT_MAP: dict[str, type[Event]] = {
 }
 
 
+def _token_count(value: Any, path: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{path} must be a non-negative integer")
+    return value
+
+
+def _parse_usage(raw: Any) -> Usage | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("usage must be an object")
+
+    def optional_count(name: str) -> int | None:
+        value = raw.get(name)
+        return None if value is None else _token_count(value, f"usage.{name}")
+
+    accounting = None
+    supplied_accounting = raw.get("accounting")
+    if supplied_accounting is not None:
+        if not isinstance(supplied_accounting, dict):
+            raise ValueError("usage.accounting must be an object")
+        for name in ("provider", "model", "convention", "aggregation"):
+            if not isinstance(supplied_accounting.get(name), str):
+                raise ValueError(f"usage.accounting.{name} must be a string")
+        accounting = ProviderTokenAccounting(
+            provider=supplied_accounting["provider"],
+            model=supplied_accounting["model"],
+            presented_tokens=_token_count(
+                supplied_accounting.get("presented_tokens"),
+                "usage.accounting.presented_tokens",
+            ),
+            convention=supplied_accounting["convention"],
+            aggregation=supplied_accounting["aggregation"],
+        )
+
+    return Usage(
+        input_tokens=_token_count(raw.get("input_tokens"), "usage.input_tokens"),
+        output_tokens=_token_count(raw.get("output_tokens"), "usage.output_tokens"),
+        cache_creation_tokens=optional_count("cache_creation_tokens"),
+        cache_read_tokens=optional_count("cache_read_tokens"),
+        reasoning_tokens=optional_count("reasoning_tokens"),
+        accounting=accounting,
+    )
+
+
+def _supplied_usage(raw: Any, event_type: str) -> Usage | None:
+    """The typed usage a terminal event supplied.
+
+    ``None`` when none was supplied, and also, with one warning, when the
+    supplied value does not fit: the event itself is never lost to its usage,
+    and no counter is made from such a value.
+    """
+    try:
+        return _parse_usage(raw)
+    except ValueError as error:
+        _log.warning(
+            "%s carried a usage that does not fit (%s); the event is delivered without usage",
+            event_type,
+            error,
+        )
+        return None
+
+
 def parse_agent_event(raw: dict[str, Any]) -> Event:
     """Parse a raw event dict into a typed :class:`Event`.
 
     Unknown event types are returned as :class:`UnknownEvent` for
     forward-compatibility with newer server versions.
+    A terminal event whose supplied usage does not fit comes back without
+    ``usage``, with one warning on the ``meerkat_meta`` logger; missing or
+    null usage remains unavailable.
     """
     event_type = raw.get("type", "")
     cls = _EVENT_MAP.get(event_type)
@@ -220,7 +330,11 @@ def parse_agent_event(raw: dict[str, Any]) -> Event:
     kwargs: dict[str, Any] = {}
     for f in cls.__dataclass_fields__:
         if f in raw:
-            kwargs[f] = raw[f]
+            kwargs[f] = (
+                _supplied_usage(raw[f], event_type)
+                if f == "usage" and cls in (RunCompleted, TurnCompleted)
+                else raw[f]
+            )
     return cls(**kwargs)
 
 

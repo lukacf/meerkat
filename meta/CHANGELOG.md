@@ -163,6 +163,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   does not arise there; a Rust host that embeds Meta and binds a member
   host through the mob handle holds such specs.
 
+- Python and TypeScript SDKs expose optional `usage` on typed
+  `turn_completed` and `run_completed` events and export `Usage` and
+  `ProviderTokenAccounting`. When the gateway supplies usage,
+  `turn_completed` reports counters for that model call, including provider
+  accounting when present. On `run_completed`, `usage` is the session total
+  so far, not the share for this run. Use the latest total for each session;
+  do not add successive totals.
+
+  The SDKs do not compute totals. Missing or null usage stays absent; a
+  reported zero stays zero. If supplied usage is malformed (for example, it
+  is not an object, a required counter is missing, a counter is not a
+  non-negative integer, or provider accounting is incomplete or has a field
+  of the wrong type), the SDK delivers the event without usage. The SDK emits
+  one warning each time it parses such an event (on the `meerkat_meta` logger
+  in Python; through `console.warn` in TypeScript). Reading the same event on
+  another stream can therefore produce another warning.
+
 ### Fixed
 
 - Console chat, two fixes. The notice for the reasoning effort a request was

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `RunCompletedEvent` and `TurnCompletedEvent` gain an optional `usage`
+  field. The SDK also exports the `Usage` and `ProviderTokenAccounting`
+  types. See the Meta changelog for the difference between turn counters and
+  session totals.
+
 ## 0.9.18
 
 - `PersistedEvent` gains `mobId` and `mobIncarnation` (`string | null`).

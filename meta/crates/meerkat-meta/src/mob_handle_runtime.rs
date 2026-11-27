@@ -16842,6 +16842,75 @@ mod tests {
         );
     }
 
+    /// A pin, green from the start: the projection forwards the `usage` Core
+    /// puts on the two terminal events whole and unchanged. A turn's is the
+    /// call's counters with the provider and the model beside them; a run's
+    /// is the session's cumulative total, with no accounting. The SDKs read
+    /// `usage` from this payload.
+    #[test]
+    fn console_agent_event_payload_forwards_terminal_usage_whole_and_unchanged() {
+        let turn_usage = meerkat_core::TurnUsage::new(
+            meerkat_core::Usage {
+                input_tokens: 120,
+                output_tokens: 90,
+                cache_read_tokens: Some(4300),
+                reasoning_tokens: Some(10),
+                ..Default::default()
+            },
+            meerkat_core::ProviderTokenAccounting::anthropic("test-model", 120, 0, 4300),
+        );
+        let turn = meerkat_core::AgentEvent::TurnCompleted {
+            stop_reason: meerkat_core::StopReason::EndTurn,
+            usage: Some(turn_usage.clone()),
+            assistant_message_id: None,
+        };
+        let payload = console_agent_event_payload(&turn);
+        assert_eq!(payload["type"], "turn_completed");
+        assert_eq!(
+            payload["usage"],
+            serde_json::json!(turn_usage),
+            "a turn's usage is forwarded as Core serializes it: {payload}"
+        );
+        assert_eq!(payload["usage"]["input_tokens"], 120);
+        assert_eq!(payload["usage"]["output_tokens"], 90);
+        assert_eq!(payload["usage"]["cache_read_tokens"], 4300);
+        assert_eq!(payload["usage"]["reasoning_tokens"], 10);
+        assert_eq!(payload["usage"]["accounting"]["provider"], "anthropic");
+        assert_eq!(payload["usage"]["accounting"]["model"], "test-model");
+        assert_eq!(payload["usage"]["accounting"]["presented_tokens"], 4420);
+
+        let run_usage = meerkat_core::CumulativeUsage::from_usage(meerkat_core::Usage {
+            input_tokens: 4420,
+            output_tokens: 90,
+            cache_read_tokens: Some(4300),
+            reasoning_tokens: Some(10),
+            ..Default::default()
+        });
+        let run = meerkat_core::AgentEvent::RunCompleted {
+            session_id: meerkat_core::types::SessionId::new(),
+            identity: Default::default(),
+            result: "done".to_string(),
+            structured_output: None,
+            extraction_required: false,
+            usage: run_usage.clone(),
+            terminal_cause_kind: None,
+            assistant_message_id: None,
+        };
+        let payload = console_agent_event_payload(&run);
+        assert_eq!(payload["type"], "run_completed");
+        assert_eq!(
+            payload["usage"],
+            serde_json::json!(run_usage),
+            "a run's usage is forwarded as Core serializes it: {payload}"
+        );
+        assert_eq!(payload["usage"]["input_tokens"], 4420);
+        assert_eq!(payload["usage"]["output_tokens"], 90);
+        assert!(
+            payload["usage"].get("accounting").is_none(),
+            "a cumulative usage carries no per-call accounting: {payload}"
+        );
+    }
+
     struct EmptyDispatcher;
 
     #[async_trait::async_trait]

@@ -1870,9 +1870,9 @@ async fn a_delegate_whose_helper_is_gone_says_that_nothing_is_left_to_do() {
 async fn a_caller_without_manage_scope_is_told_that_the_member_tools_are_refused_for_it() {
     let rig = short_wait_rig().await;
     let (reached, release) =
-        meerkat_mob::hold_delegation_limit_for_test(AgentIdentity::from("kept"));
+        meerkat_mob::hold_delegation_limit_for_test(AgentIdentity::from("denied"));
     let turn = rig
-        .parent_calls(&[delegate_call("call", &hang("kept"), "kept", None)])
+        .parent_calls(&[delegate_call("call", &hang("denied"), "denied", None)])
         .await;
     tokio::time::timeout(ROW_BOUND, reached)
         .await
@@ -1898,13 +1898,13 @@ async fn a_caller_without_manage_scope_is_told_that_the_member_tools_are_refused
     // The helper is still seated, and the ids of the error give no right.
     let implicit_id = rig.implicit_mob_id().await;
     let implicit = rig.implicit().await;
-    assert!(is_member(&implicit, "kept").await, "the helper is seated");
+    assert!(is_member(&implicit, "denied").await, "the helper is seated");
     let turn = rig
         .parent_calls(&[member_tool_call(
             "check-seated",
             "mob_check_member",
             &implicit_id,
-            "kept",
+            "denied",
         )])
         .await;
     let refused: Value =
@@ -1916,19 +1916,19 @@ async fn a_caller_without_manage_scope_is_told_that_the_member_tools_are_refused
     );
     finish(turn, "the checking turn").await;
     assert!(
-        is_member(&implicit, "kept").await,
+        is_member(&implicit, "denied").await,
         "a refused check did nothing to the helper"
     );
 
     // Once the helper is gone, the check is answered without any scope.
     let _ = release.send(());
-    wait_gone(&implicit, "kept", "its end was let go").await;
+    wait_gone(&implicit, "denied", "its end was let go").await;
     let turn = rig
         .parent_calls(&[member_tool_call(
             "check-gone",
             "mob_check_member",
             &implicit_id,
-            "kept",
+            "denied",
         )])
         .await;
     let gone: Value = serde_json::from_str(&rig.result_of("check-gone").await).expect("error JSON");

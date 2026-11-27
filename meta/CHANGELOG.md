@@ -22,8 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   expected u64`, `invalid params: presentation.parts_shown[0].index: invalid
   type: null, expected u32`, `invalid params: presentation.channel_ref:
   missing field`. Params that are no object are refused with `invalid
-  params: expected an object`, and a nested object that is none in the same
-  words at its path (`invalid params: presentation: expected an object`).
+  params: expected an object`, and so, at its path, is a nested object that
+  is none (`invalid params: presentation: expected an object`), except a
+  presentation's `audience`. Two refusals still print the name of the type
+  that reads the params, which is Meta's own text and nothing of the
+  request: an `audience` that is no object (`invalid params:
+  presentation.audience: invalid type: string, expected internally tagged
+  enum DecisionAudienceRequest`), and params or a nested object given as a
+  list of the wrong length (`invalid params: invalid length 0, expected
+  struct DecisionWithdrawParams with 1 element`).
   Where the old message quoted the value it found (`invalid type: string
   "..."`, `invalid value: integer ...`), the new one names only its kind
   (`string`, `integer`, `floating point`, `boolean`, `null`, `sequence`,

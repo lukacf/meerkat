@@ -532,6 +532,25 @@ class TestDispatchMethod:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "half",
+        [{"correlation_id": "source-thread-7"}, {"idempotency_key": "source-event-42"}],
+        ids=["correlation-id-alone", "idempotency-key-alone"],
+    )
+    async def test_dispatch_sends_nothing_for_a_connector_helper_half_pair(self, half):
+        # The helper refuses one key without the other where the input is
+        # built. A dispatch written as one expression therefore raises
+        # before the runtime is asked for anything: no request is sent.
+        rt, transport = _make_runtime(result={"accepted": True})
+        with pytest.raises(
+            ValueError, match="correlation_id and idempotency_key must be supplied together"
+        ):
+            await rt.dispatch(
+                "gate:main", DispatchInput.connector("connector event", **half)
+            )
+        assert transport.calls == []
+
+    @pytest.mark.asyncio
     async def test_dispatch_sends_correct_params(self):
         rt, transport = _make_runtime(result={"accepted": True})
         di = DispatchInput(content="test", origin="scheduler", correlation_id="c1")

@@ -17,7 +17,9 @@ it depends on how another route or another origin treats the pair:
   id with a ticket of its own;
 - it reads each key at admission: a half pair, which only the full
   constructor can build, is refused with the gateway's own words for the
-  missing half.
+  missing half;
+- it admits the helper's input with neither key as well, with a ticket of
+  its own.
 
 Run:
     META_GATEWAY_BIN=<path to an rpc_gateway> PYTHONPATH=sdk/python \
@@ -233,6 +235,20 @@ async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_pat
                 in message
             ), message
             print(f"REFUSED {sorted(half)} alone: code={refused.value.code} message={message}")
+
+        # The helper with neither key: the gateway admits an unkeyed
+        # connector input too, with a ticket that is none of the keyed ones.
+        unkeyed = await runtime.dispatch(
+            _IDENTITY, DispatchInput.connector("connector event, no keys"), track_turn=True
+        )
+        assert isinstance(unkeyed, DispatchResult), unkeyed
+        assert unkeyed.turn_ticket, unkeyed.turn_unavailable
+        assert unkeyed.turn_ticket not in (admitted.turn_ticket, other.turn_ticket), (
+            unkeyed,
+            admitted,
+            other,
+        )
+        print(f"ADMITTED neither key: turn_ticket={unkeyed.turn_ticket}")
 
     # The isolation held: the gateway kept the agent's session identity in a
     # directory under this test's own state home (under its own home on macOS).

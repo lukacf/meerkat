@@ -366,7 +366,7 @@ and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
 attestation})`. Each resolves to the gateway's result object.
 
 ```typescript
-import { Meta } from "@rkat/meta-sdk";
+import { DecisionPresentation, Meta } from "@rkat/meta-sdk";
 
 const rt = await Meta.builder()
   .mob("config/mob.toml")
@@ -387,6 +387,7 @@ const subjectDigest = decision.subject_digest;
 
 // Show the person the whole text of the rendering.
 const rendering = await mob.decisionsRendering(decisionId);
+const parts = rendering.parts as { index: number; count: number; part_digest: string }[];
 // ... post rendering.rendering to the chat ...
 const shownAtMs = Date.now(); // once the post has succeeded
 // ... wait for the answer ...
@@ -401,14 +402,16 @@ await mob.decisionsDecide(decisionId, {
     scope: "chat-session-1",
     eventRef: "chat:event-1",
     observedAtMs,
-    presentation: {
-      audience: { kind: "approver", approver_id: decision.approver_id },
-      subject_digest: subjectDigest,
-      parts_shown: rendering.parts,
-      channel_ref: "chat:owners",
-      message_ref: "chat:message-1",
-      at_ms: shownAtMs,
-    },
+    presentation: new DecisionPresentation({
+      audience: { kind: "approver", approverId: decision.approver_id },
+      subjectDigest,
+      partsShown: parts.map((part) => ({
+        index: part.index, count: part.count, partDigest: part.part_digest,
+      })),
+      channelRef: "chat:owners",
+      messageRef: "chat:message-1",
+      atMs: shownAtMs,
+    }),
   },
 });
 ```
@@ -421,8 +424,29 @@ attestation carries, as here; by one recorded before with
 or by the gateway's own showing to the stdio operator (its `presented`
 notice), where the approver map lists the operator for that approver id.
 With none of these, the decide is refused `presentation_incomplete`. The
-keys of a presentation are the gateway's own (snake_case) and are listed
-under [`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
+wire keys are listed under
+[`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
+
+`DecisionPresentation` accepts camelCase `DecisionPresentationOptions` and
+`toDict()` returns snake_case wire fields. `DecisionAudience` also accepts
+`{ kind: "reviewer", reviewer: "principal:reviewer" }`. `DecisionCanonicalPart`
+types each part, and `DecisionPresentationLink` types an optional
+`{ reference, servedDigest }` link to the full rendering. Null or omitted
+`maxPartBytes` and `link` are omitted on the wire. The constructor checks the
+closed nested shape and unsigned integer widths; `atMs` is limited to
+`Number.MAX_SAFE_INTEGER` so JSON preserves its value exactly. The gateway
+still validates digests, coverage and authority. Existing raw `Record<string, unknown>`
+presentations remain supported in both wrappers: their snake_case
+fields are sent unchanged, without the typed constructor's local checks.
+The wrappers use `instanceof DecisionPresentation` to select typed conversion;
+a camelCase object literal or an instance from a second copy of the package
+follows the raw path, so the gateway rejects its non-wire shape instead of
+the wrapper validating or converting it. A failed constructor check throws the
+builtin `TypeError`, with a message that names the field or its container;
+there is no structured error and no machine-readable field path, and a raw
+record gets the gateway's validation only. A `maxPartBytes` of `0` and, for a
+presentation to the approver, an `atMs` of `0` pass the constructor's check,
+but the gateway refuses them.
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.

@@ -2218,7 +2218,12 @@ attestation=None)`. Each answers the gateway's result as a `dict`.
 ```python
 import time
 
-from meerkat_meta import DecisionAttestation
+from meerkat_meta import (
+    DecisionApproverAudience,
+    DecisionAttestation,
+    DecisionCanonicalPart,
+    DecisionPresentation,
+)
 
 runtime.on_decision_notice(lambda notice: print(notice["event"], notice["decision_id"]))
 page = await mob.decisions_list(phase="open")  # notices are written before the answer
@@ -2243,14 +2248,17 @@ await mob.decisions_decide(
         scope="chat-session-1",
         event_ref="chat:event-1",
         observed_at_ms=observed_at_ms,
-        presentation={
-            "audience": {"kind": "approver", "approver_id": decision["approver_id"]},
-            "subject_digest": subject_digest,
-            "parts_shown": rendering["parts"],
-            "channel_ref": "chat:owners",
-            "message_ref": "chat:message-1",
-            "at_ms": shown_at_ms,
-        },
+        presentation=DecisionPresentation(
+            audience=DecisionApproverAudience(decision["approver_id"]),
+            subject_digest=subject_digest,
+            parts_shown=[
+                DecisionCanonicalPart(part["index"], part["count"], part["part_digest"])
+                for part in rendering["parts"]
+            ],
+            channel_ref="chat:owners",
+            message_ref="chat:message-1",
+            at_ms=shown_at_ms,
+        ),
     ),
 )
 ```
@@ -2260,11 +2268,26 @@ and the approver map lists `U123` on it for the decision's approver id. An
 attested decide is accepted only for a decision that was presented to its
 approver: by the `presentation` the attestation carries, as here; by one
 recorded before with `decisions_present(decision_id, presentation)`, which
-takes the same mapping; or by the gateway's own showing to the stdio
-operator (its `presented` notice), where the approver map lists the operator
+takes the typed presentation or a raw mapping; or by the gateway's own showing
+to the stdio operator (its `presented` notice), where the approver map lists the operator
 for that approver id. With none of these, the decide is refused
 `presentation_incomplete`. The fields of a presentation are listed under
 [`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
+
+`DecisionReviewerAudience(reviewer)` selects the other audience form.
+`DecisionPresentationLink(reference, served_digest)` records a summary's link
+to the full rendering. Optional `max_part_bytes` and `link` are omitted when
+`None`; `to_dict()` returns the canonical wire object. The typed constructors
+check required fields, nested types and unsigned integer widths, while the
+gateway checks digest validity, coverage and authority. Existing raw mappings
+in `decisions_present` and raw dictionaries in `DecisionAttestation.presentation`
+remain supported without conversion or these local checks. Gateway results
+remain dictionaries. A failed typed check raises the builtin `TypeError` from
+the constructor, with a message that names the field or its container; there
+is no structured error and no field path, and a raw mapping or dictionary gets
+the gateway's validation only. A `max_part_bytes` of `0` and, for a
+presentation to the approver, an `at_ms` of `0` pass the typed check, but the
+gateway refuses them.
 
 `MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`.
 The gateway writes the notices before a list answers; the SDK runs each

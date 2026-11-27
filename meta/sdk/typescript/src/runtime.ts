@@ -28,9 +28,11 @@ import {
 import {
   type DecisionDecideOptions,
   type DecisionListOptions,
+  type DecisionPresentation,
   decisionDecideParams,
   decisionIngressesOption,
   decisionListParams,
+  decisionPresentationToDict,
   refuseInsideToolCallback,
 } from "./decisions.js";
 import {
@@ -5423,14 +5425,15 @@ export class MobHandle {
    * Record what the host presenter showed on its channel: the audience, the
    * subject digest, the parts shown, the channel and message references, and
    * the host clock reading `at_ms`.
+   * Accepts DecisionPresentation or an unchanged raw wire object.
    */
   async decisionsPresent(
     decisionId: string,
-    presentation: Record<string, unknown>,
+    presentation: DecisionPresentation | Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     return (await this._runtime._rpc("meta/decisions/present", {
       decision_id: decisionId,
-      presentation,
+      presentation: decisionPresentationToDict(presentation),
     })) as Record<string, unknown>;
   }
 

@@ -235,11 +235,18 @@ export { CallbackDispatcher } from "./agent-builder.js";
 // -- Durable decisions ------------------------------------------------------
 
 export type {
+  DecisionApproverAudience,
   DecisionAttestation,
+  DecisionAudience,
+  DecisionCanonicalPart,
   DecisionDecideOptions,
   DecisionIngressDeclaration,
   DecisionListOptions,
+  DecisionPresentationLink,
+  DecisionPresentationOptions,
+  DecisionReviewerAudience,
 } from "./decisions.js";
+export { DecisionPresentation } from "./decisions.js";
 export {
   DECIDE_INSIDE_TOOL_CALLBACK_KIND,
   DecideInsideToolCallbackError,

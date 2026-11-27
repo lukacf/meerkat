@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger("meerkat_meta")
 
 from .agent_builder import CallbackDispatcher, SessionAgentBuilder
-from .decisions import DecisionAttestation, _refuse_inside_tool_callback
+from .decisions import DecisionAttestation, DecisionPresentation, _refuse_inside_tool_callback
 from .errors import (
     CAPABILITY_UNAVAILABLE_CODE,
     CompletionCursorUnavailableError,
@@ -5508,14 +5508,22 @@ class MobHandle:
         return await self._runtime._rpc("meta/decisions/rendering", params)
 
     async def decisions_present(
-        self, decision_id: str, presentation: Mapping[str, Any]
+        self, decision_id: str, presentation: DecisionPresentation | Mapping[str, Any]
     ) -> dict[str, Any]:
         """Record what the host presenter showed on its channel: the
         audience, the subject digest, the parts shown, the channel and
-        message references, and the host clock reading ``at_ms``."""
+        message references, and the host clock reading ``at_ms``. Accepts a
+        typed :class:`DecisionPresentation` or an unchanged raw mapping."""
         return await self._runtime._rpc(
             "meta/decisions/present",
-            {"decision_id": decision_id, "presentation": dict(presentation)},
+            {
+                "decision_id": decision_id,
+                "presentation": (
+                    presentation.to_dict()
+                    if isinstance(presentation, DecisionPresentation)
+                    else dict(presentation)
+                ),
+            },
         )
 
     async def decisions_withdraw(self, decision_id: str) -> dict[str, Any]:

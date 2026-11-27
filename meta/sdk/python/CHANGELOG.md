@@ -8,6 +8,11 @@ All notable changes to the Python SDK are documented here.
 
 ### Added
 
+- Added `DecisionPresentation`, typed approver/reviewer audiences,
+  `DecisionCanonicalPart` and `DecisionPresentationLink` for `decisions_present`
+  and `DecisionAttestation.presentation`. Existing raw mappings and dictionaries
+  remain supported unchanged.
+
 - Python identity results can be narrowed by their `outcome` string. For
   example, after `if state.outcome == "refused":`, mypy and pyright know
   that `state.refusal` is available on the result of `identities.operation()`.
@@ -18,6 +23,12 @@ All notable changes to the Python SDK are documented here.
 - Type checkers can now report mistakes that a `str` annotation
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
+
+- `DecisionAttestation.presentation` is now typed
+  `DecisionPresentation | dict[str, Any] | None`. Code that reads the field as
+  a dictionary needs a narrowing check first, such as
+  `isinstance(attestation.presentation, dict)`; type checkers can report a read
+  without one. Passing a dictionary and the behavior at run time are unchanged.
 
 ## 0.9.18
 

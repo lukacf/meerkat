@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Python and TypeScript SDKs: typed presentations for direct and attested decisions, retaining raw mapping and record compatibility.
+
 - Python identity results can be narrowed by their `outcome` string. For
   example, after `if state.outcome == "refused":`, mypy and pyright know
   that `state.refusal` is available on the result of `identities.operation()`.
@@ -193,6 +195,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Type checkers can now report mistakes that a `str` annotation
   previously hid, such as comparing against an impossible outcome. The outcome
   strings, returned objects and behavior at run time are unchanged.
+
+- `DecisionAttestation.presentation` is now a union type in the Python and
+  TypeScript SDKs: the typed `DecisionPresentation` or the raw dictionary or
+  record. Code that reads the field as a dictionary or record needs a
+  narrowing check first; type checkers can report a read without one. Passing
+  a raw dictionary or record and the behavior at run time are unchanged.
 
 ### Changed
 

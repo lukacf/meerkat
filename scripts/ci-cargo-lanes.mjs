@@ -23,6 +23,7 @@
 //                      [--event pull_request|push|workflow_dispatch]
 //                      [--base-lock FILE] [--base-tree DIR]
 //                      [--reuse-release-evidence <commit>:<run id>:<attempt>]
+//                      [--fail-reader-report]
 //                      [--format json|github] [--] [changed-path ...]
 //   ci-cargo-lanes.mjs --paths-from-stdin [...]
 //
@@ -89,7 +90,19 @@
 // inside a crate directory is no build input, except documentation the
 // crate compiles in (include_str!/include_bytes! in library, binary or
 // build-script code, which the inventory lists): that selects the crate
-// like its code.
+// like its code. Planning a reader's target is not running its tests: a
+// test marked `#[ignore]` is built and skipped. The plan reports, and only
+// reports, what happens to each reader selection (reader_states): the lane
+// of this workflow's plan that compiles its target and, from the tests' own
+// attributes, whether they are executed, ignored with no runner found,
+// ignored and selected with an ignored-run flag by a file that is cited
+// (by the test's name, or by a cargo test command for its whole target or
+// package), or unproven (see scripts/ci-non-rust-readers.mjs). Another
+// workflow may build the same target; the report does not look there. A
+// pull request names the rows it
+// leaves to the push accordingly (deferred_to_push's reader_rows,
+// reader_rows_not_executed, reader_rows_selected_elsewhere and
+// reader_rows_unproven hold the same labels the one list held).
 //
 // Long rows first. The rows of the Clippy, main unit, closure-tests and
 // feature-check lanes take 1-50 minutes on hosted runners, and a
@@ -282,7 +295,17 @@ import {
   parseFilter,
   profileFilter,
 } from "./ci-hook-coverage.mjs";
-import { loadNonRustReaders, readerPackagesFor, readerSelectionsFor, WHOLE_CHECKOUT } from "./ci-non-rust-readers.mjs";
+import {
+  INVENTORY_PATH,
+  ignoredRunEvidence,
+  loadNonRustReaders,
+  readerExecution,
+  readerPackagesFor,
+  readerSelectionsFor,
+  readerTestState,
+  targetRunEvidence,
+  WHOLE_CHECKOUT,
+} from "./ci-non-rust-readers.mjs";
 import {
   CORE,
   PRODUCTS_PATH,
@@ -1225,6 +1248,7 @@ function parseArgs(argv) {
     changedPathsOnly: false,
     releaseEvidence: "",
     workspacePlanRequested: false,
+    failReaderReport: false,
     event: "push",
     baseLock: "",
     baseTree: "",
@@ -1283,6 +1307,10 @@ function parseArgs(argv) {
     } else if (arg === "--reuse-release-evidence") {
       args.releaseEvidence = argv[++i] ?? "";
       parseEvidenceArgument(args.releaseEvidence);
+    } else if (arg === "--fail-reader-report") {
+      // The self-test's: the report of the readers' states throws, and the
+      // plan must be the one it is without the report.
+      args.failReaderReport = true;
     } else if (arg === "--workspace-plan-requested") {
       args.workspacePlanRequested = true;
     } else if (arg === "--paths-from-stdin") {
@@ -1294,7 +1322,7 @@ function parseArgs(argv) {
       break;
     } else if (arg === "--help" || arg === "-h") {
       process.stdout.write(
-        "usage: ci-cargo-lanes.mjs [--base <rev> --head <rev>] [--max-shards N] [--workspace-shards N] [--closure-test-rows N] [--lib-row-runner LABEL] [--event pull_request|push|workflow_dispatch] [--base-lock FILE] [--base-tree DIR] [--reuse-release-evidence <commit>:<run id>:<attempt>] [--workspace-plan-requested] [--format json|github] [--paths-from-stdin] [--changed-paths-only] [--] [changed-path ...]\n",
+        "usage: ci-cargo-lanes.mjs [--base <rev> --head <rev>] [--max-shards N] [--workspace-shards N] [--closure-test-rows N] [--lib-row-runner LABEL] [--event pull_request|push|workflow_dispatch] [--base-lock FILE] [--base-tree DIR] [--reuse-release-evidence <commit>:<run id>:<attempt>] [--workspace-plan-requested] [--fail-reader-report] [--format json|github] [--paths-from-stdin] [--changed-paths-only] [--] [changed-path ...]\n",
       );
       process.exit(0);
     } else if (arg.startsWith("-")) {
@@ -1878,6 +1906,215 @@ export function compiledInDocKeys(entries, ownerOf) {
 // them on demand, no CI lane does.
 export const LIVE_ONLY_FEATURES = ["integration-real-tests", "openai-live-e2e"];
 
+// Which lane compiles a reader selection's target, as the report says it.
+// It is this plan's view, of this workflow's lanes: another workflow may
+// compile the same target (a product's own CI builds its test targets on a
+// pull request), and the report does not look there.
+export const BUILT_BY_A_READER_ROW = "a reader row of this plan";
+export const BUILT_BY_ANOTHER_LANE = "another lane of this plan";
+export const BUILT_ON_THE_PUSH = "this plan's push (left to it)";
+export const BUILT_BY_NO_LANE = "no lane of this workflow";
+// An example program without tests: no lane runs it, and the plan does not
+// know which lane compiles it.
+export const BUILT_NOT_KNOWN = "not known to this plan (an example program)";
+
+// The files of the rule itself: its fixtures hold ignored-run commands that
+// run nothing.
+const READER_STATE_RULE_FILES = [
+  "scripts/ci-cargo-lanes.mjs",
+  "scripts/ci-cargo-lanes-selftest.mjs",
+  "scripts/ci-non-rust-readers.mjs",
+  "scripts/ci-non-rust-readers-selftest.mjs",
+];
+
+// The tracked files that hold an ignored-run flag word, documentation, the
+// reader inventory and the rule's own files left out: the files a runner of
+// ignored tests could be in. Null when git cannot be asked, so that a
+// failed search is never read as "no runner".
+export function trackedIgnoredRunFiles() {
+  const found = spawnSync(
+    "git",
+    [
+      "grep",
+      "-l",
+      "-I",
+      "-E",
+      "-e",
+      "--ignored|--include-ignored|--run-ignored|run_ignored",
+      "--",
+      ".",
+      ":(exclude)*.md",
+      ":(exclude)*.mdx",
+      `:(exclude)${INVENTORY_PATH}`,
+      ...READER_STATE_RULE_FILES.map((path) => `:(exclude)${path}`),
+    ],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (found.status === 1) return [];
+  if (found.status !== 0) return null;
+  return found.stdout.split("\n").filter(Boolean);
+}
+
+// The report of the reader selections of a plan (the states are defined in
+// scripts/ci-non-rust-readers.mjs): each row the inventory names for the
+// changed paths, the lane that compiles its target, and what happens to the
+// tests it names, read from their sources: executed; ignored with no runner
+// found; ignored and selected by a script or lane table, with the file and
+// lines that show it (no run of that file is shown); or unproven. It
+// selects nothing and changes no row. A row of scope "package" (code every
+// test of the package reaches) is not judged test by test.
+export function readerStates({ notes, inventory, byName, readSource = null, runnerFiles = trackedIgnoredRunFiles }) {
+  const read =
+    readSource ??
+    ((path) => {
+      try {
+        return readFileSync(resolve(root, path), "utf8");
+      } catch {
+        return null;
+      }
+    });
+  // Library, binary and build-script code is reached by every test of its
+  // package: such rows carry one label for the package and are one row of
+  // the report.
+  const isWhole = (selection) => selection.scope === "package" || selection.target === "build" || selection.target.startsWith("build:");
+  const wholeRows = new Map();
+  const judged = [];
+  for (const { label, selection, built } of notes) {
+    if (isWhole(selection)) {
+      const seen = wholeRows.get(label);
+      if (seen) {
+        seen.row.reads = [...new Set([...seen.row.reads, ...selection.reads])].sort();
+        if (!seen.row.target.split(", ").includes(selection.target)) seen.row.target = `${seen.row.target}, ${selection.target}`;
+        if (seen.row.built !== built) seen.row.built = [...new Set([...seen.row.built.split("; "), built])].sort().join("; ");
+        continue;
+      }
+      const entry = { row: { label, package: selection.package, target: selection.target, reads: [...selection.reads], planned: true, built }, state: null, sources: [] };
+      wholeRows.set(label, entry);
+      judged.push(entry);
+      continue;
+    }
+    const row = { label, package: selection.package, target: selection.target, reads: selection.reads, planned: true, built };
+    const paths = new Set(
+      inventory.entries
+        .filter((entry) => entry.package === selection.package && entry.target === selection.target && selection.reads.includes(entry.path))
+        .flatMap((entry) => entry.sources),
+    );
+    const colon = selection.target.indexOf(":");
+    const kind = colon < 0 ? selection.target : selection.target.slice(0, colon);
+    const target = byName.get(selection.package)?.targets.find((candidate) => candidate.name === selection.target.slice(colon + 1) && candidate.kind.includes(kind));
+    if (kind === "test" && target?.src_path) paths.add(normalizePath(relative(root, target.src_path)));
+    const sources = [...paths].sort().flatMap((path) => {
+      const text = read(path);
+      return text === null ? [] : [{ path, text }];
+    });
+    judged.push({ row, state: readerTestState(selection.tests, sources), sources: sources.map((source) => source.path), features: selection.features ?? [] });
+  }
+  // The files a runner could be in are read once, and only when a row holds
+  // an ignored test.
+  const anyIgnored = judged.some(({ state }) => state?.judged && state.tests.some((test) => test.ignored === "always"));
+  const found = anyIgnored ? runnerFiles() : [];
+  const files = (found ?? []).flatMap((path) => {
+    const text = read(path);
+    return text === null ? [] : [{ path, text }];
+  });
+  return judged.map(({ row, state, sources, features }) => {
+    if (state === null) {
+      return {
+        ...row,
+        execution: row.built === BUILT_BY_NO_LANE ? "not executed" : "executed",
+        judged: false,
+        why: "library, binary or build-script code: every test of the package reaches it",
+      };
+    }
+    // A test's own sources saying how to run it are no runner.
+    const own = new Set(sources);
+    const searched = files.filter((file) => !own.has(file.path));
+    const evidenceOf = (name) => (found === null ? null : ignoredRunEvidence(name, searched));
+    const whole =
+      found === null || !state.judged || !state.tests.some((test) => test.ignored === "always")
+        ? { covering: [], unclear: [] }
+        : targetRunEvidence({ package: row.package, target: row.target, features }, searched);
+    const { execution: byTests, tests, ignored, ignored_tests: foundTests, unclear_runners: unclear, unknown } = readerExecution(state, evidenceOf, whole);
+    // An evidence file that is the row's own input (a fixture script the
+    // ignored test itself launches) is marked: the test and its evidence
+    // then name each other, and nothing else is shown to run either.
+    const isInput = (path) => row.reads.some((key) => key !== WHOLE_CHECKOUT && (key.endsWith("/") ? path.startsWith(key) : path === key));
+    const ignoredTests = foundTests.map((test) => ({
+      ...test,
+      evidence: test.evidence.map((item) => (isInput(item.path) ? { ...item, row_input: true } : item)),
+    }));
+    // A row no lane of this workflow builds (a live-provider reader)
+    // executes nothing here, whatever its tests say; what a script or lane
+    // table selects of its ignored tests is still reported. An example program the plan gives no
+    // row (the inventory names no test of it) is run by no lane: the tests
+    // its file may hold are not judged.
+    const execution =
+      row.built === BUILT_NOT_KNOWN
+        ? "not judged"
+        : row.built === BUILT_BY_NO_LANE && ["executed", "executed in part"].includes(byTests)
+          ? "not executed"
+          : byTests;
+    return {
+      ...row,
+      execution,
+      judged: state.judged,
+      tests,
+      ignored,
+      ...(ignoredTests.length > 0 ? { ignored_tests: ignoredTests } : {}),
+      ...(unclear.length > 0 ? { unclear_runners: unclear } : {}),
+      ...(unknown.length > 0 ? { unknown } : {}),
+    };
+  });
+}
+
+// A pull request names the reader rows it leaves to the push by what the
+// push does with them: a row whose every test is ignored is built there and
+// its tests are not run by the push, so it moves out of `reader_rows` (the
+// rows the push runs) into the list that says so. The labels are the same;
+// no row is added or dropped.
+export function nameLeftReadersByState(deferred, states) {
+  const executionOf = new Map(states.map((row) => [row.label, row.execution]));
+  const lists = { "ignored, not executed": [], "selected, run not shown": [], unproven: [] };
+  const run = [];
+  for (const label of deferred.reader_rows) (lists[executionOf.get(label)] ?? run).push(label);
+  deferred.reader_rows = run;
+  deferred.reader_rows_not_executed = lists["ignored, not executed"];
+  deferred.reader_rows_selected_elsewhere = lists["selected, run not shown"];
+  deferred.reader_rows_unproven = lists.unproven;
+}
+
+// The report of a plan, guarded: it runs inside the classification every
+// lane waits for, so a defect in it must never fail the plan. On any error
+// the plan is as it was without the report (`deferred` untouched: every
+// label it leaves to the push in the one list), and the report says
+// "report unavailable: <reason>" with every row unproven.
+export function readerReport({ notes, inventory, byName, deferred, states = readerStates }) {
+  try {
+    const rows = states({ notes, inventory, byName });
+    const copy = { reader_rows: [...deferred.reader_rows] };
+    nameLeftReadersByState(copy, rows);
+    Object.assign(deferred, copy);
+    return { rows, unavailable: null };
+  } catch (error) {
+    const unavailable = `report unavailable: ${String(error?.message ?? error).split("\n")[0].slice(0, 200)}`;
+    const seen = new Set();
+    const rows = notes
+      .filter(({ label }) => !seen.has(label) && seen.add(label))
+      .map(({ label, selection, built }) => ({
+        label,
+        package: selection.package,
+        target: selection.target,
+        reads: selection.reads,
+        planned: true,
+        built,
+        execution: "unproven",
+        judged: false,
+        why: unavailable,
+      }));
+    return { rows, unavailable };
+  }
+}
+
 // The reader rows of a plan (see the header): for each reader selection
 // (scripts/ci-non-rust-readers.mjs) the targets no other lane of the plan
 // runs, as one integration-lane row. A pull request leaves the readers that
@@ -1885,7 +2122,7 @@ export const LIVE_ONLY_FEATURES = ["integration-real-tests", "openai-live-e2e"];
 // integration lane waits for ci.yml's stagger job (the rest wave), so a
 // reader row, such as the whole-checkout one every push plans, never takes
 // a runner before the long rows.
-export function readerRows({ selections, result, byName, heavyChain, deferToPush, deferred, compiledInDocs, unified, canary = null }) {
+export function readerRows({ selections, result, byName, heavyChain, deferToPush, deferred, compiledInDocs, unified, canary = null, notes = [] }) {
   const mainUnit = result.main_unit_shards.length > 0;
   // The unit lane of this plan runs the package's lib and bins (default
   // features): a pull request's unit lane, a push's main unit lane (every
@@ -1911,6 +2148,10 @@ export function readerRows({ selections, result, byName, heavyChain, deferToPush
   const closureBuilds = (selection) => selection.features.every((feature) => unified.get(selection.package)?.has(feature));
   const notRun = [];
   const rows = [];
+  // What the plan does with each selection, for the report of the readers'
+  // states (readerStates): which lane compiles its target. It changes no
+  // row.
+  const note = (label, selection, built) => notes.push({ label, selection, built });
   for (const selection of selections) {
     // Documentation the package compiles in selects the package like its
     // code (see the header): its own lanes run it.
@@ -1934,15 +2175,20 @@ export function readerRows({ selections, result, byName, heavyChain, deferToPush
     // closure-tests rows run its package's test targets with the features
     // they build. A test target that needs other features gets a row there.
     if (selection.reads.every((key) => key === WHOLE_CHECKOUT || compiledInDocs.has(`${key}\0${selection.package}`))) {
-      if (deferToPush || kind !== "test" || closureBuilds(selection) || suiteRuns(selection.package, name, selection.features)) continue;
+      if (deferToPush || kind !== "test" || closureBuilds(selection) || suiteRuns(selection.package, name, selection.features)) {
+        note(label, selection, deferToPush ? BUILT_ON_THE_PUSH : BUILT_BY_ANOTHER_LANE);
+        continue;
+      }
     }
     if (selection.features.some((feature) => LIVE_ONLY_FEATURES.includes(feature))) {
       notRun.push(label);
+      note(label, selection, BUILT_BY_NO_LANE);
       continue;
     }
     const unitCovered = selection.features.length === 0 && unitRuns(selection.package);
     let targets;
     let testsDeferred = false;
+    let canariesLeft = false;
     let tests = selection.tests;
     if (whole) {
       // Its lib and bins run here (the unit lanes' targets: only the kinds
@@ -1972,6 +2218,7 @@ export function readerRows({ selections, result, byName, heavyChain, deferToPush
         const others = (tests ?? []).filter((test) => !test.startsWith(canary.prefix));
         if (tests === null || others.length < tests.length) {
           if (deferToPush) deferred.reader_rows.push(`${label} canaries`);
+          canariesLeft = deferToPush;
           tests = others;
           if (others.length === 0) targets = [];
         }
@@ -1985,10 +2232,19 @@ export function readerRows({ selections, result, byName, heavyChain, deferToPush
     }
     if (deferToPush && heavyChain.has(selection.package)) {
       if (targets.length > 0 || testsDeferred) deferred.reader_rows.push(label);
+      note(
+        label,
+        selection,
+        targets.length > 0 || testsDeferred || canariesLeft ? BUILT_ON_THE_PUSH : kind === "example" && !whole ? BUILT_NOT_KNOWN : BUILT_BY_ANOTHER_LANE,
+      );
       continue;
     }
     if (testsDeferred) deferred.reader_rows.push(`${label} test targets`);
-    if (targets.length === 0) continue;
+    if (targets.length === 0) {
+      note(label, selection, kind === "example" && !whole ? BUILT_NOT_KNOWN : testsDeferred || canariesLeft ? BUILT_ON_THE_PUSH : BUILT_BY_ANOTHER_LANE);
+      continue;
+    }
+    note(label, selection, BUILT_BY_A_READER_ROW);
     const filter = tests?.length ? ["-E", `test(/(^|::)(${tests.join("|")})$/)`] : [];
     rows.push({
       name: `reader ${label}`,
@@ -2743,11 +2999,16 @@ function plan(args) {
     governed_jsonl: false,
     mcp_confinement_positive: false,
     reader_rows: [],
+    reader_rows_not_executed: [],
+    reader_rows_selected_elsewhere: [],
+    reader_rows_unproven: [],
     example_web_wasm: false,
     downstream_type_check: [],
   };
   const downstreamRows = [];
   result.reader_not_run = [];
+  result.reader_states = [];
+  result.reader_states_unavailable = null;
 
   const archivedPackages = new Map(
     ARCHIVED_UNIT_LANES.map((lane) => {
@@ -3271,6 +3532,7 @@ function plan(args) {
     result.unit_shards = packWithinBudget(result.unit_packages, weights, args.maxShards, model);
   }
   result.test_scope = [...new Set([...result.closure, ...result.reader_packages])].sort();
+  const readerNotes = [];
   result.reader_rows = readerRows({
     selections: changed === null ? [] : readerSelectionsFor(changed, readerInventory, readerOptions),
     result,
@@ -3281,7 +3543,25 @@ function plan(args) {
     compiledInDocs,
     unified: laneFeatures,
     canary: canaryGroup(nextestText),
+    notes: readerNotes,
   });
+  // What happens to the readers' tests (the report; it selects nothing, and
+  // an error in it leaves the plan as it is).
+  const report = readerReport({
+    notes: readerNotes,
+    inventory: readerInventory,
+    byName,
+    deferred,
+    ...(args.failReaderReport
+      ? {
+          states: () => {
+            throw new Error("the report was made to fail (--fail-reader-report)");
+          },
+        }
+      : {}),
+  });
+  result.reader_states = report.rows;
+  result.reader_states_unavailable = report.unavailable;
   // A product's published-floor check runs when its own packages changed
   // (by path, by a scoped lock entry or by its build configuration), or
   // when an input of every floor check changed: the root manifest or lock
@@ -3656,6 +3936,23 @@ function deferredSummary(deferred) {
   if (deferred.feature_check_jobs > 0) parts.push(`${deferred.feature_check_jobs} feature-combination jobs`);
   if (deferred.integration_suites.length > 0) parts.push(`integration suites ${deferred.integration_suites.join(", ")}`);
   if (deferred.reader_rows.length > 0) parts.push(`reader rows ${deferred.reader_rows.join(", ")}`);
+  // Rows the push builds whose named tests are all marked ignore are said
+  // so, by what the search for a runner found (see reader_states for the
+  // tests and the evidence): "found", because the search reads tracked
+  // files by a textual rule and proves no absence.
+  if (deferred.reader_rows_not_executed?.length > 0) {
+    parts.push(
+      `reader rows it builds whose every named test is ignored and for which no runner asking for ignored tests was found ${deferred.reader_rows_not_executed.join(", ")}`,
+    );
+  }
+  if (deferred.reader_rows_selected_elsewhere?.length > 0) {
+    parts.push(
+      `reader rows whose ignored tests the reader lanes of this plan do not run, though a script or lane table selects them and its run is not shown ${deferred.reader_rows_selected_elsewhere.join(", ")}`,
+    );
+  }
+  if (deferred.reader_rows_unproven?.length > 0) {
+    parts.push(`reader rows it builds whose ignored tests have no runner shown ${deferred.reader_rows_unproven.join(", ")}`);
+  }
   if (deferred.unit_feature_suites.length > 0) parts.push(`feature suites ${deferred.unit_feature_suites.join(", ")}`);
   if (deferred.clippy_packages.length > 0) {
     parts.push(`the Clippy of ${deferred.clippy_packages.join(", ")} (${deferred.clippy_packages_reason})`);
@@ -3775,6 +4072,31 @@ function githubOutput(result) {
   const integrationRows = [...result.integration_suites, ...result.reader_rows];
   scalar("integration_count", String(integrationRows.length));
   scalar("reader_not_run", result.reader_not_run.join(" "));
+  // The readers whose tests are not simply executed, one compact line: the
+  // job log of the classification shows it on every event (a push has no
+  // "left to the push" notice to say it in). Each evidence place says when
+  // the flag and the name are paired only per file, when the file is the
+  // row's own input, and when it only asserts a runner's arguments. When
+  // the report failed, the line says so and names no row.
+  const place = (item) =>
+    `${item.path}:${item.flag_line},${item.selector_line}${item.pairing === "file" ? " (per file)" : ""}${item.row_input ? " (row input)" : ""}${item.asserted ? " (asserted)" : ""}`;
+  scalar(
+    "reader_states",
+    JSON.stringify(
+      result.reader_states_unavailable ??
+        (result.reader_states ?? [])
+          .filter((row) => row.execution !== "executed")
+          .map((row) => ({
+            row: row.label,
+            built: row.built,
+            tests: row.tests ?? 0,
+            ignored: row.ignored ?? 0,
+            execution: row.execution,
+            evidence: [...new Set((row.ignored_tests ?? []).flatMap((test) => test.evidence.map(place)))],
+            ...(row.unclear_runners?.length > 0 ? { unclear: row.unclear_runners.map((item) => `${item.path}:${item.flag_line}`) } : {}),
+          })),
+    ),
+  );
   scalar("integration_matrix", matrixOf(integrationRows));
   scalar("test_scope_count", String(result.test_scope.length));
   scalar("hook_binary_count", String(result.hook_coverage.hook_binaries));

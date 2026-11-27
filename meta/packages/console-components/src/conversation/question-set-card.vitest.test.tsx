@@ -106,9 +106,9 @@ describe("QuestionSetCard", () => {
   it("offers free text only where the agent allowed it, behind a last choice that reveals the field", () => {
     const { view } = show();
     const [region, start] = groups(view);
-    expect(within(region).queryByRole("radio", { name: "Something else" })).toBeNull();
+    expect(within(region).queryByRole("radio", { name: "Write my own reply" })).toBeNull();
     const radios = within(start).getAllByRole("radio");
-    expect(radios[radios.length - 1]).toBe(within(start).getByRole("radio", { name: "Something else" }));
+    expect(radios[radios.length - 1]).toBe(within(start).getByRole("radio", { name: "Write my own reply" }));
     expect(view.queryByRole("textbox")).toBeNull();
     fireEvent.click(radios[radios.length - 1]);
     expect(view.getByRole("textbox", { name: "Your answer to: When should it start?" })).toBeTruthy();
@@ -116,12 +116,34 @@ describe("QuestionSetCard", () => {
     expect(view.queryByRole("textbox")).toBeNull();
   });
 
+  it("sends the written reply without selecting a preset and keeps the actual text in the request", () => {
+    const set = questions();
+    const { view, onAnswer } = show({ set });
+    fireEvent.click(radio(view, "Write my own reply"));
+    const text = "  Wednesday, after review.\nKeep the café open.  ";
+    fireEvent.change(view.getByRole("textbox"), { target: { value: text } });
+    expect(send(view).disabled).toBe(false);
+    expect(radio(view, /^Europe/).checked).toBe(false);
+    expect(radio(view, "Now").checked).toBe(false);
+    expect(radio(view, "Tonight").checked).toBe(false);
+    fireEvent.click(send(view));
+    expect(onAnswer).toHaveBeenCalledExactlyOnceWith(PENDING_ID, {
+      "q-start": { kind: "free_text", text },
+    });
+    expect(questionSetAnswerParams(set, onAnswer.mock.calls[0][1])).toEqual({
+      pending_id: PENDING_ID,
+      decision: "approve",
+      presented_digest: DIGEST,
+      answers: [{ question_id: "q-start", answer: { kind: "free_text", text: text.trim() } }],
+    });
+  });
+
   it("sends once a question has an answer, and not while a selected free text is empty or too long", () => {
     const { view, onAnswer } = show();
     expect(send(view).disabled).toBe(true);
     fireEvent.click(radio(view, /^Europe/));
     expect(send(view).disabled).toBe(false);
-    fireEvent.click(radio(view, "Something else"));
+    fireEvent.click(radio(view, "Write my own reply"));
     expect(send(view).disabled).toBe(true);
     const field = view.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.change(field, { target: { value: "   " } });

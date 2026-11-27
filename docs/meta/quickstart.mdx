@@ -4,7 +4,7 @@ description: "Start a Meta application runtime with a matching gateway and SDK, 
 icon: "rocket"
 ---
 
-*Mirrored from Meerkat Meta main at [e95d0bc426af](https://github.com/lukacf/meerkat/commit/e95d0bc426af83b655928abe84871f5df5a7644d) on 2026-11-27; Meta version 0.9.19 at that commit.*
+*Mirrored from Meerkat Meta main at [9f2ac370a38a](https://github.com/lukacf/meerkat/commit/9f2ac370a38ab1b3db45cba1097776be59e704bc) on 2026-11-27; Meta version 0.9.19 at that commit.*
 
 This guide starts with the Meta application runtime. If you only need to run an
 agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
@@ -46,6 +46,9 @@ arm64 archives are published with the release, listed in `index.json` and
 [dependencies]
 meerkat-meta = "0.9.19"
 ```
+
+See the [native Google authentication findings for the inspected Meta 0.9.18 Linux x86-64 `meta_gateway` archive](https://docs.rkat.ai/guides/auth#native-google-authentication-in-the-meta-gateway-archive).
+The other Meta 0.9.18 gateway archives, including `rpc_gateway`, were not inspected.
 
 ## Bootstrap a runtime
 

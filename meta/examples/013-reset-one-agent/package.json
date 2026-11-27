@@ -1,0 +1,1 @@
+{"private":true,"type":"module","scripts":{"start":"node main.mjs"},"dependencies":{"@rkat/meta-sdk":"0.9.19"}}

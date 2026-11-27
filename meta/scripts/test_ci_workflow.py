@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -75,15 +76,13 @@ COMPILE_PATHS = {
         "meerkat-meta lib test, default features",
     ),
     "rust-extension-state-lib": (
-        "Extension-state lib tests",
-        f"./scripts/repo-cargo test -p meerkat-meta --features {_EXTENSION_STATE} --lib --timings "
-        "-- extension_ document_mcp_child_supply",
+        "Build the extension-state lib tests",
+        f"./scripts/repo-cargo test -p meerkat-meta --features {_EXTENSION_STATE} --lib --timings --no-run",
         f"meerkat-meta lib test, features {_EXTENSION_STATE}, filter extension_ document_mcp_child_supply",
     ),
     "rust-voice-lib": (
-        "Voice lib cases",
-        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings console_voice\n"
-        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration",
+        "Build the voice lib tests",
+        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings --no-run",
         "meerkat-meta lib test, features openai-live, filters console_voice and gateway_openai_live_registration",
     ),
     "console-backends": (
@@ -93,6 +92,26 @@ COMPILE_PATHS = {
         "meerkat-meta examples " + ", ".join(_BACKENDS) + ", default features",
     ),
 }
+# The two lib jobs whose build is a step of its own: the step that then runs
+# the tests on that build, and its whole `run` text.
+LIB_TEST_STEPS = {
+    "rust-extension-state-lib": (
+        "Extension-state lib tests",
+        f"./scripts/repo-cargo test -p meerkat-meta --features {_EXTENSION_STATE} --lib "
+        "-- extension_ document_mcp_child_supply",
+    ),
+    "rust-voice-lib": (
+        "Voice lib cases",
+        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib console_voice\n"
+        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration",
+    ),
+}
+# The one implementation of the 30-second resource readings and of the
+# runner's size print, and the compile steps that run their command under it.
+READINGS = "./scripts/ci-resource-readings.sh"
+READINGS_SCRIPT = MONOREPO / "scripts/ci-resource-readings.sh"
+WITH_READINGS = ("rust-unit-build", "rust-extension-state-lib", "rust-voice-lib")
+SIZE_PRINT = "Show the runner's size before the compile"
 MEASURE_BEFORE = "Compile statistics, before"
 MEASURE_AFTER = "Compile statistics and timing report, after"
 MEASURE_UPLOAD = "Retain the Cargo timing reports"
@@ -466,6 +485,9 @@ class CiWorkflowTests(unittest.TestCase):
                 if "repo-cargo" not in line:
                     continue
                 commands.append(line)
+                # A compile step may run its command under the resource
+                # readings script: the command is what follows the script.
+                line = line.removeprefix(f"{READINGS} ")
                 if line.startswith("./scripts/repo-cargo "):
                     self.assertEqual(step.get("working-directory"), ".", line)
                     packages = re.findall(r"(?:^|\s)-p\s+(\S+)", line)
@@ -474,7 +496,9 @@ class CiWorkflowTests(unittest.TestCase):
                 else:
                     self.assertRegex(line, r"^make (test-python|e2e-live) CARGO=\.\./scripts/repo-cargo$")
         self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
-        self.assertEqual(len(commands), 25, commands)
+        # Two more than before the lib jobs' builds became steps of their
+        # own: each of the two jobs gained one build command.
+        self.assertEqual(len(commands), 27, commands)
         self.assertNotIn("repo-cargo", INSTALLER_WORKFLOW.read_text())
 
     def test_the_no_workspace_rule_passes_only_the_archive_remap_flag(self):
@@ -1136,15 +1160,13 @@ class CiWorkflowTests(unittest.TestCase):
 
         # The build: one archive of the package's lib tests, through the root
         # wrapper, on Meta's stack (the step's environment reaches rustc too,
-        # as the legs' step did). It is the one command of the step's script;
-        # the rest is the resource sampler around it
-        # (test_the_unit_build_step_exits_with_its_archive_commands_status).
+        # as the legs' step did). It is the step's whole script, run under
+        # the resource readings script
+        # (test_the_resource_readings_script_exits_with_its_commands_status).
         compile_at, compile_step = named(build, "Build the lib test archive")
         self.assertEqual(compile_step["working-directory"], ".")
         self.assertEqual(compile_step["env"], {"RUST_MIN_STACK": stack})
-        self.assertEqual([line.strip() for line in compile_step["run"].splitlines()
-                          if "repo-cargo" in line or "nextest archive" in line],
-                         [COMPILE_PATHS["rust-unit-build"][1]])
+        self.assertEqual(compile_step["run"].strip(), f'{READINGS} {COMPILE_PATHS["rust-unit-build"][1]}')
         self.assertEqual(COMPILE_PATHS["rust-unit-build"][1],
                          "./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings "
                          f'--archive-file "${{RUNNER_TEMP}}/{archive}"')
@@ -1285,42 +1307,57 @@ class CiWorkflowTests(unittest.TestCase):
                 if said:
                     self.assertIn(said, errors[0])
 
-    def test_the_unit_build_step_exits_with_its_archive_commands_status(self):
-        """The "Build the lib test archive" step of rust-unit-build prints
-        resource readings from a background sampler while its one command,
-        the compile of the lib test harness into the archive, runs (the
-        rust-unit legs compile nothing and hold no sampler). The readings
-        must never decide the step: errexit is off from the first line, the
-        sampler is one subshell whose status nobody reads, the archive
-        command stands on a line of its own with nothing appended, and the
-        step ends with that command's exit status. Only the sampler holds a
-        trap, so a signal ends the step's shell as it ends a one-line step.
-        A reading holds numbers and fixed words only: a process name is
-        compared with a fixed list and never printed, and no line holds
-        arguments, environment values or paths. The step's script
-        is also run here, the way the runner starts a step that names no
-        shell (`bash -e`), with a stand-in for the repository's wrapper."""
-        job = load(CI_WORKFLOW)["jobs"]["rust-unit-build"]
-        step = next(step for step in steps_of(job) if step.get("name") == "Build the lib test archive")
-        self.assertNotIn("shell", step)
-        self.assertNotIn("continue-on-error", step)
-        self.assertNotIn("if", step)
-        lines = [line.strip() for line in step["run"].splitlines() if line.strip()]
-        command = next(line for line in lines if line.startswith("./scripts/repo-cargo "))
-        self.assertEqual(command, COMPILE_PATHS["rust-unit-build"][1])
-        self.assertEqual([line for line in lines if "repo-cargo" in line or "nextest archive" in line], [command])
-        begin, end, at = lines.index("("), lines.index(") 2>/dev/null &"), lines.index(command)
-        self.assertEqual(lines[:begin + 1], ["set +e", "("])
-        self.assertEqual(lines[end:at], [") 2>/dev/null &", "sampler=$!"])
-        self.assertEqual(lines[at + 1:], [
+    def test_the_resource_readings_script_exits_with_its_commands_status(self):
+        """scripts/ci-resource-readings.sh is the one implementation of the
+        30-second resource readings: Meta CI's unit build and the build steps
+        of the extension-state and voice lib jobs run their one command under
+        it, and each step so starts a sampler of its own. The readings must
+        never decide the step: errexit is off before the sampler starts, the
+        sampler is one subshell whose status nobody reads, the command
+        stands on a line of its own with nothing appended, and the script
+        ends with that command's exit status. Only the sampler holds a
+        trap, so a signal ends the script's shell as it ends a one-line
+        step. A reading holds numbers and fixed words only: a process name
+        is compared with a fixed list and never printed, and no line holds
+        arguments, environment values or paths. With `--size` the script
+        prints the runner's size once, the lines the swap step prints first,
+        and adds no swap. The steps' scripts are also run here, the way the
+        runner starts a step that names no shell (`bash -e`), with a
+        stand-in for the repository's wrapper."""
+        self.assertTrue(os.access(READINGS_SCRIPT, os.X_OK), "the script is executable")
+        source = READINGS_SCRIPT.read_text()
+        self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
+        self.assertNotRegex(source, r"[^\x00-\x7f]")
+        lines = [line.strip() for line in source.splitlines()[1:] if line.strip() and not line.strip().startswith("#")]
+        head, frame = lines[:lines.index("set +e")], lines[lines.index("set +e"):]
+        # Before the sampler: the size print, and a refusal of anything that
+        # is neither a command nor `--size`.
+        self.assertEqual(head, [
+            'if [[ "$#" -eq 1 && "$1" == "--size" ]]; then',
+            "show_resources() {", "nproc", "free -m", "if [[ -d /mnt ]]; then", "df -h / /mnt", "else", "df -h /", "fi",
+            "swapon --show || true", "}", "show_resources", "exit", "fi",
+            'if [[ "$#" -eq 0 || "$1" == -* ]]; then',
+            'echo "usage: ci-resource-readings.sh COMMAND [ARGUMENT...] | --size" >&2', "exit 2", "fi",
+        ])
+        # The size print is the one the unit build's swap step prints first.
+        size = head[head.index("show_resources() {"):head.index("}") + 1]
+        (swap,) = [step for step in steps_of(load(CI_WORKFLOW)["jobs"]["rust-unit-build"])
+                   if step.get("name") == SWAP_PREFLIGHT]
+        printed = [line.strip() for line in swap["run"].splitlines() if line.strip()]
+        at = printed.index("show_resources() {")
+        self.assertEqual(printed[at:at + len(size)], size)
+        begin, end, at = frame.index("("), frame.index(") 2>/dev/null &"), frame.index('"$@"')
+        self.assertEqual(frame[:begin + 1], ["set +e", "("])
+        self.assertEqual(frame[end:at], [") 2>/dev/null &", "sampler=$!"])
+        self.assertEqual(frame[at + 1:], [
             "status=$?",
             'kill "${sampler}" 2>/dev/null',
             'pkill -P "${sampler}" 2>/dev/null',
             'wait "${sampler}" 2>/dev/null',
             'exit "${status}"',
         ])
-        sampler = lines[begin + 1:end]
-        outside = lines[:begin] + lines[end:]
+        sampler = frame[begin + 1:end]
+        outside = head + frame[:begin] + frame[end:]
         self.assertFalse([line for line in outside if "trap" in line or "exec" in line], "only the sampler traps")
         self.assertEqual(sum("status" in line for line in outside), 2, "the status is set once and used once")
         for line in sampler:
@@ -1399,66 +1436,114 @@ class CiWorkflowTests(unittest.TestCase):
             r"swap (\d+ MiB used of \d+ MiB|unavailable); memory pressure full avg10 ([0-9.]+|unavailable); "
             rf"root filesystem {free}(; target filesystem {free})?; resident: (unavailable|compiler \d+ MiB, "
             r"linker \d+ MiB, compile cache \d+ MiB, build tool \d+ MiB, test runner \d+ MiB, other \d+ MiB)$")
-        cases = (
-            ("the command passes", 0, os.environ.get("PATH", ""), None),
-            ("the command fails", 1, os.environ.get("PATH", ""), None),
-            ("the build fails", 101, os.environ.get("PATH", ""), None),
-            ("no tool of the sampler exists", 3, "/nonexistent", None),
-            ("the step's output cannot be written", 4, os.environ.get("PATH", ""), "/dev/full"),
-        )
-        for name, status, path, output in cases:
-            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                wrapper = Path(tmp) / "scripts/repo-cargo"
-                wrapper.parent.mkdir()
-                wrapper.write_text(program)
-                wrapper.chmod(0o755)
-                script = Path(tmp) / "step.sh"
-                script.write_text(step["run"])
-                arguments = Path(tmp) / "arguments"
-                runner_temp = Path(tmp) / "runner-temp"
-                env = {"PATH": path, "RUNNER_TEMP": str(runner_temp), "CARGO_TARGET_DIR": str(Path(tmp) / "target"),
-                       "STAND_IN_ARGUMENTS": str(arguments), "STAND_IN_SECONDS": "2", "STAND_IN_STATUS": str(status)}
-                sink = open(output, "w") if output else None
-                try:
-                    result = subprocess.run([shutil.which("bash"), "-e", str(script)], cwd=tmp, env=env, text=True,
-                                            timeout=60, stdout=sink or subprocess.PIPE, stderr=subprocess.PIPE)
-                finally:
-                    if sink:
-                        sink.close()
-                self.assertEqual(result.returncode, status, result.stderr)
-                self.assertEqual(arguments.read_text().split("\n"),
-                                 ["nextest", "archive", "-p", "meerkat-meta", "--lib", "--timings", "--archive-file",
-                                  f"{runner_temp}/nextest-meta-unit.tar.zst"])
-                if output is None:
-                    readings = result.stdout.splitlines()
-                    self.assertEqual(len(readings), 1, result.stdout)
-                    self.assertRegex(readings[0], reading)
-                    self.assertEqual(result.stderr, "", "the sampler writes nothing to the step's error output")
 
-        # The step's shell ended alone, as by a signal sent to it only: the
-        # shell ends by that signal, as a one-line step's does, and the
-        # sampler, which was not signalled, is gone about a second later.
+        def staged(tmp):
+            """A checkout's scripts folder with the readings script and a
+            stand-in for the wrapper, and a path that holds bash alone."""
+            scripts = Path(tmp) / "scripts"
+            scripts.mkdir()
+            (scripts / "repo-cargo").write_text(program)
+            (scripts / "repo-cargo").chmod(0o755)
+            shutil.copy(READINGS_SCRIPT, scripts / READINGS_SCRIPT.name)
+            (scripts / READINGS_SCRIPT.name).chmod(0o755)
+            only_bash = Path(tmp) / "only-bash"
+            only_bash.mkdir()
+            (only_bash / "bash").symlink_to(shutil.which("bash"))
+            return str(only_bash)
+
+        workflow = load(CI_WORKFLOW)
+        for job_name in WITH_READINGS:
+            compile_name, command, _ = COMPILE_PATHS[job_name]
+            (step,) = [step for step in steps_of(workflow["jobs"][job_name]) if step.get("name") == compile_name]
+            for key in ("shell", "continue-on-error", "if"):
+                self.assertNotIn(key, step)
+            self.assertEqual(step["run"].strip(), f"{READINGS} {command}")
+            cases = (
+                ("the command passes", 0, os.environ.get("PATH", ""), None),
+                ("the command fails", 1, os.environ.get("PATH", ""), None),
+                ("the build fails", 101, os.environ.get("PATH", ""), None),
+                ("no tool of the sampler exists", 3, None, None),
+                ("the step's output cannot be written", 4, os.environ.get("PATH", ""), "/dev/full"),
+            )
+            for name, status, path, output in cases:
+                with self.subTest(job=job_name, case=name), tempfile.TemporaryDirectory() as tmp:
+                    only_bash = staged(tmp)
+                    script = Path(tmp) / "step.sh"
+                    script.write_text(step["run"])
+                    arguments = Path(tmp) / "arguments"
+                    runner_temp = Path(tmp) / "runner-temp"
+                    env = {"PATH": only_bash if path is None else path, "RUNNER_TEMP": str(runner_temp),
+                           "CARGO_TARGET_DIR": str(Path(tmp) / "target"), "STAND_IN_ARGUMENTS": str(arguments),
+                           "STAND_IN_SECONDS": "2", "STAND_IN_STATUS": str(status)}
+                    sink = open(output, "w") if output else None
+                    try:
+                        result = subprocess.run([shutil.which("bash"), "-e", str(script)], cwd=tmp, env=env, text=True,
+                                                timeout=60, stdout=sink or subprocess.PIPE, stderr=subprocess.PIPE)
+                    finally:
+                        if sink:
+                            sink.close()
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(arguments.read_text().split("\n"),
+                                     shlex.split(command.replace("${RUNNER_TEMP}", str(runner_temp)))[1:])
+                    if output is None:
+                        readings = result.stdout.splitlines()
+                        self.assertEqual(len(readings), 1, result.stdout)
+                        self.assertRegex(readings[0], reading)
+                        self.assertEqual(result.stderr, "", "the sampler writes nothing to the step's error output")
+
+        # Neither a command nor `--size`: refused, and nothing runs.
+        for arguments in ([], ["--sizes"], ["--size", "more"], ["-x", "true"]):
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as tmp:
+                staged(tmp)
+                result = subprocess.run([str(Path(tmp) / "scripts" / READINGS_SCRIPT.name), *arguments], cwd=tmp,
+                                        text=True, capture_output=True, timeout=60)
+                self.assertEqual((result.returncode, result.stdout), (2, ""))
+                self.assertIn("usage: ci-resource-readings.sh COMMAND", result.stderr)
+        # `--size` prints with the four commands alone, in order, and takes
+        # their status; it reads no file and starts no sampler.
+        with tempfile.TemporaryDirectory() as tmp:
+            staged(tmp)
+            tools = Path(tmp) / "tools"
+            tools.mkdir()
+            for tool in ("nproc", "free", "df", "swapon"):
+                (tools / tool).write_text(f"#!{shutil.which('bash')}\necho \"{tool} $*\"\n")
+                (tools / tool).chmod(0o755)
+            (tools / "bash").symlink_to(shutil.which("bash"))
+            result = subprocess.run([str(Path(tmp) / "scripts" / READINGS_SCRIPT.name), "--size"], cwd=tmp, text=True,
+                                    capture_output=True, timeout=60, env={"PATH": str(tools)})
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+            printed = result.stdout.splitlines()
+            self.assertEqual(printed[:2] + printed[-1:], ["nproc ", "free -m", "swapon --show"])
+            self.assertIn(printed[2], ("df -h / /mnt", "df -h /"))
+            self.assertEqual(len(printed), 4)
+
+        # The script's shell ended alone, as by a signal sent to it only: the
+        # shell ends by that signal, as a one-line step's command does, and
+        # the sampler, which was not signalled, is gone about a second later.
         if not os.path.exists("/proc/self/stat"):
             return
+        compile_name, command, _ = COMPILE_PATHS["rust-unit-build"]
+        (step,) = [step for step in steps_of(workflow["jobs"]["rust-unit-build"]) if step.get("name") == compile_name]
         with tempfile.TemporaryDirectory() as tmp:
-            wrapper = Path(tmp) / "scripts/repo-cargo"
-            wrapper.parent.mkdir()
-            wrapper.write_text(program)
-            wrapper.chmod(0o755)
+            staged(tmp)
             script = Path(tmp) / "step.sh"
             script.write_text(step["run"])
             env = {"PATH": os.environ.get("PATH", ""), "RUNNER_TEMP": str(Path(tmp) / "runner-temp"),
                    "CARGO_TARGET_DIR": str(Path(tmp) / "target"),
                    "STAND_IN_ARGUMENTS": str(Path(tmp) / "arguments"), "STAND_IN_SECONDS": "30", "STAND_IN_STATUS": "0"}
+            marker = str(Path(tmp) / "scripts" / READINGS_SCRIPT.name).encode()
 
-            def of_the_step():
+            def of_the_script():
+                """(pid, parent) of the script's shell and of its sampler."""
                 found = []
                 for entry in os.listdir("/proc"):
                     if entry.isdigit():
                         try:
-                            if str(script).encode() in Path(f"/proc/{entry}/cmdline").read_bytes():
-                                found.append(int(entry))
-                        except OSError:
+                            command_line = Path(f"/proc/{entry}/cmdline").read_bytes()
+                            if marker in command_line.replace(b"./scripts/", str(Path(tmp) / "scripts").encode() + b"/"):
+                                parent = int(Path(f"/proc/{entry}/stat").read_text().rsplit(")", 1)[1].split()[1])
+                                found.append((int(entry), parent))
+                        except (OSError, ValueError, IndexError):
                             pass
                 return found
 
@@ -1466,13 +1551,15 @@ class CiWorkflowTests(unittest.TestCase):
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
             try:
                 self.assertRegex(shell.stdout.readline().rstrip("\n"), reading)
-                self.assertGreaterEqual(len(of_the_step()), 2, "the step's shell and its sampler")
-                shell.send_signal(signal.SIGTERM)
-                self.assertEqual(shell.wait(timeout=10), -signal.SIGTERM)
+                running = of_the_script()
+                self.assertGreaterEqual(len(running), 2, "the script's shell and its sampler")
+                (own,) = [pid for pid, parent in running if parent == shell.pid]
+                os.kill(own, signal.SIGTERM)
+                self.assertEqual(shell.wait(timeout=10), 128 + signal.SIGTERM)
                 deadline = time.monotonic() + 3
-                while of_the_step() and time.monotonic() < deadline:
+                while of_the_script() and time.monotonic() < deadline:
                     time.sleep(0.05)
-                self.assertEqual(of_the_step(), [], "the sampler left with its parent")
+                self.assertEqual(of_the_script(), [], "the sampler left with its parent")
             finally:
                 try:
                     os.killpg(shell.pid, signal.SIGKILL)
@@ -1480,6 +1567,57 @@ class CiWorkflowTests(unittest.TestCase):
                     pass
                 shell.stdout.close()
                 shell.wait()
+
+    def test_the_lib_jobs_build_in_a_step_of_their_own_and_then_only_run(self):
+        """The extension-state and voice lib jobs compiled and ran their
+        tests in one step: a runner lost in such a step leaves one step
+        record and no word on whether the compile had ended. The compile is
+        now a step of its own: the job's own command with `--no-run` and
+        Cargo's `--timings`, the same package, features and stack, run under
+        the resource readings script. The test step after it runs the same
+        command without `--timings` and with its filters, so that it finds
+        the build fresh and compiles nothing again. Before the compile one
+        step prints the runner's size; it adds no swap. Nothing else of the
+        jobs changes: the runner, the limit, the condition and the other
+        steps."""
+        workflow = load(CI_WORKFLOW)
+        stack = "16777216"
+        for name, (test_name, tests) in LIB_TEST_STEPS.items():
+            with self.subTest(job=name):
+                job = workflow["jobs"][name]
+                self.assertEqual((job["runs-on"], job["timeout-minutes"]), ("ubuntu-24.04", 90))
+                self.assertNotIn("continue-on-error", job)
+                steps = steps_of(job)
+                names = [step.get("name") for step in steps]
+                build_name, build, _ = COMPILE_PATHS[name]
+                at = names.index(build_name)
+                self.assertEqual(names[at - 2:at + 3], [SIZE_PRINT, MEASURE_BEFORE, build_name, MEASURE_AFTER, test_name])
+                size, compile_step, test_step = steps[at - 2], steps[at], steps[at + 2]
+                self.assertEqual(size, {"name": SIZE_PRINT, "continue-on-error": True, "working-directory": ".",
+                                        "run": f"{READINGS} --size"})
+                for step in (compile_step, test_step):
+                    self.assertEqual(sorted(step), ["env", "name", "run", "working-directory"])
+                    self.assertEqual(step["working-directory"], ".")
+                    self.assertEqual(step["env"], {"RUST_MIN_STACK": stack})
+                self.assertEqual(compile_step["run"].strip(), f"{READINGS} {build}")
+                self.assertEqual(test_step["run"].strip(), tests)
+                # The same selection and features in the build and in every
+                # test command: what follows them is `--timings --no-run`
+                # for the build and the test's filter for a test.
+                selection = build.removesuffix(" --timings --no-run")
+                self.assertNotEqual(selection, build)
+                self.assertRegex(selection, r"^\./scripts/repo-cargo test -p meerkat-meta --features [a-z,-]+ --lib$")
+                for line in tests.splitlines():
+                    self.assertTrue(line.startswith(selection + " "), line)
+                    self.assertNotIn("--timings", line)
+                    self.assertNotIn("--no-run", line)
+                    self.assertRegex(line.removeprefix(selection + " "), r"^(-- )?[a-z_]+( [a-z_]+)*$")
+                self.assertEqual(sum(line.count("--no-run") for _, step, line in run_lines(workflow)
+                                     if step is compile_step), 1)
+                # No swap, and no build-job or thread setting, in these jobs.
+                for step in steps:
+                    self.assertIsNone(re.search(r"swapon -|mkswap|fallocate|CARGO_BUILD_JOBS|--test-threads|RUST_TEST_THREADS",
+                                                str(step.get("run") or "") + str(step.get("env") or "")), step.get("name"))
 
     def test_the_unit_build_adds_swap_before_its_compile(self):
         """rust-unit-build compiles the lib test harness once for the whole
@@ -1668,14 +1806,13 @@ class CiWorkflowTests(unittest.TestCase):
         """The four jobs that compile meerkat-meta's long targets (the unit
         build, the extension-state lib, the voice lib and the console
         backends) are measured without touching what they do. The compile
-        step keeps exactly its commands, with Cargo's `--timings` on the
-        compiling one: no suffix, pipe, wrapper, condition or
-        continue-on-error, so its exit stays the commands' own. The unit
-        build's step alone holds more than its command: the resource sampler
-        around it, which leaves the command on a line of its own and the
-        step's exit that command's
-        (test_the_unit_build_step_exits_with_its_archive_commands_status).
-        The compiler
+        step keeps exactly its command, with Cargo's `--timings` on it: no
+        suffix, pipe, condition or continue-on-error, so its exit stays the
+        command's own. The unit build and the two lib builds run that
+        command under the resource readings script, which prints readings
+        and exits with the command's status
+        (test_the_resource_readings_script_exits_with_its_commands_status);
+        the console backends' build runs bare. The compiler
         cache's statistics are read in a step directly before and a step
         directly after it, the same bytes in the four jobs, and the timing
         reports are uploaded by the job's last step. Each added step carries
@@ -1696,12 +1833,8 @@ class CiWorkflowTests(unittest.TestCase):
                 at = names.index(compile_name)
                 compile_step = steps[at]
                 script = compile_step["run"].strip()
-                if name == "rust-unit-build":
-                    # The sampler's lines hold no Cargo command; the one
-                    # line that does is compared, as the whole script is in
-                    # the other three jobs.
-                    script = "\n".join(line.strip() for line in script.splitlines() if "repo-cargo" in line)
-                self.assertEqual(script, command)
+                self.assertEqual(script, f"{READINGS} {command}" if name in WITH_READINGS else command)
+                self.assertEqual(len(command.splitlines()), 1)
                 for key in ("continue-on-error", "if", "shell"):
                     self.assertNotIn(key, compile_step)
                 for line in command.splitlines():

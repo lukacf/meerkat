@@ -323,6 +323,7 @@ MONOREPO_JOB_FILES = frozenset({
     "scripts/repo-cargo",
     "scripts/ci-pin-rust-toolchain-env",
     "scripts/ci-release-asset-download",
+    "scripts/ci-resource-readings.sh",
     ".github/actions/setup-rust-ci/action.yml",
     ".github/actions/setup-sccache-ci/action.yml",
     ".github/actions/setup-mold-ci/action.yml",

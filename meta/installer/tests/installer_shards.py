@@ -12,16 +12,36 @@ a collected file no plan can place, fails every shard: no shard runs a suite
 that silently lost a file. Because each shard plans on its own, the backend
 job then checks the shards' run lists together (verify).
 
+A run can have more than one attempt: a rerun of some jobs runs those jobs
+again and leaves the others as they were. A shard that is not rerun keeps the
+plan and the toolchain record of the attempt it ran in, under that attempt's
+artifact names, and the newer attempt's job list repeats its result under the
+newer attempt's number, so neither a name pattern for one attempt nor the job
+list says where a shard's files are. Each shard therefore writes its own
+record beside its run list (installer-shard-identity.json: the run, the
+attempt, the tested commit, the shard, and the collection the plan was
+computed from) and again beside its toolchain record, which it writes only
+after its tests passed. The backend job collects the plans and records of
+every attempt of its run and takes, for each shard, the newest execution by
+those records. It refuses plans that are not of its run, of one tested commit
+and of one collection, a shard without a plan, and a taken plan whose own
+toolchain record is missing.
+
 Usage: installer_shards.py SHARD COUNT FILES_OUT writes the test files this
-shard runs to FILES_OUT. installer_shards.py verify COUNT PLANS fails unless
-the COUNT shards' run lists, one folder each under PLANS, ran every installer
-test file once. installer_shards.py record JUNIT... rewrites
-installer_shard_seconds.json from a complete run's junit files.
+shard runs to FILES_OUT and its record beside it. installer_shards.py verify
+COUNT PLANS fails unless the newest run lists of the COUNT shards, one folder
+per execution under PLANS, ran every installer test file once.
+installer_shards.py toolchain COUNT PLANS RECORDS prints the one toolchain the
+executions taken from PLANS recorded, one folder per execution under RECORDS.
+installer_shards.py record JUNIT... rewrites installer_shard_seconds.json from
+a complete run's junit files.
 """
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -32,6 +52,13 @@ INSTALLER = TESTS.parent
 SECONDS = TESTS / "installer_shard_seconds.json"
 COLLECTED = re.compile(r"tests/(test_[A-Za-z0-9_]+\.py): ([0-9]+)")
 COLLECTED_FILE = re.compile(r"\S+\.py: [0-9]+")
+LISTING = "installer-shard-files.txt"
+IDENTITY = "installer-shard-identity.json"
+TOOLCHAIN = "installer-toolchain.json"
+# What one suite shares: the run, the commit it tested, the collection its
+# plan was computed from. With the environment variable that names this run's.
+SUITE = (("run_id", "run id", "GITHUB_RUN_ID"), ("commit", "tested commit", "GITHUB_SHA"),
+         ("collection", "collection", None))
 
 
 def test_files():
@@ -108,18 +135,86 @@ def record(junit_files, path=SECONDS):
     path.write_text(json.dumps({name: round(value, 1) for name, value in sorted(seconds.items())}, indent=1) + "\n")
 
 
-def verify(shards, plans, expected_files=None):
-    """Fail unless the shards' run lists ran every test file once."""
-    expected_files = tracked_test_files() if expected_files is None else expected_files
-    folders = sorted(path for path in Path(plans).iterdir() if path.is_dir())
-    problems = [] if len(folders) == shards else [f"{len(folders)} shard plans instead of {shards}"]
-    ran = Counter()
-    listing = "installer-shard-files.txt"
-    for folder in folders:
-        if not (folder / listing).is_file():
-            problems.append(f"{folder.name} has no {listing}")
+def identity(shard, shards, counts, environ=None):
+    """This shard execution's own record: where it ran and what it planned from."""
+    environ = os.environ if environ is None else environ
+    collected = "".join(f"{name} {items}\n" for name, items in sorted(counts.items()))
+    return {"run_id": environ.get("GITHUB_RUN_ID") or "local",
+            "run_attempt": int(environ.get("GITHUB_RUN_ATTEMPT") or 1),
+            "commit": environ.get("GITHUB_SHA") or "local",
+            "shard": shard, "shards": shards,
+            "collection": hashlib.sha256(collected.encode()).hexdigest()}
+
+
+def read_identity(folder):
+    """A folder's record, or why it has none that can be used."""
+    path = folder / IDENTITY
+    if not path.is_file():
+        return None, f"{folder.name} has no {IDENTITY}"
+    try:
+        value = json.loads(path.read_text())
+    except ValueError:
+        value = None
+    if not (isinstance(value, dict)
+            and set(value) == {"run_id", "run_attempt", "commit", "shard", "shards", "collection"}
+            and all(type(value[key]) is int for key in ("run_attempt", "shard", "shards"))
+            and all(isinstance(value[key], str) and value[key] for key in ("run_id", "commit", "collection"))):
+        return None, f"{folder.name} has an unreadable {IDENTITY}"
+    return value, None
+
+
+def select(shards, plans, environ=None):
+    """Each shard's newest plan under PLANS, the plans it supersedes, and
+    what stops the newest ones from being one suite of this run."""
+    environ = os.environ if environ is None else environ
+    problems, newest, superseded = [], {}, []
+    for folder in sorted(path for path in Path(plans).iterdir() if path.is_dir()):
+        value, problem = read_identity(folder)
+        if problem is None and folder.name != f"installer-shard-plan-{value['shard']}-{value['run_attempt']}":
+            problem = f"{folder.name} says it is shard {value['shard']} of attempt {value['run_attempt']}"
+        if problem is None and not (value["shards"] == shards and 0 <= value["shard"] < shards):
+            problem = f"{folder.name} is shard {value['shard']} of {value['shards']}, not one of {shards}"
+        if problem is not None:
+            problems.append(problem)
             continue
-        ran.update(line.removeprefix("installer/tests/") for line in (folder / listing).read_text().splitlines())
+        held = newest.get(value["shard"])
+        if held is not None and held[1]["run_attempt"] > value["run_attempt"]:
+            superseded.append(folder.name)
+            continue
+        if held is not None:
+            superseded.append(held[0].name)
+        newest[value["shard"]] = (folder, value)
+    chosen = [newest[shard] for shard in sorted(newest)]
+    if len(chosen) != shards:
+        missing = ", ".join(str(shard) for shard in range(shards) if shard not in newest)
+        problems.insert(0, f"{len(chosen)} shard plans instead of {shards}")
+        problems.insert(1, f"no plan of shard {missing}")
+    for field, label, variable in SUITE:
+        said = {}
+        for folder, value in chosen:
+            said.setdefault(value[field], []).append(folder.name)
+        if len(said) > 1:
+            most = max(said, key=lambda value: (len(said[value]), value))
+            others = "; ".join(f"{', '.join(names)} has {value[:12]}" for value, names in sorted(said.items())
+                               if value != most)
+            problems.append(f"plans of more than one {label}: {others}; the other {len(said[most])} have {most[:12]}")
+        here = environ.get(variable) if variable else None
+        strangers = [folder.name for folder, value in chosen if here and value[field] != here]
+        if strangers:
+            problems.append(f"not this run's {label} {here[:12]}: {', '.join(strangers)}")
+    return chosen, sorted(superseded), problems
+
+
+def verify(shards, plans, expected_files=None, environ=None):
+    """Fail unless the shards' newest run lists ran every test file once."""
+    expected_files = tracked_test_files() if expected_files is None else expected_files
+    chosen, superseded, problems = select(shards, plans, environ)
+    ran = Counter()
+    for folder, _ in chosen:
+        if not (folder / LISTING).is_file():
+            problems.append(f"{folder.name} has no {LISTING}")
+            continue
+        ran.update(line.removeprefix("installer/tests/") for line in (folder / LISTING).read_text().splitlines())
     for kind, names in (("ran nowhere", sorted(set(expected_files) - set(ran))),
                         ("ran more than once", sorted(name for name, count in ran.items() if count > 1)),
                         ("ran but is not expected", sorted(set(ran) - set(expected_files)))):
@@ -127,7 +222,44 @@ def verify(shards, plans, expected_files=None):
             problems.append(f"{kind}: {', '.join(names)}")
     if problems:
         raise SystemExit("The shards did not run the suite exactly once. " + "; ".join(problems))
-    print(f"{len(folders)} shards ran {len(ran)} test files once.")
+    attempts = {}
+    for _, value in chosen:
+        attempts.setdefault(value["run_attempt"], []).append(str(value["shard"]))
+    taken = "; ".join(f"attempt {attempt}: shard{'s' if len(mine) > 1 else ''} {', '.join(mine)}"
+                      for attempt, mine in sorted(attempts.items()))
+    print(f"{len(chosen)} shards ran {len(ran)} test files once. Plans taken: {taken}."
+          + (f" Not counted, superseded: {', '.join(superseded)}." if superseded else ""))
+
+
+def toolchain(shards, plans, records, environ=None):
+    """Print the one toolchain the executions taken from PLANS recorded.
+
+    A shard records its toolchain after its tests passed, with the record of
+    the execution that planned. The record taken for a shard is the one that
+    carries the taken plan's own record; an older record of the shard is not
+    taken in its place."""
+    chosen, _, problems = select(shards, plans, environ)
+    if problems:
+        raise SystemExit("The shards' plans are not one suite of this run. " + "; ".join(problems))
+    held = {}
+    for folder in sorted(path for path in Path(records).iterdir() if path.is_dir()):
+        value, problem = read_identity(folder)
+        if problem is None and (folder / TOOLCHAIN).is_file():
+            held.setdefault(json.dumps(value, sort_keys=True), []).append(folder / TOOLCHAIN)
+    values, missing = [], []
+    for _, value in chosen:
+        mine = held.get(json.dumps(value, sort_keys=True), [])
+        if len(mine) == 1:
+            values.append(mine[0].read_text())
+        else:
+            missing.append(f"shard {value['shard']} (attempt {value['run_attempt']})")
+    if missing:
+        raise SystemExit(f"No one toolchain record of the execution that planned: {', '.join(missing)}. "
+                         "A shard records its toolchain only after its tests passed.")
+    if len(set(values)) != 1:
+        raise SystemExit(f"Expected {shards} identical shard toolchains, found {len(values)} records of "
+                         f"{len(set(values))} kinds.")
+    print(values[0], end="")
 
 
 def main(argv):
@@ -135,13 +267,17 @@ def main(argv):
         return record(argv[1:])
     if argv[:1] == ["verify"] and len(argv) == 3:
         return verify(int(argv[1]), argv[2])
+    if argv[:1] == ["toolchain"] and len(argv) == 4:
+        return toolchain(int(argv[1]), argv[2], argv[3])
     if len(argv) != 3:
         raise SystemExit(__doc__)
     shard, shards = int(argv[0]), int(argv[1])
     if not 0 <= shard < shards:
         raise SystemExit(f"Shard {shard} is outside 0..{shards - 1}.")
-    mine = plan(weights(collected_items(test_files())), shards)[shard]
+    counts = collected_items(test_files())
+    mine = plan(weights(counts), shards)[shard]
     Path(argv[2]).write_text("".join(f"installer/tests/{name}\n" for name in mine))
+    Path(argv[2]).with_name(IDENTITY).write_text(json.dumps(identity(shard, shards, counts), sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":

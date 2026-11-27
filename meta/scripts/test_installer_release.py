@@ -478,39 +478,218 @@ class WorkflowShapeTests(unittest.TestCase):
                       "$(cat installer-shard-files.txt)\n", shard)
         self.assertIn("      - name: Isolated controller subprocess checks\n        if: matrix.shard == 0\n", shard)
         self.assertNotIn("--maxfail", source)
-        # Each shard retains its run list; backend fails unless together they
-        # ran every test file once.
+        # Each shard retains its run list with its own record of the execution
+        # that planned it, and the same record beside its toolchain; backend
+        # fails unless together they ran every test file once.
         self.assertIn("          name: installer-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}\n"
-                      "          path: meta/installer-shard-files.txt\n"
+                      "          path: |\n"
+                      "            meta/installer-shard-files.txt\n"
+                      "            meta/installer-shard-identity.json\n"
+                      "          if-no-files-found: error\n", shard)
+        self.assertIn("          name: installer-toolchain-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}\n"
+                      "          path: |\n"
+                      "            meta/installer-toolchain.json\n"
+                      "            meta/installer-shard-identity.json\n"
                       "          if-no-files-found: error\n", shard)
         steps = [line.strip() for line in backend.splitlines() if line.startswith("      - ")]
-        self.assertEqual(steps[:4], ["- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
+        self.assertEqual(steps, ["- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
             "- name: Collect the shards' plans", "- name: Check that the shards ran every test file once",
-            "- name: Collect the shards' toolchains"])
-        self.assertIn("          pattern: installer-shard-plan-*-${{ github.run_attempt }}\n          path: meta/plans\n", backend)
+            "- name: Collect the shards' toolchains", "- name: Record the toolchain", "- name: Retain the toolchain"])
+        # The run's plans and records of every attempt are collected: a shard
+        # that was not rerun left its own under the attempt it ran in. The
+        # script chooses among them by what each one says of itself.
+        self.assertIn("          pattern: installer-shard-plan-*\n          path: meta/plans\n", backend)
         self.assertIn(f"        run: python3 installer/tests/installer_shards.py verify {len(legs)} plans\n", backend)
-        self.assertIn("          pattern: installer-toolchain-backend-shard-*-${{ github.run_attempt }}\n"
-                      "          path: meta/shards\n", backend)
-        record = backend.split("          python3 - > installer-toolchain.json <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
-        script = "".join(line.removeprefix("          ") + "\n" for line in record.splitlines())
-        self.assertIn(f"if len(records) != {len(legs)} or len(values) != 1:", script)
-        folder = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, folder)
-        value = {"python": "Python 3.12.13", "node": "v22.22.2"}
-        for index in range(len(legs)):
-            leg = folder / "shards" / f"installer-toolchain-backend-shard-{index}-1"
-            leg.mkdir(parents=True)
-            (leg / "installer-toolchain.json").write_text(json.dumps(value) + "\n")
-        recorded = subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True, text=True,
-                                  check=True).stdout
-        self.assertEqual(json.loads(recorded), value)
-        (folder / "shards" / "installer-toolchain-backend-shard-3-1" / "installer-toolchain.json").write_text(
-            json.dumps({**value, "python": "Python 3.12.12"}) + "\n")
-        self.assertNotEqual(subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True,
-                                           text=True).returncode, 0)
-        (folder / "shards" / "installer-toolchain-backend-shard-3-1" / "installer-toolchain.json").unlink()
-        self.assertNotEqual(subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True,
-                                           text=True).returncode, 0)
+        self.assertIn("          pattern: installer-toolchain-backend-shard-*\n          path: meta/shards\n", backend)
+        self.assertIn(f"        run: python3 installer/tests/installer_shards.py toolchain {len(legs)} plans shards "
+                      f"> {forge.TOOLCHAIN_FILE}\n", backend)
+        self.assertNotRegex(backend, r"(?m)^ +pattern: .*run_attempt")
+        self.assertNotIn("<<", backend)
+
+    RUN_ENV = {"GITHUB_RUN_ID": str(FORGE_RUN), "GITHUB_SHA": SHA}
+    SHARD_TOOLCHAIN = {"python": "Python 3.12.13", "node": "v22.22.2"}
+
+    def shard_executions(self, shards, executions, collected=None, **environ):
+        """The folders the backend job collects from a run in which these
+        (shard, attempt) executions each planned and passed: one plan and one
+        toolchain record per execution, named as the workflow names them."""
+        files = shards.test_files()
+        collected = collected or "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "plans").mkdir()
+        (root / "shards").mkdir()
+        self.add_executions(shards, root, executions, collected, **environ)
+        return root
+
+    def add_executions(self, shards, root, executions, collected=None, passed=True, **environ):
+        files = shards.test_files()
+        collected = collected or "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
+        for shard, attempt in executions:
+            plan = root / "plans" / f"installer-shard-plan-{shard}-{attempt}"
+            plan.mkdir()
+            with mock.patch.dict(os.environ, {**self.RUN_ENV, **environ, "GITHUB_RUN_ATTEMPT": str(attempt)}), \
+                    mock.patch.object(shards.subprocess, "run",
+                                      return_value=subprocess.CompletedProcess([], 0, collected, "")):
+                shards.main([str(shard), "12", str(plan / "installer-shard-files.txt")])
+            if passed:
+                record = root / "shards" / f"installer-toolchain-backend-shard-{shard}-{attempt}"
+                record.mkdir()
+                shutil.copy(plan / "installer-shard-identity.json", record)
+                (record / "installer-toolchain.json").write_text(json.dumps(self.SHARD_TOOLCHAIN) + "\n")
+
+    def backend_job(self, shards, root):
+        """What the backend job's two script steps answer for the collected
+        folders: the check's line and the toolchain, or the refusal."""
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            try:
+                shards.verify(12, root / "plans", environ=self.RUN_ENV)
+                shards.toolchain(12, root / "plans", root / "shards", environ=self.RUN_ENV)
+            except SystemExit as refusal:
+                return "REFUSED " + str(refusal)
+        return printed.getvalue()
+
+    def test_the_backend_job_takes_the_plans_of_one_attempt_when_every_shard_ran_once(self):
+        """ALL-ONCE: twelve shards ran in attempt 1."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12)])
+        answer = self.backend_job(shards, root)
+        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", answer)
+        self.assertIn("attempt 1: shards 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11", answer)
+        self.assertNotIn("superseded", answer)
+        self.assertEqual(json.loads(answer.splitlines()[-1]), self.SHARD_TOOLCHAIN)
+        identity = json.loads((root / "plans/installer-shard-plan-3-1/installer-shard-identity.json").read_text())
+        self.assertEqual({key: identity[key] for key in ("run_id", "run_attempt", "commit", "shard", "shards")},
+                         {"run_id": str(FORGE_RUN), "run_attempt": 1, "commit": SHA, "shard": 3, "shards": 12})
+        self.assertRegex(identity["collection"], r"\A[0-9a-f]{64}\Z")
+
+    def test_the_backend_job_takes_a_retried_shards_plan_from_the_attempt_that_ran_it(self):
+        """RETRY-ONE: shard 5 failed in attempt 1 and passed in a retry of
+        that one job. The eleven other shards were not rerun: their plans and
+        records are attempt 1's, and attempt 2 has only shard 5's."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        others = [(shard, 1) for shard in range(12) if shard != 5]
+        # Shard 5's first execution failed before it planned: it left nothing.
+        root = self.shard_executions(shards, others + [(5, 2)])
+        answer = self.backend_job(shards, root)
+        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", answer)
+        self.assertIn("attempt 1: shards 0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11; attempt 2: shard 5", answer)
+        self.assertEqual(json.loads(answer.splitlines()[-1]), self.SHARD_TOOLCHAIN)
+        # Or its first execution planned and then failed its tests: that plan
+        # is superseded, and it has no toolchain record to take.
+        root = self.shard_executions(shards, others + [(5, 2)])
+        self.add_executions(shards, root, [(5, 1)], passed=False)
+        answer = self.backend_job(shards, root)
+        self.assertIn("attempt 2: shard 5", answer)
+        self.assertIn("superseded: installer-shard-plan-5-1", answer)
+        self.assertEqual(json.loads(answer.splitlines()[-1]), self.SHARD_TOOLCHAIN)
+
+    def test_the_backend_job_takes_the_newest_of_two_executions_of_one_shard(self):
+        """DUPLICATE: a shard that passed twice (a rerun of every job, or of a
+        job that had passed) is counted once, by its newest execution: the
+        run's own job list answers each job by its newest result too. The
+        superseded plan is not read for the suite, so a file in it is neither
+        missed nor counted twice."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12)] + [(5, 2)])
+        old = root / "plans/installer-shard-plan-5-1/installer-shard-files.txt"
+        old.write_text(old.read_text() + "installer/tests/test_not_in_this_tree.py\n")
+        answer = self.backend_job(shards, root)
+        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", answer)
+        self.assertIn("attempt 2: shard 5", answer)
+        self.assertIn("superseded: installer-shard-plan-5-1", answer)
+        # The newest execution must be the one that passed. One that planned
+        # and has no toolchain record did not pass its tests; an older record
+        # of the shard is not taken in its place.
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12)])
+        self.add_executions(shards, root, [(5, 2)], passed=False)
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED "), answer)
+        self.assertIn("shard 5 (attempt 2)", answer)
+        self.assertIn("only after its tests passed", answer)
+
+    def test_the_backend_job_refuses_a_shard_without_a_plan(self):
+        """MISSING: a shard with no plan in any attempt."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12) if shard != 7])
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED The shards did not run the suite exactly once."), answer)
+        self.assertIn("11 shard plans instead of 12", answer)
+        self.assertIn("no plan of shard 7", answer)
+        # A retry of shard 5 alone, read as before by the retry's attempt only.
+        root = self.shard_executions(shards, [(5, 2)])
+        answer = self.backend_job(shards, root)
+        self.assertIn("1 shard plans instead of 12", answer)
+        self.assertIn("no plan of shard 0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11", answer)
+
+    def test_the_backend_job_refuses_plans_of_different_suites(self):
+        """MISMATCH: every plan taken must be of this run, of one tested
+        commit and of one collection; the refusal names the plan that is not."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        others = [(shard, 1) for shard in range(12) if shard != 5]
+        files = shards.test_files()
+        # Another collection: the retried shard collected one more item.
+        other = "".join(f"tests/{name}: {index % 7 + (2 if index == 0 else 1)}\n" for index, name in enumerate(files))
+        root = self.shard_executions(shards, others)
+        self.add_executions(shards, root, [(5, 2)], collected=other)
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED "), answer)
+        self.assertIn("plans of more than one collection: installer-shard-plan-5-2 has ", answer)
+        self.assertIn("the other 11 have ", answer)
+        # Another tested commit.
+        root = self.shard_executions(shards, others)
+        self.add_executions(shards, root, [(5, 2)], GITHUB_SHA=OTHER)
+        answer = self.backend_job(shards, root)
+        self.assertIn(f"plans of more than one tested commit: installer-shard-plan-5-2 has {OTHER[:12]}", answer)
+        self.assertIn(f"not this run's tested commit {SHA[:12]}: installer-shard-plan-5-2", answer)
+        # Another run.
+        root = self.shard_executions(shards, others)
+        self.add_executions(shards, root, [(5, 2)], GITHUB_RUN_ID=str(FORGE_RUN + 1))
+        answer = self.backend_job(shards, root)
+        self.assertIn(f"plans of more than one run id: installer-shard-plan-5-2 has {FORGE_RUN + 1}", answer)
+        self.assertIn(f"not this run's run id {FORGE_RUN}: installer-shard-plan-5-2", answer)
+        # Twelve plans that agree with each other and are another run's.
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12)], GITHUB_RUN_ID=str(FORGE_RUN + 1))
+        self.assertIn(f"not this run's run id {FORGE_RUN}: installer-shard-plan-0-1, ", self.backend_job(shards, root))
+        # A plan is known by its own record, never by its folder's name alone.
+        root = self.shard_executions(shards, others + [(5, 2)])
+        (root / "plans/installer-shard-plan-5-2").rename(root / "plans/installer-shard-plan-5-3")
+        self.assertIn("installer-shard-plan-5-3 says it is shard 5 of attempt 2", self.backend_job(shards, root))
+        root = self.shard_executions(shards, others + [(5, 2)])
+        (root / "plans/installer-shard-plan-5-2/installer-shard-identity.json").unlink()
+        answer = self.backend_job(shards, root)
+        self.assertIn("installer-shard-plan-5-2 has no installer-shard-identity.json", answer)
+        self.assertIn("no plan of shard 5", answer)
+        root = self.shard_executions(shards, others + [(5, 2)])
+        (root / "plans/installer-shard-plan-5-2/installer-shard-identity.json").write_text("{}\n")
+        self.assertIn("installer-shard-plan-5-2 has an unreadable installer-shard-identity.json",
+                      self.backend_job(shards, root))
+
+    def test_the_backend_job_binds_the_toolchains_of_the_executions_it_took(self):
+        """The toolchain record taken for a shard is the one that carries the
+        taken plan's own record; all twelve must say the same versions."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        others = [(shard, 1) for shard in range(12) if shard != 5]
+        root = self.shard_executions(shards, others + [(5, 2)])
+        (root / "shards/installer-toolchain-backend-shard-3-1/installer-toolchain.json").write_text(
+            json.dumps({**self.SHARD_TOOLCHAIN, "python": "Python 3.12.12"}) + "\n")
+        self.assertIn("Expected 12 identical shard toolchains, found 12 records of 2 kinds.",
+                      self.backend_job(shards, root))
+        # The record of the execution that planned is the only one that counts.
+        root = self.shard_executions(shards, others + [(5, 2)])
+        (root / "shards/installer-toolchain-backend-shard-3-1/installer-toolchain.json").unlink()
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED "), answer)
+        self.assertIn("shard 3 (attempt 1)", answer)
+        root = self.shard_executions(shards, others + [(5, 2)])
+        shutil.copy(root / "plans/installer-shard-plan-4-1/installer-shard-identity.json",
+                    root / "shards/installer-toolchain-backend-shard-5-2/installer-shard-identity.json")
+        self.assertIn("shard 5 (attempt 2)", self.backend_job(shards, root))
+        # Through the command line, as the workflow calls it.
+        root = self.shard_executions(shards, others + [(5, 2)])
+        with mock.patch.dict(os.environ, self.RUN_ENV), contextlib.redirect_stdout(io.StringIO()) as printed:
+            shards.main(["toolchain", "12", str(root / "plans"), str(root / "shards")])
+        self.assertEqual(json.loads(printed.getvalue()), self.SHARD_TOOLCHAIN)
 
     def test_the_shard_plan_runs_every_file_exactly_once_and_balances_them(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
@@ -563,10 +742,11 @@ class WorkflowShapeTests(unittest.TestCase):
         for shard in range(12):
             folder = plans / f"installer-shard-plan-{shard}-1"
             folder.mkdir()
-            with mock.patch.object(shards.subprocess, "run",
-                                   return_value=subprocess.CompletedProcess([], 0, output, "")):
+            with mock.patch.dict(os.environ, {**self.RUN_ENV, "GITHUB_RUN_ATTEMPT": "1"}), \
+                    mock.patch.object(shards.subprocess, "run",
+                                      return_value=subprocess.CompletedProcess([], 0, output, "")):
                 shards.main([str(shard), "12", str(folder / "installer-shard-files.txt")])
-        with contextlib.redirect_stdout(io.StringIO()) as printed:
+        with mock.patch.dict(os.environ, self.RUN_ENV), contextlib.redirect_stdout(io.StringIO()) as printed:
             shards.main(["verify", "12", str(plans)])
         self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", printed.getvalue())
         self.assertEqual(shards.tracked_test_files(), files)
@@ -577,7 +757,7 @@ class WorkflowShapeTests(unittest.TestCase):
             shutil.copytree(plans, copy, dirs_exist_ok=True)
             change(copy)
             with self.assertRaises(SystemExit) as refusal:
-                shards.verify(12, copy)
+                shards.verify(12, copy, environ=self.RUN_ENV)
             return str(refusal.exception)
 
         def edit(name, shard, transform):
@@ -600,7 +780,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("11 shard plans instead of 12", refused(lambda copy: shutil.rmtree(copy / "installer-shard-plan-7-1")))
         # A test file at any depth counts: one in a subdirectory ran nowhere.
         with self.assertRaises(SystemExit) as hidden:
-            shards.verify(12, plans, files + ["test_nested/test_hidden.py"])
+            shards.verify(12, plans, files + ["test_nested/test_hidden.py"], environ=self.RUN_ENV)
         self.assertIn("ran nowhere: test_nested/test_hidden.py", str(hidden.exception))
 
     def test_a_collected_file_no_shard_can_place_fails_every_shard(self):

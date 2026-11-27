@@ -237,17 +237,25 @@ jobs:
           --tb=short
       - name: Select this shard's test files
         run: python installer/tests/installer_shards.py ${{ matrix.shard }} 12 installer-shard-files.txt
-      # The backend job checks these lists of every shard together.
+      # The backend job checks these lists of every shard together. Beside
+      # the list is this execution's own record (installer-shard-identity.json:
+      # the run, the attempt, the tested commit, the shard and the collection
+      # the plan was computed from), which says where the list belongs.
       - name: Retain this shard's plan
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: installer-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: meta/installer-shard-files.txt
+          path: |
+            meta/installer-shard-files.txt
+            meta/installer-shard-identity.json
           if-no-files-found: error
       # Every failure is reported: no failure limit stops a shard early.
       - name: Backend regression tests
         run: python -m pytest -vv --tb=short --durations=20 --junitxml=installer-pytest.xml $(cat installer-shard-files.txt)
-      # The backend job binds the versions every shard recorded.
+      # The backend job binds the versions every shard recorded. This step
+      # runs only after the tests passed, and the record goes up with the
+      # execution's own record: the backend job takes a shard's toolchain
+      # from the execution whose plan it took.
       - name: Record the toolchain
         run: |
           printf '{"python": "%s", "node": "%s"}\n' "$(python3 --version 2>&1)" "$(node --version)" > installer-toolchain.json
@@ -255,7 +263,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: installer-toolchain-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: meta/installer-toolchain.json
+          path: |
+            meta/installer-toolchain.json
+            meta/installer-shard-identity.json
           if-no-files-found: error
       # Artifact names are unique within a run; a rerun attempt uploads its own.
       - name: Retain test results
@@ -274,10 +284,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      # A rerun of some jobs gives the run a new attempt and leaves a shard
+      # that is not rerun as it was: its plan and its toolchain record stay
+      # under the attempt it ran in. So the plans and records of every
+      # attempt of this run are collected, and the script takes each shard's
+      # newest execution by the record each one carries. It refuses plans
+      # that are not of this run, of one tested commit and of one collection.
       - name: Collect the shards' plans
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          pattern: installer-shard-plan-*-${{ github.run_attempt }}
+          pattern: installer-shard-plan-*
           path: meta/plans
       # Each shard planned on its own. Fail unless together they ran every
       # installer test file once.
@@ -286,20 +302,13 @@ jobs:
       - name: Collect the shards' toolchains
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          pattern: installer-toolchain-backend-shard-*-${{ github.run_attempt }}
+          pattern: installer-toolchain-backend-shard-*
           path: meta/shards
       # installer-release.py binds a reused run to the versions it ran with; every
-      # shard must have recorded the same ones.
+      # shard execution taken above must have recorded the same ones. A shard
+      # records them only after its tests passed.
       - name: Record the toolchain
-        run: |
-          python3 - > installer-toolchain.json <<'PY'
-          import pathlib
-          records = sorted(pathlib.Path("shards").glob("*/installer-toolchain.json"))
-          values = {path.read_text() for path in records}
-          if len(records) != 12 or len(values) != 1:
-              raise SystemExit(f"Expected 12 identical shard toolchains, found {len(records)} records of {len(values)} kinds.")
-          print(values.pop(), end="")
-          PY
+        run: python3 installer/tests/installer_shards.py toolchain 12 plans shards > installer-toolchain.json
       - name: Retain the toolchain
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

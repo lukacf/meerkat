@@ -96,7 +96,13 @@ shards balanced on the test time a hosted run recorded
 (`installer/tests/installer_shard_seconds.json`), each with a 120-minute limit and
 its own 20 slowest tests. The `backend` job passes only once every shard
 has, and it checks that the shards together ran every test file once
-(`installer_shards.py verify`). Refresh the record from a complete run's junit
+(`installer_shards.py verify`). After a rerun of one failed shard the other
+shards are not run again: each shard writes its own record beside its run
+list and beside its toolchain record (`installer-shard-identity.json`: the
+run, the attempt, the tested commit, the shard and the collection the plan
+was computed from), and the `backend` job takes each shard's newest execution
+across the run's attempts by those records. It refuses plans that are not of
+its run, of one tested commit and of one collection. Refresh the record from a complete run's junit
 files with `python installer/tests/installer_shards.py record installer-pytest.xml...`;
 a stale record only affects the balance, never which files run.
 No failure limit stops a run early, so every failure is reported. A run

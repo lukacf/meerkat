@@ -3017,7 +3017,7 @@ jobs:
           # swap, finished in 27m56s: that rustc reached 14.1 GiB and the
           # build 14.8 GiB with its file cache (it was 12.8 GiB when the
           # wrapper named below was written). That is nearly all of the
-          # runner's memory, and the swap added above covers what is over.
+          # runner's memory, and the swap added above is there for what is over.
           # Plain jobs 4 and 2 were OOM-killed under local 13-15 GiB limits:
           # pipelining overlapped the catalog with meerkat_runtime and
           # meerkat_mob, 18.8 GiB at jobs 4. One job also runs each crate's

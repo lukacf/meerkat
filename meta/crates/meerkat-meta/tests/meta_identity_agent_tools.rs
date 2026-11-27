@@ -57,6 +57,8 @@ use meerkat_meta::identity_first::{
 use meerkat_mob::{MobDefinition, MobHandle, ProfileName, SpawnMemberSpec};
 use serde_json::{Value, json};
 
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -517,6 +519,18 @@ struct Rig {
 /// Boot the gateway's runtime composition on `state` for the mob `mob_id`.
 /// No identity family is attached: the launch has no identity policy.
 async fn boot(state: &Path, mob_id: &str) -> Rig {
+    boot_opening(state, mob_id, "first open").await
+}
+
+/// [`boot`] on a state directory the row opened before and shut down with
+/// [`Rig::shutdown_for_reopen`]: a refused open says it was the second.
+async fn boot_reopened(state: &Path, mob_id: &str) -> Rig {
+    boot_opening(state, mob_id, "second open").await
+}
+
+/// The boot of [`boot`] and of [`boot_reopened`]. `opening` tells, in the
+/// panic of a refused open, which open of the row's state directory it was.
+async fn boot_opening(state: &Path, mob_id: &str, opening: &str) -> Rig {
     let model = ScriptedModel::default();
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
@@ -524,7 +538,12 @@ async fn boot(state: &Path, mob_id: &str) -> Rig {
             .persistent_state(state)
             .continuity_from_state_dir(state)
             .await
-            .expect("open the state-dir identity substrate")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "open the state-dir identity substrate ({opening} of this state \
+                     directory): {error:?}"
+                )
+            })
             .roster_provider(Arc::new(DeclaredRoster))
             .identity_runtime_instance_id("meta-identity-agent-tools")
             .default_llm_client(Arc::new(model.clone()))
@@ -545,6 +564,32 @@ async fn boot_with_family(state: &Path, mob_id: &str) -> Rig {
     let rig = boot(state, mob_id).await;
     rig.attach_family();
     rig
+}
+
+/// [`boot_with_family`], as [`boot_reopened`] is to [`boot`].
+async fn boot_reopened_with_family(state: &Path, mob_id: &str) -> Rig {
+    let rig = boot_reopened(state, mob_id).await;
+    rig.attach_family();
+    rig
+}
+
+/// What the kernel's lock table says of the execution custody of the runtime
+/// store in `state` (`support/custody_wait.rs`): whether it names a holder,
+/// `None` where it cannot be read.
+fn custody_holder(state: &Path) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut custody = state
+            .join(meerkat_meta::storage_layout::RUNTIME_DB_FILE_NAME)
+            .into_os_string();
+        custody.push(".execution-custody");
+        custody_wait::custody_holder_named(Path::new(&custody))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        None
+    }
 }
 
 fn sha(text: &str) -> Sha256Digest {
@@ -760,9 +805,24 @@ impl Rig {
         let _ = self.runtime.shutdown().await;
     }
 
-    /// Shut down before a reopen over the same state directory in this
-    /// process, until the durable child root is released.
-    async fn shutdown_for_reopen(self) {
+    /// Shut down before the one reopen a row makes over `state` in this
+    /// process, and say on stderr what was seen on the way (the lines that
+    /// start with "reopen diagnostic:").
+    ///
+    /// The steps are those of the shared contract
+    /// (`support/custody_wait.rs`). The shutdown's report must say the
+    /// teardown settled: the mob's part before the durable child root is
+    /// stood down again, bounded, until it is released; the whole report,
+    /// with the root's last outcome, after. Then this lifetime's handles are
+    /// dropped and the shared bounded wait runs until its execution custody
+    /// is released.
+    ///
+    /// A teardown that did not settle fails the row at the report, which the
+    /// failure carries whole. A custody the kernel's lock table still names
+    /// as held when the wait has ended fails the row here, with the time
+    /// since the drop. Nothing is retried, and no open is made here: the
+    /// caller makes the second one ([`boot_reopened`]).
+    async fn shutdown_for_reopen(self, state: &Path) {
         let released = |outcome: &meerkat_meta::ChildMobStandDownOutcome| {
             matches!(
                 outcome,
@@ -770,7 +830,16 @@ impl Rig {
                     | meerkat_meta::ChildMobStandDownOutcome::NotConfigured
             )
         };
-        let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
+        let while_live = custody_holder(state);
+        let asked = std::time::Instant::now();
+        let mut report = self.runtime.shutdown().await;
+        eprintln!(
+            "reopen diagnostic: the first lifetime's shutdown returned after {:?} with: \
+             {report:?}",
+            asked.elapsed()
+        );
+        custody_wait::mob_teardown_settled(&report);
+        let mut outcome = report.child_mob_stand_down.clone();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !released(&outcome) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -783,6 +852,28 @@ impl Rig {
         assert!(
             released(&outcome),
             "the durable child root is released before the reopen: {outcome:?}"
+        );
+        eprintln!("reopen diagnostic: the durable child root's last outcome: {outcome:?}");
+        report.child_mob_stand_down = outcome;
+        custody_wait::teardown_settled(&report);
+        drop(self);
+        let dropped = std::time::Instant::now();
+        let after_drop = custody_holder(state);
+        custody_wait::predecessor_custody_released(state).await;
+        let waited = dropped.elapsed();
+        let after_wait = custody_holder(state);
+        eprintln!(
+            "reopen diagnostic: whether the kernel's lock table named a holder of the \
+             execution custody (None: it could not be read): while the first lifetime was \
+             live {while_live:?}, right after its drop {after_drop:?}, and when the wait \
+             ended, {waited:?} after the drop, {after_wait:?}"
+        );
+        assert_ne!(
+            after_wait,
+            Some(true),
+            "the first lifetime's teardown reported settled and its handles are dropped, but \
+             its execution custody was still held {waited:?} after the drop, when the \
+             bounded wait had ended"
         );
     }
 }
@@ -921,9 +1012,9 @@ async fn the_first_request_of_a_run_offers_the_identity_tools_after_a_wake_and_a
         "the first request of a newly created agent's first run: {:?}",
         asked[0].tools
     );
-    rig.shutdown_for_reopen().await;
+    rig.shutdown_for_reopen(state.path()).await;
 
-    let rig = boot_with_family(state.path(), &mob_id).await;
+    let rig = boot_reopened_with_family(state.path(), &mob_id).await;
     for (agent, mark) in [(LEAD, "restored-lead"), ("keeper", "restored-keeper")] {
         let asked = rig.send(agent, mark, mark).await;
         assert!(
@@ -2550,9 +2641,9 @@ async fn an_agent_an_agents_tool_created_exists_after_a_restart() {
         .await;
     assert_eq!(created.content["outcome"], "done", "{}", created.content);
     let digest = created.content["agents"][0]["spec_digest"].clone();
-    rig.shutdown_for_reopen().await;
+    rig.shutdown_for_reopen(state.path()).await;
 
-    let rig = boot(state.path(), &mob_id).await;
+    let rig = boot_reopened(state.path(), &mob_id).await;
     assert!(
         rig.runtime
             .attach_identity_policy(policy(), IdentityFamilyOptions::new())

@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import * as sdk from "../dist/index.js";
+import { gatewayEnvironment } from "./gateway-test-support.js";
 import type {
   AnnouncementConflictError as ConflictError,
   AnnouncementRefusedError as RefusedError,
@@ -725,6 +726,8 @@ describe("mob announcement sources on a real gateway", () => {
     };
     const runtime = await Meta.builder()
       .gateway(gatewayBin as string)
+      .gatewayTransport(({ gatewayBin, timeoutMs }) =>
+        new sdk.PersistentTransport(gatewayBin, { timeout: timeoutMs, env: gatewayEnvironment(dir) }))
       .mob(mobToml)
       .persistentState(join(dir, "state"))
       .rosterProvider(roster as any)

@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Meta } from "../dist/index.js";
+import { Meta, PersistentTransport } from "../dist/index.js";
+import { gatewayEnvironment } from "./gateway-test-support.js";
 import type { DurableAgentSpec } from "../dist/index.js";
 
 const shouldRun =
@@ -158,6 +159,8 @@ memory = false
       runtime = await Meta.builder()
         .mob(mobToml)
         .gateway(gatewayBin)
+        .gatewayTransport(({ gatewayBin, timeoutMs }) =>
+          new PersistentTransport(gatewayBin, { timeout: timeoutMs, env: gatewayEnvironment(root) }))
         .persistentState(stateWriteDir)
         .consoleAuthRequired(false)
         .rosterProvider(new SmokeRosterProvider())
@@ -213,6 +216,8 @@ memory = false
       runtime = await Meta.builder()
         .mob(mobToml)
         .gateway(gatewayBin)
+        .gatewayTransport(({ gatewayBin, timeoutMs }) =>
+          new PersistentTransport(gatewayBin, { timeout: timeoutMs, env: gatewayEnvironment(root) }))
         .persistentState(stateRunDir)
         .consoleAuthRequired(false)
         .rosterProvider(new SmokeRosterProvider())

@@ -18,6 +18,8 @@ import time
 
 import pytest
 
+from .gateway_test_support import gateway_environment
+
 GATEWAY = os.environ.get("META_GATEWAY_BIN", "")
 FIXTURE = Path(__file__).parent / "fixtures" / "schedule_fire_bootstrap_native_host.py"
 
@@ -46,7 +48,8 @@ def test_stored_schedule_completes_before_public_build_returns(tmp_path, record_
     # repository convention files out of both child processes.
     environment = {"HOME": str(directory / "home"), "PATH": os.defpath,
                    "LANG": "C.UTF-8", "PYTHONPATH": str(FIXTURE.parents[2]),
-                   "META_GATEWAY_BIN": gateway, "RUST_MIN_STACK": "16777216"}
+                   "META_GATEWAY_BIN": gateway, "RUST_MIN_STACK": "16777216",
+                   **gateway_environment(directory)}
     record_property("evidence_directory", str(directory))
 
     def phase(mode):

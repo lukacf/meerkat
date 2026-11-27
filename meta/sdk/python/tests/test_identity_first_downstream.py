@@ -15,6 +15,8 @@ import tempfile
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta.builder import Meta
 from meerkat_meta.models import SessionBuildOptions
 from meerkat_meta.errors import RpcError
@@ -141,6 +143,7 @@ async def _boot_runtime(state_dir: str, mob_toml_path: str):
     return await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, state_dir))
         .mob(mob_toml_path)
         .persistent_state(state_dir)
         .session_service(MinimalAgentBuilder())

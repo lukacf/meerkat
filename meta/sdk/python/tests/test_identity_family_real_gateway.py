@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta import (
     AgentDirectoryPage,
     AgentPage,
@@ -201,6 +203,7 @@ async def gateway(tmp_path: Path, policy: dict | None = _HOST_MAY_CHANGE_AGENTS)
     builder = (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, tmp_path))
         .mob(str(mob_toml))
         .persistent_state(str(state_dir))
         .roster(Roster())

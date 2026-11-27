@@ -1057,6 +1057,41 @@ class CiWorkflowTests(unittest.TestCase):
                          if "console-acceptance" in (other.get("needs") or []))
         self.assertEqual(waiters, ["gate"])
 
+    def test_the_acceptance_smoke_asserts_what_only_the_fixture_answers(self):
+        """A server that listens and serves the console document does not show
+        that the unpacked mcp_fixture served. Before the smoke starts its
+        browser it reads the delivery history: each delivery the scenario
+        seeds must be there with the adapter mcp_fixture's delivery.send
+        names, which the record takes from the module's own answer. The
+        example sends those deliveries before it announces itself."""
+        pack = ROOT / "examples/001-incident-command-center-pack"
+        smoke = (pack / "topology_browser_smoke.cjs").read_text()
+        keys = [delivery["idempotency_key"] for delivery in load(pack / "scenario.yaml")["deliveries"]]
+        self.assertEqual(len(keys), 2)
+        seeded = re.search(r"^const SEEDED_DELIVERY_KEYS = (\[[^\]]*\]);$", smoke, re.MULTILINE)
+        self.assertIsNotNone(seeded, "the smoke names the seeded deliveries")
+        self.assertEqual(json.loads(seeded.group(1)), keys)
+        fixture = (ROOT / "crates/meerkat-meta/src/bin/mcp_fixture.rs").read_text()
+        adapter = re.search(
+            r'env::var\(DELIVERY_ADAPTER_ENV\)\.unwrap_or_else\(\|_\| "([^"]+)"\.to_string\(\)\)', fixture)
+        self.assertIsNotNone(adapter, "mcp_fixture names its delivery adapter")
+        self.assertIn(f'const FIXTURE_DELIVERY_ADAPTER = "{adapter.group(1)}";\n', smoke)
+        read = smoke.index('await rpc(baseUrl, "meta/delivery/history"')
+        browser = smoke.index("chromium.launch(")
+        self.assertLess(read, browser)
+        check = smoke[read:browser]
+        self.assertIn("for (const idempotencyKey of SEEDED_DELIVERY_KEYS) {\n", check)
+        self.assertIn("delivery.idempotency_key === idempotencyKey", check)
+        self.assertIn("      record.sink_adapter,\n      FIXTURE_DELIVERY_ADAPTER,\n", check)
+        # The record's adapter is the module's answer, and the example's
+        # start fails on a delivery its modules do not serve.
+        delivery = (ROOT / "crates/meerkat-meta/src/runtime/delivery.rs").read_text()
+        self.assertIn('payload.get("adapter").and_then(Value::as_str)', delivery)
+        self.assertIn("outcome.sink_adapter = Some(adapter.to_string());", delivery)
+        example = (pack / "incident_command_center.rs").read_text()
+        seed = example[example.index("pub async fn seed_runtime("):example.index("async fn wait_for_scenario_wiring(")]
+        self.assertIn('.with_context(|| format!("seed delivery {}", delivery.idempotency_key))?;', seed)
+
     def test_the_acceptance_job_refuses_a_binary_console_backends_did_not_build(self):
         """The pack and digest steps of console-backends and the unpack step
         of console-acceptance, run as written on stand-in files: the digests

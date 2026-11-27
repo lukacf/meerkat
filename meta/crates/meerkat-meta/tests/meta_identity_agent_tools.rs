@@ -592,6 +592,58 @@ fn custody_holder(state: &Path) -> Option<bool> {
     }
 }
 
+/// [`custody_holder`] right after a drop. One reading of the kernel's table
+/// can miss a held entry (`support/custody_wait.rs`), so up to three are
+/// made: the first that does not say "no holder" decides.
+fn custody_holder_after_drop(state: &Path) -> Option<bool> {
+    (0..3)
+        .map(|_| custody_holder(state))
+        .find(|reading| *reading != Some(false))
+        .unwrap_or(Some(false))
+}
+
+/// The environment variable by which a hosted job names its summary file.
+const JOB_SUMMARY: &str = "GITHUB_STEP_SUMMARY";
+
+/// The line a late release leaves in a job summary: the row, that its
+/// teardown reported settled, the time from the drop of the first lifetime
+/// to a free execution custody, and the open that followed.
+fn late_release_line(row: &str, waited: Duration) -> String {
+    format!(
+        "- reopen diagnostic: `{row}`: teardown settled; the execution custody was still held \
+         when the first lifetime was dropped and was free {} ms after the drop, before the \
+         second open\n",
+        waited.as_millis()
+    )
+}
+
+fn append_line(file: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(file)?
+        .write_all(line.as_bytes())
+}
+
+/// Leave a trace of a late release where a passing row's output is not
+/// shown. A custody that was still held when the first lifetime was dropped
+/// and was released inside the wait's bound lets the row pass; where the
+/// environment names a job summary file ([`JOB_SUMMARY`]), one line
+/// ([`late_release_line`]) is appended to it. Without that variable nothing
+/// is written: the row's own stderr says it. A line that cannot be written
+/// fails the row, so that the late release is not passed over in silence.
+fn note_late_release(row: &str, waited: Duration) {
+    let Some(summary) = std::env::var_os(JOB_SUMMARY).filter(|path| !path.is_empty()) else {
+        return;
+    };
+    let line = late_release_line(row, waited);
+    if let Err(error) = append_line(Path::new(&summary), &line) {
+        panic!("the job summary did not take the line of a late release ({error}): {line}");
+    }
+}
+
 fn sha(text: &str) -> Sha256Digest {
     Sha256Digest::of(text.as_bytes())
 }
@@ -820,9 +872,12 @@ impl Rig {
     /// A teardown that did not settle fails the row at the report, which the
     /// failure carries whole. A custody the kernel's lock table still names
     /// as held when the wait has ended fails the row here, with the time
-    /// since the drop. Nothing is retried, and no open is made here: the
-    /// caller makes the second one ([`boot_reopened`]).
-    async fn shutdown_for_reopen(self, state: &Path) {
+    /// since the drop. A custody that was still held at the drop and was
+    /// released inside the bound lets the row (`row`, its name) pass and
+    /// leaves a line in the job summary, where there is one
+    /// ([`note_late_release`]). Nothing is retried, and no open is made
+    /// here: the caller makes the second one ([`boot_reopened`]).
+    async fn shutdown_for_reopen(self, state: &Path, row: &str) {
         let released = |outcome: &meerkat_meta::ChildMobStandDownOutcome| {
             matches!(
                 outcome,
@@ -858,7 +913,7 @@ impl Rig {
         custody_wait::teardown_settled(&report);
         drop(self);
         let dropped = std::time::Instant::now();
-        let after_drop = custody_holder(state);
+        let after_drop = custody_holder_after_drop(state);
         custody_wait::predecessor_custody_released(state).await;
         let waited = dropped.elapsed();
         let after_wait = custody_holder(state);
@@ -875,6 +930,9 @@ impl Rig {
              its execution custody was still held {waited:?} after the drop, when the \
              bounded wait had ended"
         );
+        if after_drop == Some(true) && after_wait == Some(false) {
+            note_late_release(row, waited);
+        }
     }
 }
 
@@ -1012,7 +1070,11 @@ async fn the_first_request_of_a_run_offers_the_identity_tools_after_a_wake_and_a
         "the first request of a newly created agent's first run: {:?}",
         asked[0].tools
     );
-    rig.shutdown_for_reopen(state.path()).await;
+    rig.shutdown_for_reopen(
+        state.path(),
+        "the_first_request_of_a_run_offers_the_identity_tools_after_a_wake_and_a_restore",
+    )
+    .await;
 
     let rig = boot_reopened_with_family(state.path(), &mob_id).await;
     for (agent, mark) in [(LEAD, "restored-lead"), ("keeper", "restored-keeper")] {
@@ -2641,7 +2703,11 @@ async fn an_agent_an_agents_tool_created_exists_after_a_restart() {
         .await;
     assert_eq!(created.content["outcome"], "done", "{}", created.content);
     let digest = created.content["agents"][0]["spec_digest"].clone();
-    rig.shutdown_for_reopen(state.path()).await;
+    rig.shutdown_for_reopen(
+        state.path(),
+        "an_agent_an_agents_tool_created_exists_after_a_restart",
+    )
+    .await;
 
     let rig = boot_reopened(state.path(), &mob_id).await;
     assert!(
@@ -4395,4 +4461,26 @@ comms = true
         .await;
     assert_eq!(removed.content["outcome"], "done", "{}", removed.content);
     rig.shutdown().await;
+}
+
+/// The trace a late release leaves ([`note_late_release`]) is one line
+/// appended to the job summary: what the file holds already stays, and the
+/// line names the row, the settled teardown, the time from the drop to a
+/// free execution custody, and the open that followed.
+#[test]
+fn a_late_release_appends_one_line_to_a_job_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let summary = dir.path().join("summary.md");
+    std::fs::write(&summary, "an earlier line\n").unwrap();
+    append_line(
+        &summary,
+        &late_release_line("a_reopen_row", Duration::from_millis(37)),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&summary).unwrap(),
+        "an earlier line\n- reopen diagnostic: `a_reopen_row`: teardown settled; the execution \
+         custody was still held when the first lifetime was dropped and was free 37 ms after \
+         the drop, before the second open\n"
+    );
 }

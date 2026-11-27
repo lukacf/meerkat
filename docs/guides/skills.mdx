@@ -353,9 +353,15 @@ these implementations with `CompositeDispatcher`:
 |------|-------------|
 | `browse_skills` | List skill collections and search by name/description |
 | `load_skill` | Load a skill's full instructions into the conversation |
-| `skill_list_resources` | List skill-owned resources/artifacts |
-| `skill_read_resource` | Read a specific skill-owned resource |
+| `skill_list_resources` | List resources exposed by the source for the selected skill |
+| `skill_read_resource` | Read a resource exposed by the source for the selected skill |
 | `skill_invoke_function` | Invoke a skill-defined function with structured arguments |
+
+Resource support depends on the source. In 0.9.19, the stock filesystem source
+loads `SKILL.md`, but `skill_list_resources` and `skill_read_resource` do not
+expose other files in the skill directory. Enabling those tools in a Rust
+host does not change that. The embedded source supports both tools for artifacts
+registered with the selected skill.
 
 All five implementations have `default_enabled: false`. A custom embedding must
 explicitly enable the desired names through `BuiltinToolConfig`. Current

@@ -20,10 +20,15 @@
 //!
 //! The second read decides nothing: which requests are refused stays
 //! `serde_json`'s. It reads a value as `serde_json` reads it, so that it
-//! finds the fault `serde_json` found, except for a type the decision verbs
-//! do not use: a `serde_json::value::RawValue` is not read. A second read
-//! that finds no fault, or fails in a way of its own, names none: the
-//! message is then the plain `invalid params`.
+//! finds the fault `serde_json` found, with two exceptions, for types the
+//! decision verbs do not use: a `serde_json::value::RawValue` is not read,
+//! and a map whose keys are not strings is refused at its first key
+//! (`serde_json` reads the key `"7"` as the number 7; the second read hands
+//! every key over as a string). For such a type the second read may name
+//! another place than `serde_json`'s fault; it still repeats nothing of the
+//! request and decides nothing. A second read that finds no fault, or fails
+//! in a way of its own, names none: the message is then the plain `invalid
+//! params`.
 //!
 //! The read touches nothing but the params it is given. It walks the value
 //! `serde_json` walked, no deeper, and builds what `serde_json` built up to

@@ -592,10 +592,11 @@ fn custody_holder(state: &Path) -> Option<bool> {
     }
 }
 
-/// [`custody_holder`] right after a drop. One reading of the kernel's table
-/// can miss a held entry (`support/custody_wait.rs`), so up to three are
-/// made: the first that does not say "no holder" decides.
-fn custody_holder_after_drop(state: &Path) -> Option<bool> {
+/// [`custody_holder`], read up to three times: right after a drop, and when
+/// the wait has ended. One reading of the kernel's table can miss a held
+/// entry (`support/custody_wait.rs`), so the first reading that does not say
+/// "no holder" decides, and "no holder" takes three readings in a row.
+fn custody_holder_repeated(state: &Path) -> Option<bool> {
     (0..3)
         .map(|_| custody_holder(state))
         .find(|reading| *reading != Some(false))
@@ -913,10 +914,10 @@ impl Rig {
         custody_wait::teardown_settled(&report);
         drop(self);
         let dropped = std::time::Instant::now();
-        let after_drop = custody_holder_after_drop(state);
+        let after_drop = custody_holder_repeated(state);
         custody_wait::predecessor_custody_released(state).await;
         let waited = dropped.elapsed();
-        let after_wait = custody_holder(state);
+        let after_wait = custody_holder_repeated(state);
         eprintln!(
             "reopen diagnostic: whether the kernel's lock table named a holder of the \
              execution custody (None: it could not be read): while the first lifetime was \

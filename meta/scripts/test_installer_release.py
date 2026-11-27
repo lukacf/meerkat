@@ -1864,7 +1864,8 @@ M = forge.META_DIR
 # source of the published client wheel a package carries.
 GUIDE_RELEASE = "9" * 40
 BASE_TREE = {
-    forge.INSTALLER_CI: "python-version: '3.12'\nnode-version: '22'\n",
+    forge.INSTALLER_CI: "python-version: '3.12'\nnode-version: '22'\n"
+                        "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]\n",
     ".github/workflows/ci.yml": "ci",
     M + "console/package-lock.json": "console lock",
     M + "console/src/app.ts": "console",
@@ -2066,15 +2067,17 @@ class EvidenceTests(unittest.TestCase):
         """The installer workflow's backend job takes each backend shard's
         newest execution, so after a retry of some jobs a green attempt can
         rest on shard executions of several attempts. That serves a pull
-        request's gate. A release binds the work of one attempt: every
-        backend shard must have planned in the attempt the evidence binds."""
+        request's gate. A release binds the backend shards, the frontend and
+        the backend job of one attempt: every backend shard the workflow
+        declares must have planned in the attempt the evidence binds. (The
+        attempt of the agent-team-live job is not read, here or before.)"""
+        one_attempt = "; a release binds the backend shards, the frontend and the backend job of one attempt"
         retried = [(shard, 1) for shard in range(12) if shard != 5] + [(5, 2)]
         with self.assertRaises(forge.ProtocolError) as refusal:
             self.evidence(self.github(attempt=2, plans=retried))
         self.assertIn("no green dispatched Forge run", str(refusal.exception))
         self.assertIn(f"run {FORGE_RUN} attempt 2 took the plan of another attempt for backend shard "
-                      "0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, and a release binds the work of one attempt",
-                      str(refusal.exception))
+                      "0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11" + one_attempt, str(refusal.exception))
         self.assertIn("Dispatch meta-installer.yml", str(refusal.exception))
         # A rerun of every job: all twelve planned again in the bound attempt;
         # the first attempt's plans are still listed and are superseded.
@@ -2084,16 +2087,54 @@ class EvidenceTests(unittest.TestCase):
         # A run that lists no shard plan says nothing about its shards.
         with self.assertRaises(forge.ProtocolError) as refusal:
             self.evidence(self.github(plans=[]))
-        self.assertIn(f"run {FORGE_RUN} attempt 1 lists no backend shard plan", str(refusal.exception))
+        self.assertIn(f"run {FORGE_RUN} attempt 1 lists no plan of backend shard "
+                      "0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11" + one_attempt, str(refusal.exception))
+        # The shards are the workflow's matrix, not whatever the listing
+        # names. A listing that omits the only plan of a shard that was not
+        # rerun leaves eleven plans of the bound attempt: still refused.
+        with self.assertRaises(forge.ProtocolError) as refusal:
+            self.evidence(self.github(attempt=2, plans=[(shard, 2) for shard in range(12) if shard != 3]))
+        self.assertIn(f"run {FORGE_RUN} attempt 2 lists no plan of backend shard 3" + one_attempt,
+                      str(refusal.exception))
+        # A plan of a shard the workflow does not declare.
+        with self.assertRaises(forge.ProtocolError) as refusal:
+            self.evidence(self.github(plans=[(shard, 1) for shard in range(13)]))
+        self.assertIn(f"run {FORGE_RUN} attempt 1 lists a plan of backend shard 12, which the installer workflow "
+                      "does not declare", str(refusal.exception))
         # An older run of one attempt is taken when the newest joined attempts.
         github = self.github(attempt=2, plans=retried)
         github.forge_run(FORGE_RUN - 5, OTHER)
         self.assertEqual(self.evidence(github)["run_id"], FORGE_RUN - 5)
         self.assertEqual(forge.joined_attempts({"installer-shard-plan-0-1": {}, "installer-shard-plan-1-1": {},
-                                                "installer-shard-plan-1-2": {}, "installer-pytest-0-2": {}}, 2),
+                                                "installer-shard-plan-1-2": {}, "installer-pytest-0-2": {}}, 2, [0, 1]),
                          "took the plan of another attempt for backend shard 0")
+        self.assertEqual(forge.joined_attempts({"installer-shard-plan-0-1": {}, "installer-shard-plan-1-2": {}}, 2,
+                                               [0, 1, 2]),
+                         "lists no plan of backend shard 2; took the plan of another attempt for backend shard 0")
         self.assertIsNone(forge.joined_attempts({"installer-shard-plan-0-2": {}, "installer-shard-plan-1-1": {},
-                                                 "installer-shard-plan-1-2": {}}, 2))
+                                                 "installer-shard-plan-1-2": {}}, 2, [0, 1]))
+
+    def test_the_shards_a_release_asks_for_are_the_installer_workflows_matrix(self):
+        """The matrix is read from the workflow blob of the candidate's
+        commit, the one whose Python and Node versions are read."""
+        github = self.github()
+        with github.installed():
+            objects = forge.GitObjects()
+            files = forge.evidence_tuple(objects, SHA)["files"]
+            workflow = objects.blob_text(files[forge.INSTALLER_CI])
+            self.assertEqual(forge.declared_shards(workflow), list(range(12)))
+            self.assertEqual(forge.declared_toolchain(workflow), {"python": "3.12", "node": "22"})
+        for matrix in ("", "        shard: [0, 1]\n        shard: [0, 1]\n", "        shard: [0, 0]\n",
+                       "        shard: [1, 2]\n", "        shard: []\n"):
+            with self.subTest(matrix=matrix):
+                workflow = "python-version: '3.12'\nnode-version: '22'\n" + matrix
+                with self.assertRaisesRegex(forge.ProtocolError, "exactly one backend shard matrix"):
+                    self.evidence(self.github(release_files={**BASE_TREE, forge.INSTALLER_CI: workflow},
+                                              run_files={**BASE_TREE, forge.INSTALLER_CI: workflow}))
+        # The fixture's line is the real workflow's.
+        legs = re.findall(r"(?m)^        shard: \[([0-9, ]+)\]$", text(FORGE_CI))
+        self.assertEqual(legs, [", ".join(str(shard) for shard in range(12))])
+        self.assertIn(f"        shard: [{legs[0]}]\n", BASE_TREE[forge.INSTALLER_CI])
 
     def test_only_dispatched_runs_are_listed_and_counted(self):
         github = self.github()

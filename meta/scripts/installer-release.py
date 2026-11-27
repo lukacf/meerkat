@@ -197,29 +197,47 @@ def toolchain_artifact_name(job, attempt):
 
 
 SHARD_PLAN = re.compile(r"installer-shard-plan-([0-9]+)-([0-9]+)")
+SHARD_MATRIX = re.compile(r"(?m)^        shard: \[([0-9, ]*)\]$")
 
 
-def joined_attempts(artifacts, attempt):
-    """Why a Forge run's attempt is not the work of that one attempt, or None.
+def joined_attempts(artifacts, attempt, shards):
+    """Why the backend shards of a Forge run's attempt are not that one
+    attempt's executions, or None.
 
     The installer workflow's backend job takes each backend shard's newest
     execution across the run's attempts, so after a retry of some jobs a
     green attempt can rest on shard executions of earlier attempts. That
-    serves a pull request's gate. A release binds one attempt: every shard
-    that planned in the run (each uploads installer-shard-plan-<shard>-<the
-    attempt it ran in>) must have planned in this attempt, which is then the
-    newest and the one the backend job took."""
+    serves a pull request's gate. A release binds the backend shards, the
+    frontend and the backend job of one attempt: every shard the workflow
+    declares (SHARDS, its matrix) must have planned in this attempt (each
+    uploads installer-shard-plan-<shard>-<the attempt it ran in>), which is
+    then its newest and the one the backend job took. The shards are the
+    workflow's, not the listing's: a listing that omits a shard's plan must
+    not make the run look like one attempt's.
+
+    Not covered, here or before: the agent-team-live job. The backend job
+    needs it, but nothing a release reads says which attempt it ran in."""
     planned = {}
     for name in artifacts:
         match = SHARD_PLAN.fullmatch(name)
         if match:
             planned.setdefault(int(match.group(1)), set()).add(int(match.group(2)))
-    if not planned:
-        return "lists no backend shard plan"
-    others = sorted(shard for shard, attempts in planned.items() if attempt not in attempts)
+
+    def named(some):
+        return ", ".join(str(shard) for shard in some)
+
+    reasons = []
+    undeclared = sorted(set(planned) - set(shards))
+    if undeclared:
+        reasons.append(f"lists a plan of backend shard {named(undeclared)}, which the installer workflow does not "
+                       "declare")
+    unlisted = [shard for shard in shards if shard not in planned]
+    if unlisted:
+        reasons.append(f"lists no plan of backend shard {named(unlisted)}")
+    others = [shard for shard in shards if shard in planned and attempt not in planned[shard]]
     if others:
-        return f"took the plan of another attempt for backend shard {', '.join(str(shard) for shard in others)}"
-    return None
+        reasons.append(f"took the plan of another attempt for backend shard {named(others)}")
+    return "; ".join(reasons) or None
 
 
 def write_outputs(values):
@@ -709,13 +727,23 @@ def require_guide_release_sdk(objects, commit, tested):
             f"Release Forge from a commit whose {GUIDE_SDK_TREE} is the release's")
 
 
-def declared_toolchain(objects, files):
-    text = objects.blob_text(files[INSTALLER_CI])
+def declared_toolchain(text):
+    """The Python and Node versions the installer workflow (its TEXT) declares."""
     pythons = set(re.findall(r"python-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
     nodes = set(re.findall(r"node-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
     require(len(pythons) == 1 and len(nodes) == 1,
             "the installer workflow must declare exactly one Python and one Node version")
     return {"python": pythons.pop(), "node": nodes.pop()}
+
+
+def declared_shards(text):
+    """The backend shards the installer workflow (its TEXT) declares: its
+    matrix, 0 to the count less one. The same blob as the toolchain, read once."""
+    matrices = SHARD_MATRIX.findall(text)
+    shards = [int(shard) for shard in matrices[0].split(",") if shard.strip()] if len(matrices) == 1 else []
+    require(shards and shards == list(range(len(shards))),
+            "the installer workflow must declare exactly one backend shard matrix, numbered from 0")
+    return shards
 
 
 def version_fits(observed, pattern, declared):
@@ -766,7 +794,8 @@ def forge_ci_evidence(sha, work, objects=None):
     objects = objects or GitObjects()
     wanted = evidence_tuple(objects, sha)
     require_guide_release_sdk(objects, sha, wanted["trees"][GUIDE_SDK_TREE])
-    declared = declared_toolchain(objects, wanted["files"])
+    workflow = objects.blob_text(wanted["files"][INSTALLER_CI])
+    declared, shards = declared_toolchain(workflow), declared_shards(workflow)
     endpoint = rc.repo_endpoint(
         f"actions/workflows/{PurePosixPath(INSTALLER_CI).name}/runs?event=workflow_dispatch&status=success"
         f"&per_page={MAX_EVIDENCE_RUNS}")
@@ -790,7 +819,7 @@ def forge_ci_evidence(sha, work, objects=None):
             if not run_jobs_green(run["id"], run["run_attempt"]):
                 continue
             artifacts = run_artifacts(run["id"])
-            reason = joined_attempts(artifacts, run["run_attempt"])
+            reason = joined_attempts(artifacts, run["run_attempt"], shards)
             if reason:
                 joined = joined or f"run {run['id']} attempt {run['run_attempt']} {reason}"
                 continue
@@ -800,7 +829,8 @@ def forge_ci_evidence(sha, work, objects=None):
             return {"run_id": run["id"], "run_attempt": run["run_attempt"], "head_sha": run["head_sha"],
                     "event": run["event"], "tuple": wanted, "toolchain": {"declared": declared, **toolchain}}
         detail = (f"; the newest green run {nearest[0]} differs in {', '.join(nearest[1])}" if nearest else "")
-        detail += f"; {joined}, and a release binds the work of one attempt" if joined else ""
+        detail += (f"; {joined}; a release binds the backend shards, the frontend and the backend job of one attempt"
+                   if joined else "")
         raise Miss(f"none of {len(runs)} listed green dispatched run(s) tested these Forge inputs",
                    f"no green dispatched Forge run (backend and frontend) tested the Forge inputs at "
                    f"{sha}{detail}. "

@@ -133,9 +133,13 @@ rests on, and where it ends:
   the runner image, and the installed npm tree itself (`npm ci` installs what
   the lock file says; the lock file is what is named). A retry long after the
   first attempt can therefore still join executions that differ in those.
-- A release does not join attempts. `scripts/installer-release.py` binds a
-  dispatched run only when every backend shard planned in the attempt it
-  binds (see RELEASING.md): dispatch again, or rerun all jobs.
+- A release does not join attempts of the backend shards.
+  `scripts/installer-release.py` binds a dispatched run only when every shard
+  of the workflow's matrix planned in the attempt it binds, as the frontend
+  and the `backend` job must have run in it (see RELEASING.md): dispatch
+  again, or rerun all jobs. A limit that remains, and is older than this
+  rule: a release does not read which attempt the `agent-team-live` job ran
+  in, so a bound run can rest on that job's earlier attempt.
 
 To run one shard's files as the workflow does (the first command also writes
 `installer-shard-identity.json` beside the list; both stay in the working

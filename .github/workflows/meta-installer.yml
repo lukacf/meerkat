@@ -303,8 +303,10 @@ jobs:
       # that are not of this run, of one tested commit, one collection, one
       # set of installed Python packages and one set of npm lock files, and
       # any folder that is not one execution's. A release does not join
-      # attempts: installer-release.py binds a run only when every shard
-      # planned in the attempt it binds.
+      # attempts of the shards: installer-release.py binds a run only when
+      # every shard of the matrix planned in the attempt it binds, as the
+      # frontend and this job must have run in it. It does not read which
+      # attempt the agent-team-live job ran in.
       - name: Collect the shards' plans
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:

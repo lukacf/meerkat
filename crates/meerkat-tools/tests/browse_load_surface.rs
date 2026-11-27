@@ -804,8 +804,8 @@ async fn list_resources_of_a_listed_skill_with_no_resource_listing_does_not_say_
         "the diagnostic says this is not an empty listing; got: {message}"
     );
     assert!(
-        message.contains("call load_skill with this key"),
-        "the diagnostic suggests one next step; got: {message}"
+        message.contains("If load_skill is available, call it with this key to use the skill."),
+        "the diagnostic suggests one conditional next step; got: {message}"
     );
     // It states the two observations only: no source is named (the fixture's
     // source name is "project").

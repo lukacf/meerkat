@@ -71,12 +71,15 @@ async fn skill_is_listed(engine: &SkillRuntime, key: &SkillKey) -> bool {
 
 /// What `skill_list_resources` answers for a listed skill when no source
 /// returned a resource listing for it. It is an error, so it cannot be read
-/// as an empty listing. It states the two things that were read and one next
-/// step, and nothing about sources, files or what the next step returns.
+/// as an empty listing. It states the two things that were read and one
+/// conditional next step. It says nothing about sources or files, about what
+/// the next step returns, or about whether that tool is composed for the
+/// caller: this tool holds no such fact.
 fn no_resource_listing_returned(key: &SkillKey) -> String {
     format!(
         "The skill {key} is listed, but no source returned a resource listing for it. \
-         This is not an empty listing. To use the skill, call {} with this key.",
+         This is not an empty listing. If {} is available, call it with this key to use \
+         the skill.",
         super::LOAD_SKILL_TOOL_NAME
     )
 }

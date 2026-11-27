@@ -49,6 +49,8 @@ use meerkat_meta::{DiscoverySpec, MetaConfig, SessionHook, UnifiedRuntime, Unifi
 use meerkat_mob::{MobDefinition, ProfileName, SpawnMemberSpec};
 use serde_json::{Value, json};
 
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -802,8 +804,13 @@ async fn restart_lead(
     );
     let session = lead_session(&first).await;
     let shutdown = first.shutdown().await;
-    assert!(shutdown.cleanup_completed(), "{shutdown:?}");
+    // The second boot reopens this state directory in this process
+    // (`support/custody_wait.rs`): a teardown that did not settle fails the
+    // row here, and the second boot waits for the first boot's execution
+    // custody.
+    custody_wait::teardown_settled(&shutdown);
     drop(first);
+    custody_wait::predecessor_custody_released(state).await;
 
     let second = identity_runtime(state, mob_id, client, Arc::clone(&second_hook)).await;
     assert_eq!(

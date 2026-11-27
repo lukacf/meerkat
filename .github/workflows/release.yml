@@ -3010,28 +3010,30 @@ jobs:
           MEERKAT_WEB_WASM_PACK_MODE: no-install
         run: |
           set -euo pipefail
-          # Four Cargo jobs, while the release tree's own
-          # scripts/release-web-sdk-rustc-wrapper keeps the other memory-heavy
-          # wasm32 crates off the machine catalog's rustc (12.8 GiB alone).
+          # One Cargo job, and no rustc wrapper. At one job no rustc runs
+          # beside another, so the build's peak is its largest single rustc:
+          # the machine catalog's (meerkat_machine_schema). A local build of
+          # this step's Cargo part at one job, under a 15 GiB limit with no
+          # swap, finished in 27m56s: that rustc reached 14.1 GiB and the
+          # build 14.8 GiB with its file cache (it was 12.8 GiB when the
+          # wrapper named below was written). That is nearly all of the
+          # runner's memory, and the swap added above is there for what is over.
           # Plain jobs 4 and 2 were OOM-killed under local 13-15 GiB limits:
           # pipelining overlapped the catalog with meerkat_runtime and
-          # meerkat_mob, 18.8 GiB at jobs 4. Jobs 1 fit, but also ran each
-          # crate's code generation on one thread: 33m43s of Cargo in the
-          # v0.9.1 tag run, 24m05s locally on four vCPUs, where jobs 4 with
-          # the wrapper took 11m14s and peaked at 13.0 GiB under a 14 GiB
-          # limit. A tree without the wrapper (a recovery of an older tag),
-          # or one whose wrapper names a crate the tree does not have, builds
-          # at one job as before. This bounds Cargo concurrency, not
-          # wasm-opt's parallelism.
-          wrapper="${GITHUB_WORKSPACE}/scripts/release-web-sdk-rustc-wrapper"
-          if [[ -x "${wrapper}" ]] && "${wrapper}" --check-heavy-crates; then
-            export CARGO_BUILD_JOBS=4
-            export RUSTC_WRAPPER="${wrapper}"
-            export MEERKAT_WEB_WASM_HEAVY_RUSTC_LOCK="${RUNNER_TEMP}/web-sdk-heavy-rustc.lock"
-          else
-            echo "::warning title=Web SDK build::no heavy-crate wrapper matching this tree; building at one Cargo job"
-            export CARGO_BUILD_JOBS=1
-          fi
+          # meerkat_mob, 18.8 GiB at jobs 4. One job also runs each crate's
+          # code generation on one thread: 33m43s of Cargo in the v0.9.1 tag
+          # run.
+          # This step ran four jobs behind
+          # scripts/release-web-sdk-rustc-wrapper, which keeps the other
+          # memory-heavy wasm32 crates off the catalog's rustc: 11m14s
+          # locally, 13.0 GiB at its peak under a 14 GiB limit. That bounds
+          # what runs beside the catalog, not the total, and a hosted run of
+          # it was down to 0.2 GiB of free memory five and a half minutes
+          # into this step, with 3.4 GiB in swap half a minute later. The
+          # wrapper stays in the tree; this step no longer calls it.
+          # One job bounds how many rustc processes run at once. It bounds
+          # neither one rustc's memory nor wasm-opt's parallelism.
+          export CARGO_BUILD_JOBS=1
           echo "Web SDK wasm build: CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} RUSTC_WRAPPER=${RUSTC_WRAPPER:-none}"
           scripts/release-build-web-sdk-package.sh "${GITHUB_WORKSPACE}/web-sdk-package"
 

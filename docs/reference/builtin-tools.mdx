@@ -359,7 +359,7 @@ quarantined mobs through `mob/list` and the MCP `meerkat_mob_list` tool (see
 
 ### `delegate`: its wait and how it ends
 
-This section describes `delegate` from the release that carries this change.
+This section describes `delegate` starting in 0.9.19.
 It does not describe 0.9.18: for a `delegate` call that times out in 0.9.18,
 see [Fast Path: Delegate](/guides/mobs#fast-path-delegate).
 
@@ -1229,8 +1229,10 @@ replayed.
 An ampersand is only syntax interpreted by the selected shell. Meerkat still
 executes that shell invocation through the foreground tool path, returns the
 ordinary foreground result, and does not create a job ID or a record visible to
-`shell_jobs`, `shell_job_status`, or `shell_job_cancel`. Any child the shell
-leaves running is unmanaged and its lifetime is not guaranteed.
+`shell_jobs`, `shell_job_status`, or `shell_job_cancel`. A child started this way
+does not become a background job. Even after a normal shell exit, the runtime
+attempts to terminate that call’s process group. The shell’s exit code does not
+prove that every descendant has exited.
 
 Use `background: true` when the command must be managed as a Meerkat shell job.
 It commits and returns a stable job ID and enables durable status/list/cancel

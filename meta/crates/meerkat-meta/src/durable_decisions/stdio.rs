@@ -70,6 +70,7 @@ use super::approvers::{
     ingress_person, local_operator_principal,
 };
 use super::owner::{DecisionEventBinding, RuntimeDecisions};
+use super::params_fault;
 use super::wire::{
     self, DECIDE_METHOD, DECISIONS_METHOD_PREFIX, DecisionAttestationRequest, GET_METHOD,
     LIST_METHOD, METHOD_NOT_FOUND, MetaDecisionDecideParams, MetaDecisionListResult,
@@ -880,10 +881,14 @@ fn invalid(id: &Value, error: &DecisionContractError) -> Value {
     wire::invalid_params(id, format!("invalid decision request: {error}"))
 }
 
-/// The params of `id`'s request, as `T`; refused as invalid params.
+/// The params of `id`'s request, as `T`; refused as invalid params, in a
+/// message that names the place of the fault and nothing the request sent
+/// ([`params_fault`]).
 pub(crate) fn parse<T: DeserializeOwned>(id: &Value, params: Value) -> Result<T, Value> {
-    serde_json::from_value(params)
-        .map_err(|error| wire::invalid_params(id, format!("invalid params: {error}")))
+    // `serde_json` alone decides what is read, by value as before. The
+    // params are kept only to say, once it refuses, where the fault is.
+    serde_json::from_value(params.clone())
+        .map_err(|_| wire::invalid_params(id, params_fault::message::<T>(&params)))
 }
 
 /// The listing filter `params` names: every value is validated, and a phase

@@ -2387,7 +2387,21 @@ impl PartitionedHostDaemon {
     /// boot rejects invalid durable authority instead of panicking inside the
     /// fixture helper.
     pub async fn restore_result(self) -> Result<HostDaemonFixture, MobHostActorError> {
-        self.restore_result_with_faults(false, false).await
+        self.restore_result_with_faults(false, false, None).await
+    }
+
+    /// [`Self::restore`], with the model client the restored daemon builds
+    /// its members with. The partitioned daemon keeps no member client of
+    /// its own, so a plain restore composes the default test client whatever
+    /// client the daemon had before; a row that takes a member turn after
+    /// the restore and reads its reply hands the client back here.
+    pub async fn restore_with_member_llm_client(
+        self,
+        member_llm_client: Arc<dyn meerkat_client::LlmClient>,
+    ) -> HostDaemonFixture {
+        self.restore_result_with_faults(false, false, Some(member_llm_client))
+            .await
+            .expect("restore partitioned host daemon over durable truth with a member client")
     }
 
     /// Restore over the retained durable rows while making member-region CAS
@@ -2395,7 +2409,7 @@ impl PartitionedHostDaemon {
     /// the injector again, which lets recovery tests prove the same snapshot
     /// remains retryable after a definite no-write.
     pub async fn restore_with_failing_member_region_persistence(self) -> HostDaemonFixture {
-        self.restore_result_with_faults(true, false)
+        self.restore_result_with_faults(true, false, None)
             .await
             .expect("restore partitioned host with failing member-region persistence")
     }
@@ -2403,7 +2417,7 @@ impl PartitionedHostDaemon {
     /// Restore with a one-shot attach-window failure during boot revival.
     /// The same durable row can then be retried through MaterializeReplay.
     pub async fn restore_with_stopping_first_executor_after_ensure(self) -> HostDaemonFixture {
-        self.restore_result_with_faults(false, true)
+        self.restore_result_with_faults(false, true, None)
             .await
             .expect("restore partitioned host with stopped first revived executor")
     }
@@ -2412,8 +2426,10 @@ impl PartitionedHostDaemon {
         self,
         failing_member_region_persistence: bool,
         stop_first_executor_after_ensure: bool,
+        member_llm_client: Option<Arc<dyn meerkat_client::LlmClient>>,
     ) -> Result<HostDaemonFixture, MobHostActorError> {
         spawn_host_daemon_fixture(HostFixtureOptions {
+            member_llm_client,
             runtime_store: Some(self.store),
             identity_secret: Some(self.identity_secret),
             member_substrate: self.member_substrate,
@@ -6238,6 +6254,75 @@ pub fn scripted_member_client_completing_for_provider(
     Arc::new(ScriptedCompletingClient {
         text: text.to_string(),
         provider,
+    })
+}
+
+/// Every stream completes with the text the file at `path` holds when the
+/// stream is asked for: the file is read again for each request and the
+/// client keeps no copy of it.
+struct FileReplyingClient {
+    path: std::path::PathBuf,
+    provider: meerkat_core::Provider,
+}
+
+#[async_trait::async_trait]
+impl meerkat_client::LlmClient for FileReplyingClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        // A file that cannot be read answers a text that says so: a row that
+        // looks for the file's value then fails on what the reply holds.
+        let text = std::fs::read_to_string(&self.path).unwrap_or_else(|error| {
+            format!(
+                "the reply file {} could not be read: {error}",
+                self.path.display()
+            )
+        });
+        let events = vec![
+            meerkat_client::LlmEvent::TextDelta {
+                delta: text,
+                meta: None,
+            },
+            meerkat_client::LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    self.provider,
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            },
+            meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+            },
+        ];
+        Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        self.provider
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+/// A member client whose every turn completes with the text the file at
+/// `path` holds at that turn (read again for each request; no copy is
+/// kept), so a reply shows what the file held when the member answered.
+pub fn member_client_replying_from_file(
+    path: impl Into<std::path::PathBuf>,
+) -> Arc<dyn meerkat_client::LlmClient> {
+    Arc::new(FileReplyingClient {
+        path: path.into(),
+        provider: meerkat_core::Provider::Anthropic,
     })
 }
 

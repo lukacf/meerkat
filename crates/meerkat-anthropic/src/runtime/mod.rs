@@ -1953,6 +1953,132 @@ mod tests {
         );
     }
 
+    /// CHARACTERIZATION of today's request, not an endorsement of the route.
+    ///
+    /// The request the adapter builds today for the `vertex` backend when a
+    /// Google identity signs it: the connection `vertex_google_auth` resolves
+    /// to is a dynamic authorizer, which a stub stands for here. One request
+    /// goes to a local stub, which records it.
+    ///
+    /// What is recorded: the Claude API request sent to the configured base
+    /// URL. `POST {base_url}/v1/messages`, the API version in the
+    /// `anthropic-version` header (no version member in the body), the
+    /// `model` member in the body, and the credential in the authorizer's
+    /// `Authorization` header alone (no `x-api-key`).
+    ///
+    /// This row claims nothing about what a Vertex host accepts. It exists so
+    /// that a change of this request shape is seen.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn today_a_vertex_identity_sends_the_direct_messages_request_no_claim_about_vertex() {
+        use axum::{
+            Json, Router,
+            body::Bytes,
+            http::{HeaderMap, Method, StatusCode, Uri},
+            response::IntoResponse,
+        };
+        use futures::StreamExt;
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::{LlmClient, LlmRequest};
+        use std::sync::Mutex;
+
+        const MODEL: &str = "claude-sonnet-4-6";
+
+        type Recorded = Arc<Mutex<Vec<(Method, Uri, HeaderMap, serde_json::Value)>>>;
+        let recorded: Recorded = Arc::default();
+        let recorder = Arc::clone(&recorded);
+        let app = Router::new().fallback(
+            move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+                let recorder = Arc::clone(&recorder);
+                async move {
+                    let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    recorder
+                        .lock()
+                        .expect("recorder")
+                        .push((method, uri, headers, body));
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "recorded by the local stub",
+                            },
+                        })),
+                    )
+                        .into_response()
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the local stub");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve the local stub");
+        });
+
+        let client = build_anthropic_client(authorizer_connection(
+            AnthropicBackendKind::Vertex,
+            Some(&base_url),
+        ))
+        .unwrap_or_else(|error| panic!("the vertex client builds: {error}"));
+        let request = LlmRequest::new(MODEL, vec![Message::User(UserMessage::text("hello"))]);
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+        drop(stream);
+        server.abort();
+
+        let recorded = recorded.lock().expect("recorded");
+        assert_eq!(recorded.len(), 1, "one request reaches the stub");
+        let (method, uri, headers, body) = &recorded[0];
+        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+
+        // The method and the whole path: the Claude API's, with no project,
+        // location, publisher or prediction method in it.
+        assert_eq!(method, Method::POST);
+        assert_eq!(uri.path(), "/v1/messages");
+        assert_eq!(uri.query(), None);
+
+        // The API version travels in a header, not in the body.
+        assert_eq!(header("anthropic-version"), Some("2023-06-01"));
+        assert!(body.get("anthropic_version").is_none(), "{body}");
+
+        // The model is a member of the body.
+        assert_eq!(body["model"], MODEL);
+
+        // The credential is the authorizer's bearer, and nothing else.
+        assert_eq!(header("authorization"), Some("Bearer test-token"));
+        assert!(headers.get("x-api-key").is_none());
+    }
+
+    /// TODAY'S BEHAVIOUR, recorded and not endorsed: on the identity path a
+    /// `vertex` connection without a base URL still builds a client (the
+    /// missing base URL becomes an empty string), while the bearer-secret
+    /// path of the same backend refuses it. This row pins the difference as
+    /// it is today; it is not a contract, and a change that makes the
+    /// identity path refuse a missing base URL should change this row.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn today_a_vertex_identity_without_a_base_url_still_builds_recorded_not_endorsed() {
+        assert!(
+            build_anthropic_client(authorizer_connection(AnthropicBackendKind::Vertex, None))
+                .is_ok(),
+            "the identity path builds a client without a base URL"
+        );
+        match build_anthropic_client(inline_secret_connection(AnthropicBackendKind::Vertex, None)) {
+            Err(ProviderClientError::InvalidBaseUrl(_)) => {}
+            Err(other) => panic!("the bearer-secret path refuses the base URL: {other}"),
+            Ok(_) => panic!("the bearer-secret path refuses a missing base URL"),
+        }
+    }
+
     /// Messages on the direct backends: the level Core writes on the
     /// tag (`effort` alone) reaches the wire as `output_config.effort`, and
     /// the rest of the body is the body of the same request without a level.

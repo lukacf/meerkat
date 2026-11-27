@@ -1275,6 +1275,19 @@ The shipped `rkat` CLI enables Anthropic, OpenAI, Gemini, OAuth,
 stock TokenStore profile remains file-backed. Select the corresponding
 provider-owned features when a custom build needs the native methods above.
 
+### Native Google authentication in the Meta gateway archive
+
+**Archive limitation (2026-11-26).** The published Meta 0.9.18 Linux GNU
+x86-64 `meta_gateway` binary was built without `meerkat-gemini/adc` and
+`meerkat-anthropic/vertex`. In that binary, `adc` for Google Vertex AI and
+`vertex_google_auth` for Anthropic Vertex are unavailable. The `compute_adc`
+method also requires the missing Gemini feature, but it belongs to Google
+Code Assist, not Vertex AI.
+
+The inspected archive was `meta-gateway-0.9.18-x86_64-unknown-linux-gnu.tar.gz`.
+The other gateway archives in the Meta 0.9.18 release were not inspected. This check
+covered compiled credential methods, not end-to-end Vertex inference.
+
 ## See also
 
 - [Hooks](/guides/hooks) - observe auth events or gate turns on

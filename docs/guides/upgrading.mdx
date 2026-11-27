@@ -89,11 +89,11 @@ precedence; a local member can store that override even if its profile omits the
 key. A grant can open the tool despite `web_search = false`; the setting is not
 an access boundary.
 
-By source, versions 0.9.15–0.9.18 ignore the key in a mob profile and can drop
+By source, versions 0.9.15-0.9.18 ignore the key in a mob profile and can drop
 it on rewrite. Strict portable and wire forms reject it. Do not rely on `false`
 to keep search disabled after downgrade, or assume an older host can reopen a
-placed member’s stored spec. Restore from a stopped backup known to work with
-the older version. A build from the 0.9.16 tag refused a placed member’s
+placed member's stored spec. Restore from a stopped backup known to work with
+the older version. A build from the 0.9.16 tag refused a placed member's
 stored profile in an earlier test. Reading state written by this change with a
 released 0.9.18 runtime was not verified. See [Web search](/guides/mobs#web-search).
 
@@ -106,19 +106,19 @@ cleanup can still be pending. Hosts watching tool events should also handle
 Keep handling the generic timeout: it can still occur before a helper is
 created or when an earlier outer deadline expires. `max_run_secs` can shorten
 the wait; to allow a longer wait, change `[tools.tool_timeouts] delegate`.
-This is not a deadline on a long model call or on a remote helper’s tools.
+This is not a deadline on a long model call or on a remote helper's tools.
 
 A control-scope refusal at helper seating or objective binding is now
 `access_denied`, without helper IDs. For a 0.9.18 caller, the same refusal is
 `execution_failed` with the `control scope denied` message and no typed data.
 Do not treat every `execution_failed` as a permission error or retry an
-unchanged denied call. Rust dispatchers that forward the tools’ catalog must
+unchanged denied call. Rust dispatchers that forward the tools' catalog must
 also forward `AgentToolDispatcher::dispatch_resolved_with_context` to preserve
 the resolved deadline. See [Delegate: its wait and how it ends](/reference/builtin-tools#delegate-its-wait-and-how-it-ends).
 
 ### Self-hosted endpoints: read allowed strings from `enum`
 
-If your endpoint inspects Meerkat’s tool schemas, read closed string choices
+If your endpoint inspects Meerkat's tool schemas, read closed string choices
 from `enum`, not per-choice descriptions. For an optional parameter, omit it
 rather than assuming `null` is accepted. This affects the configured self-hosted
 Chat Completions and Responses paths, not direct OpenAI or third-party tool
@@ -138,7 +138,7 @@ an error from the plain resume does not tell you whether its prompt ran. Alongsi
 `-32003` (`session_resume_required`), you may see untyped errors such as `-32603`
 (`Agent error: agent error: Internal error: Runtime not ready: destroyed`) or
 `-32005` (`request cancelled`). Wait for the other resume to answer, read the
-session’s history with `meerkat_history`, and resend the prompt only if it is
+session's history with `meerkat_history`, and resend the prompt only if it is
 absent. This limitation also applies to 0.9.18.
 
 ## Upgrading to 0.9.18

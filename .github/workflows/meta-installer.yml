@@ -239,8 +239,10 @@ jobs:
         run: python installer/tests/installer_shards.py ${{ matrix.shard }} 12 installer-shard-files.txt
       # The backend job checks these lists of every shard together. Beside
       # the list is this execution's identity (installer-shard-identity.json:
-      # the run, the attempt, the tested commit, the shard and the collection
-      # the plan was computed from), which says where the list belongs.
+      # the run, the attempt, the tested commit, the shard, the collection
+      # the plan was computed from, the Python packages installed in this
+      # environment as pip lists them, and the npm lock files the steps
+      # above installed from), which says where the list belongs.
       - name: Retain this shard's plan
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -276,14 +278,15 @@ jobs:
           path: meta/installer-pytest.xml
           if-no-files-found: ignore
 
-  # This job relies on the two lines below it, `needs` with every shard job
-  # and no `if:`. A shard execution that fails before it uploads a plan
-  # leaves nothing behind, so installer_shards.py cannot see it and would
-  # take an older passed execution of that shard. The job graph is what
-  # refuses that case: this job does not run while any shard's newest
-  # result is not a success. Do not give it a condition, do not drop a shard
-  # from `needs`, and do not let a shard step continue on error
-  # (meta/scripts/test_installer_release.py pins all three).
+  # A shard execution that fails before it uploads a plan leaves nothing
+  # behind, so among the collected folders an older passed execution of that
+  # shard would look like its newest. Two things refuse that case, and both
+  # must stay. The script steps below are told the shard jobs' result and
+  # refuse unless it is success. And this job has `needs` with every shard
+  # job and no `if:`, so it does not run while any shard's newest result is
+  # not a success. Do not give it a condition, do not drop a shard from
+  # `needs`, and do not let a shard step continue on error
+  # (meta/scripts/test_installer_release.py pins all of it).
   backend:
     needs: [backend-shard, agent-team-live]
     runs-on: ubuntu-24.04
@@ -297,8 +300,9 @@ jobs:
       # under the attempt it ran in. So the plans and toolchain files of every
       # attempt of this run are collected, and the script takes each shard's
       # newest execution by the identity each one carries. It refuses plans
-      # that are not of this run, of one tested commit and of one collection,
-      # and any folder that is not one execution's. A release does not join
+      # that are not of this run, of one tested commit, one collection, one
+      # set of installed Python packages and one set of npm lock files, and
+      # any folder that is not one execution's. A release does not join
       # attempts: installer-release.py binds a run only when every shard
       # planned in the attempt it binds.
       - name: Collect the shards' plans
@@ -306,9 +310,15 @@ jobs:
         with:
           pattern: installer-shard-plan-*
           path: meta/plans
-      # Each shard planned on its own. Fail unless together they ran every
-      # installer test file once.
-      - name: Check that the shards ran every test file once
+      # Each shard planned on its own. Fail unless every installer test file
+      # is in exactly one of the plans taken. A plan is what a shard
+      # selected; that it ran its plan and passed is the shard job's result.
+      # The folders cannot show a shard execution that uploaded nothing, so
+      # both script steps are told the shard jobs' result from this
+      # workflow's own context and refuse unless it is success.
+      - name: Check that every test file is in exactly one shard's plan
+        env:
+          BACKEND_SHARD_RESULT: ${{ needs.backend-shard.result }}
         run: python3 installer/tests/installer_shards.py verify 12 plans
       - name: Collect the shards' toolchains
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -320,6 +330,8 @@ jobs:
       # shard writes them only after its tests passed. Every folder collected
       # here must be an execution that planned in this run.
       - name: Record the toolchain
+        env:
+          BACKEND_SHARD_RESULT: ${{ needs.backend-shard.result }}
         run: python3 installer/tests/installer_shards.py toolchain 12 plans shards > installer-toolchain.json
       - name: Retain the toolchain
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

@@ -95,8 +95,10 @@ two hours on a busy development host. The installer workflow
 shards balanced on the test time a hosted run recorded
 (`installer/tests/installer_shard_seconds.json`), each with a 120-minute limit and
 its own 20 slowest tests. The `backend` job passes only once every shard
-has, and it checks that the shards together ran every test file once
-(`installer_shards.py verify`). Refresh the recorded test time from a
+has, and it checks that every test file is in exactly one shard's plan
+(`installer_shards.py verify`). A plan is what a shard selected: that the
+shard ran its plan and passed is the shard job's result, and a file pytest
+skips whole is still in a plan. Refresh the recorded test time from a
 complete run's junit files with
 `python installer/tests/installer_shards.py record installer-pytest.xml...`;
 stale times only affect the balance, never which files run.
@@ -107,24 +109,30 @@ Preserve the failure output and XML before making a correction.
 After a rerun of one failed shard the other shards are not run again. Each
 shard therefore writes its identity beside its run list and beside its
 toolchain file (`installer-shard-identity.json`: the run, the attempt, the
-tested commit, the shard and the collection the plan was computed from), and
+tested commit, the shard, the collection the plan was computed from, the
+Python packages installed where its tests run, as `pip freeze --all` lists
+them, and the two npm lock files its job's `npm ci` steps install from), and
 the `backend` job takes each shard's newest execution across the run's
 attempts by those identities. It refuses plans that are not of its run, of
-one tested commit and of one collection, and any collected folder that is not
-one execution's. Three limits of that rule:
+one tested commit, one collection, one set of installed Python packages and
+one set of npm lock files; a missing or unreadable identity or toolchain
+file; and any collected folder that is not one execution's. What that rule
+rests on, and where it ends:
 
-- The script cannot see an execution that wrote nothing. A shard execution
-  that fails before it uploads its plan leaves no artifact, and with an older
-  passed execution of that shard in the run the script would take the older
-  one. The job graph refuses that case, not the script: `backend` needs every
-  shard job and has no condition of its own, so it does not run while any
-  shard's newest result is not a success. A contract test pins this
+- The collected folders cannot show an execution that wrote nothing. A shard
+  execution that fails before it uploads its plan leaves no artifact, and an
+  older passed execution of that shard would then look like its newest. So
+  the `backend` job passes the shard jobs' result to the script
+  (`needs.backend-shard.result`, which no shard execution writes) and the
+  script refuses unless it is `success`; unset or empty refuses too. The job
+  graph says the same a second time: `backend` needs every shard job and has
+  no condition of its own. A contract test pins both
   (`meta/scripts/test_installer_release.py`).
-- Nothing binds the packages each execution's `pip` and `npm` resolved. The
-  shards of one attempt already resolved them separately; a retry long after
-  the first attempt joins shards that may have run against different resolved
-  packages. Only the Python and Node versions and the collected item counts
-  are compared.
+- What the taken executions are compared on is what is listed above, and no
+  more. Not compared: the system packages the job installs with `apt-get`,
+  the runner image, and the installed npm tree itself (`npm ci` installs what
+  the lock file says; the lock file is what is named). A retry long after the
+  first attempt can therefore still join executions that differ in those.
 - A release does not join attempts. `scripts/installer-release.py` binds a
   dispatched run only when every backend shard planned in the attempt it
   binds (see RELEASING.md): dispatch again, or rerun all jobs.

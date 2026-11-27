@@ -19,26 +19,36 @@ artifact names, and the newer attempt's job list repeats its result under the
 newer attempt's number, so neither a name pattern for one attempt nor the job
 list says where a shard's files are. Each shard therefore writes its identity
 beside its run list (installer-shard-identity.json: the run, the attempt, the
-tested commit, the shard, and the collection the plan was computed from) and
-again beside its toolchain file, which it writes only after its tests passed.
-The backend job collects the plans and toolchain files of every attempt of
-its run and takes, for each shard, the newest execution by those identities.
-It refuses plans that are not of its run, of one tested commit and of one
-collection, a shard without a plan, a taken plan without its own toolchain
-file, and any folder it is given that is not one execution's.
+tested commit, the shard, the collection the plan was computed from, the
+Python packages installed in the environment its tests run in, and the npm
+lock files its job installed from) and again beside its toolchain file, which
+it writes only after its tests passed. The backend job collects the plans and
+toolchain files of every attempt of its run and takes, for each shard, the
+newest execution by those identities. It refuses plans that are not of its
+run, of one tested commit, one collection, one set of installed Python
+packages and one set of npm lock files, a shard without a plan, a taken plan
+without its own readable toolchain file, and any folder it is given that is
+not one execution's.
 
-What this script cannot see: an execution that failed before it uploaded a
-plan leaves nothing, so "newest" here is the newest execution that planned.
-If such a failed execution were a shard's newest, the script alone would take
-the older one. The workflow's job graph refuses that case, not this script:
-the backend job needs every shard job and has no condition of its own, so it
-does not run while any shard's newest result is not a success. Keep it so
-(meta/scripts/test_installer_release.py pins it).
+What the folders cannot show: an execution that failed before it uploaded a
+plan leaves nothing, so among the folders "newest" is the newest execution
+that planned, and an older passed execution of that shard would look like its
+newest. The backend job therefore passes the shard jobs' result in
+(BACKEND_SHARD_RESULT, from needs.backend-shard.result, which no shard
+execution writes), and verify and toolchain refuse unless it is exactly
+"success"; unset or empty refuses too. The job graph says the same a second
+time: the backend job needs every shard job and has no condition of its own
+(meta/scripts/test_installer_release.py pins both).
+
+What a plan is: the files a shard selected. That the shard then ran them and
+passed is the shard job's result, not something a plan says; a file pytest
+skips whole is still in a plan. So verify states that every test file is in
+exactly one taken plan, and requires the shard jobs' result beside it.
 
 Usage: installer_shards.py SHARD COUNT FILES_OUT writes the test files this
-shard runs to FILES_OUT and its identity beside it. installer_shards.py verify
-COUNT PLANS fails unless the newest run lists of the COUNT shards, one folder
-per execution under PLANS, ran every installer test file once.
+shard selects to FILES_OUT and its identity beside it. installer_shards.py
+verify COUNT PLANS fails unless every installer test file is in exactly one
+of the newest plans of the COUNT shards, one folder per execution under PLANS.
 installer_shards.py toolchain COUNT PLANS TOOLCHAINS prints the one toolchain
 the executions taken from PLANS wrote, one folder per execution under
 TOOLCHAINS. installer_shards.py record JUNIT... rewrites
@@ -63,10 +73,18 @@ COLLECTED_FILE = re.compile(r"\S+\.py: [0-9]+")
 LISTING = "installer-shard-files.txt"
 IDENTITY = "installer-shard-identity.json"
 TOOLCHAIN = "installer-toolchain.json"
+# The npm lock files the shard job's `npm ci` steps install from.
+LOCKS = (INSTALLER.parent / "console/package-lock.json", INSTALLER / "web/package-lock.json")
+# The workflow passes the shard jobs' result (needs.backend-shard.result) in.
+SHARDS_RESULT = "BACKEND_SHARD_RESULT"
+DIGEST = re.compile(r"[0-9a-f]{64}")
 # What one suite shares: the run, the commit it tested, the collection its
-# plan was computed from. With the environment variable that names this run's.
+# plan was computed from, the Python packages installed where its tests ran
+# and the npm lock files installed from. With the environment variable that
+# names this run's.
 SUITE = (("run_id", "run id", "GITHUB_RUN_ID"), ("commit", "tested commit", "GITHUB_SHA"),
-         ("collection", "collection", None))
+         ("collection", "collection", None), ("packages", "set of installed Python packages", None),
+         ("locks", "set of npm lock files", None))
 
 
 def test_files():
@@ -143,8 +161,33 @@ def record(junit_files, path=SECONDS):
     path.write_text(json.dumps({name: round(value, 1) for name, value in sorted(seconds.items())}, indent=1) + "\n")
 
 
+def installed_packages():
+    """Every package this interpreter's environment has installed, as pip
+    lists it: what the shard's tests import. pip reads the environment; no
+    index is asked."""
+    result = subprocess.run([sys.executable, "-m", "pip", "--disable-pip-version-check", "freeze", "--all"],
+                            capture_output=True, text=True, check=False)
+    lines = sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+    if result.returncode != 0 or not lines:
+        raise SystemExit(f"The installed Python packages cannot be listed (python -m pip freeze, exit "
+                         f"{result.returncode}): a shard does not plan without knowing what it runs against.")
+    return "".join(line + "\n" for line in lines)
+
+
+def lock_files_digest(paths=LOCKS):
+    """One name for the npm lock files `npm ci` installed from in this job."""
+    held = []
+    for path in paths:
+        if not path.is_file():
+            raise SystemExit(f"{path.parent.name}/{path.name} is missing: the npm packages this shard installed "
+                             "from it are unknown.")
+        held.append(f"{path.parent.name}/{path.name} {hashlib.sha256(path.read_bytes()).hexdigest()}\n")
+    return hashlib.sha256("".join(held).encode()).hexdigest()
+
+
 def identity(shard, shards, counts, environ=None):
-    """This shard execution's identity: where it ran and what it planned from."""
+    """This shard execution's identity: where it ran, what it planned from
+    and what it runs against."""
     environ = os.environ if environ is None else environ
     unset = [name for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA") if not environ.get(name)]
     if unset and environ.get("GITHUB_ACTIONS") == "true":
@@ -154,7 +197,9 @@ def identity(shard, shards, counts, environ=None):
             "run_attempt": int(environ.get("GITHUB_RUN_ATTEMPT") or 1),
             "commit": environ.get("GITHUB_SHA") or "local",
             "shard": shard, "shards": shards,
-            "collection": hashlib.sha256(collected.encode()).hexdigest()}
+            "collection": hashlib.sha256(collected.encode()).hexdigest(),
+            "packages": hashlib.sha256(installed_packages().encode()).hexdigest(),
+            "locks": lock_files_digest()}
 
 
 def read_identity(folder):
@@ -167,10 +212,12 @@ def read_identity(folder):
     except ValueError:
         value = None
     if not (isinstance(value, dict)
-            and set(value) == {"run_id", "run_attempt", "commit", "shard", "shards", "collection"}
+            and set(value) == {"run_id", "run_attempt", "commit", "shard", "shards", "collection", "packages", "locks"}
             and all(type(value[key]) is int for key in ("run_attempt", "shard", "shards"))
             and value["run_attempt"] >= 1 and value["shards"] >= 1 and value["shard"] >= 0
-            and all(isinstance(value[key], str) and value[key] for key in ("run_id", "commit", "collection"))):
+            and all(isinstance(value[key], str) and value[key] for key in ("run_id", "commit"))
+            and all(isinstance(value[key], str) and DIGEST.fullmatch(value[key])
+                    for key in ("collection", "packages", "locks"))):
         return None, f"{folder.name} has an unreadable {IDENTITY}"
     return value, None
 
@@ -199,9 +246,19 @@ def executions(folder, prefix, problems):
 
 def select(shards, plans, environ=None):
     """Each shard's newest plan under PLANS, the plans it supersedes, and
-    what stops the newest ones from being one suite of this run."""
+    what stops the newest ones from being one suite of this run.
+
+    The folders cannot show a shard execution that left none, so the result
+    of the shard jobs is asked first: it comes from the workflow
+    (needs.backend-shard.result), which no shard execution writes, and
+    anything but success refuses."""
     environ = os.environ if environ is None else environ
     problems, newest, superseded = [], {}, []
+    result = environ.get(SHARDS_RESULT)
+    if result != "success":
+        said = f"is {result!r}, not 'success'" if result else f"was not passed in ({SHARDS_RESULT} is unset or empty)"
+        problems.append(f"the shard jobs' result {said}: a shard's newest execution may have left no plan, and an "
+                        "older plan of that shard is never taken in its place")
     for folder, value in executions(plans, "installer-shard-plan", problems):
         if not (value["shards"] == shards and value["shard"] < shards):
             problems.append(f"{folder.name} is shard {value['shard']} of {value['shards']}, not one of {shards}")
@@ -216,8 +273,8 @@ def select(shards, plans, environ=None):
     chosen = [newest[shard] for shard in sorted(newest)]
     if len(chosen) != shards:
         missing = ", ".join(str(shard) for shard in range(shards) if shard not in newest)
-        problems.insert(0, f"{len(chosen)} shard plans instead of {shards}")
-        problems.insert(1, f"no plan of shard {missing}")
+        problems.append(f"{len(chosen)} shard plans instead of {shards}")
+        problems.append(f"no plan of shard {missing}")
     for field, label, variable in SUITE:
         said = {}
         for folder, value in chosen:
@@ -239,29 +296,49 @@ def select(shards, plans, environ=None):
 
 
 def verify(shards, plans, expected_files=None, environ=None):
-    """Fail unless the shards' newest run lists ran every test file once."""
+    """Fail unless every test file is in exactly one of the shards' newest plans.
+
+    A plan is what a shard selected, not what it ran: that each shard ran its
+    plan and passed is the shard jobs' result, which `select` requires to be
+    success. A test file that pytest skips whole is still in a plan."""
     expected_files = tracked_test_files() if expected_files is None else expected_files
     chosen, superseded, problems = select(shards, plans, environ)
-    ran = Counter()
+    planned = Counter()
     for folder, _ in chosen:
         if not (folder / LISTING).is_file():
             problems.append(f"{folder.name} has no {LISTING}")
             continue
-        ran.update(line.removeprefix("installer/tests/") for line in (folder / LISTING).read_text().splitlines())
-    for kind, names in (("ran nowhere", sorted(set(expected_files) - set(ran))),
-                        ("ran more than once", sorted(name for name, count in ran.items() if count > 1)),
-                        ("ran but is not expected", sorted(set(ran) - set(expected_files)))):
+        planned.update(line.removeprefix("installer/tests/") for line in (folder / LISTING).read_text().splitlines())
+    for kind, names in (("in no plan", sorted(set(expected_files) - set(planned))),
+                        ("in more than one plan", sorted(name for name, count in planned.items() if count > 1)),
+                        ("in a plan but not expected", sorted(set(planned) - set(expected_files)))):
         if names:
             problems.append(f"{kind}: {', '.join(names)}")
     if problems:
-        raise SystemExit("The shards did not run the suite exactly once. " + "; ".join(problems))
+        raise SystemExit("The taken plans do not hold every test file exactly once. " + "; ".join(problems))
     attempts = {}
     for _, value in chosen:
         attempts.setdefault(value["run_attempt"], []).append(str(value["shard"]))
     taken = "; ".join(f"attempt {attempt}: shard{'s' if len(mine) > 1 else ''} {', '.join(mine)}"
                       for attempt, mine in sorted(attempts.items()))
-    print(f"{len(chosen)} shards ran {len(ran)} test files once. Plans taken: {taken}."
+    print(f"Every one of {len(planned)} test files is in exactly one of the {len(chosen)} taken plans. "
+          f"The {len(chosen)} executions are of this run and commit, of one collection, one set of installed "
+          f"Python packages and one set of npm lock files, and the shard jobs' result is success. "
+          f"Plans taken: {taken}."
           + (f" Not counted, superseded: {', '.join(folder.name for folder, _ in superseded)}." if superseded else ""))
+
+
+def read_toolchain(path):
+    """A shard's toolchain file as text, or None when it is not the two versions."""
+    try:
+        text = path.read_text()
+        value = json.loads(text)
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(value, dict) and set(value) == {"python", "node"}
+            and all(isinstance(held, str) and held for held in value.values())):
+        return None
+    return text
 
 
 def toolchain(shards, plans, toolchains, environ=None):
@@ -281,6 +358,8 @@ def toolchain(shards, plans, toolchains, environ=None):
         key = json.dumps(value, sort_keys=True)
         if not (folder / TOOLCHAIN).is_file():
             problems.append(f"{folder.name} has no {TOOLCHAIN}")
+        elif read_toolchain(folder / TOOLCHAIN) is None:
+            problems.append(f"{folder.name} has an unreadable {TOOLCHAIN}")
         elif key not in planned:
             problems.append(f"{folder.name} is of no plan of this run")
         else:
@@ -291,7 +370,7 @@ def toolchain(shards, plans, toolchains, environ=None):
     for _, value in chosen:
         mine = held.get(json.dumps(value, sort_keys=True), [])
         if len(mine) == 1:
-            values.append(mine[0].read_text())
+            values.append(read_toolchain(mine[0]))
         else:
             missing.append(f"shard {value['shard']} (attempt {value['run_attempt']})")
     if missing:

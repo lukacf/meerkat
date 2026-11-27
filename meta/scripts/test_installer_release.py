@@ -493,7 +493,7 @@ class WorkflowShapeTests(unittest.TestCase):
                       "          if-no-files-found: error\n", shard)
         steps = [line.strip() for line in backend.splitlines() if line.startswith("      - ")]
         self.assertEqual(steps, ["- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
-            "- name: Collect the shards' plans", "- name: Check that the shards ran every test file once",
+            "- name: Collect the shards' plans", "- name: Check that every test file is in exactly one shard's plan",
             "- name: Collect the shards' toolchains", "- name: Record the toolchain", "- name: Retain the toolchain"])
         # The run's plans and records of every attempt are collected: a shard
         # that was not rerun left its own under the attempt it ran in. The
@@ -506,7 +506,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertNotRegex(backend, r"(?m)^ +pattern: .*run_attempt")
         self.assertNotIn("<<", backend)
 
-    RUN_ENV = {"GITHUB_RUN_ID": str(FORGE_RUN), "GITHUB_SHA": SHA}
+    RUN_ENV = {"GITHUB_RUN_ID": str(FORGE_RUN), "GITHUB_SHA": SHA, "BACKEND_SHARD_RESULT": "success"}
     SHARD_TOOLCHAIN = {"python": "Python 3.12.13", "node": "v22.22.2"}
 
     def shard_executions(self, shards, executions, collected=None, **environ):
@@ -522,13 +522,18 @@ class WorkflowShapeTests(unittest.TestCase):
         self.add_executions(shards, root, executions, collected, **environ)
         return root
 
-    def add_executions(self, shards, root, executions, collected=None, passed=True, **environ):
+    def add_executions(self, shards, root, executions, collected=None, passed=True, packages="pytest==8.3.4\n",
+                       locks="c" * 64, **environ):
+        """PACKAGES is what the execution's environment has installed, as pip
+        lists it, and LOCKS the name of the npm lock files it installed from."""
         files = shards.test_files()
         collected = collected or "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
         for shard, attempt in executions:
             plan = root / "plans" / f"installer-shard-plan-{shard}-{attempt}"
             plan.mkdir()
             with mock.patch.dict(os.environ, {**self.RUN_ENV, **environ, "GITHUB_RUN_ATTEMPT": str(attempt)}), \
+                    mock.patch.object(shards, "installed_packages", return_value=packages, create=True), \
+                    mock.patch.object(shards, "lock_files_digest", return_value=locks, create=True), \
                     mock.patch.object(shards.subprocess, "run",
                                       return_value=subprocess.CompletedProcess([], 0, collected, "")):
                 shards.main([str(shard), "12", str(plan / "installer-shard-files.txt")])
@@ -610,13 +615,136 @@ class WorkflowShapeTests(unittest.TestCase):
             with self.subTest(fault):
                 self.assertEqual(source.count(old), 1)
                 self.assertIn(fault, self.job_graph_faults(source.replace(old, new)))
-        # What the script alone does with that case: shard 5 passed in
-        # attempt 1 and its rerun in attempt 2 failed before it planned.
-        # Nothing of attempt 2 exists, and the older execution is taken.
+        # The script is told the shard jobs' result by both backend steps
+        # that run it, from the workflow's own context.
+        backend = job_block("backend", FORGE_CI)
+        told = "        env:\n          BACKEND_SHARD_RESULT: ${{ needs.backend-shard.result }}\n"
+        self.assertIn("      - name: Check that every test file is in exactly one shard's plan\n" + told
+                      + "        run: python3 installer/tests/installer_shards.py verify 12 plans\n", backend)
+        self.assertIn("      - name: Record the toolchain\n" + told
+                      + "        run: python3 installer/tests/installer_shards.py toolchain 12 plans shards "
+                      "> installer-toolchain.json\n", backend)
+        self.assertEqual(source.count("BACKEND_SHARD_RESULT"), 2)
+        self.assertEqual(load("installer_shards", ROOT / "installer/tests/installer_shards.py").SHARDS_RESULT,
+                         "BACKEND_SHARD_RESULT")
+
+    def test_the_backend_job_refuses_unless_the_shard_jobs_passed(self):
+        """The folders alone: shard 5 passed in attempt 1 and its rerun in
+        attempt 2 failed before it uploaded anything. An older passed plan
+        and toolchain file exist for the shard and nothing newer, so among the
+        folders the older execution is its newest. The script is therefore
+        told the shard jobs' result, and anything but success refuses, in
+        the check and in the toolchain step alike."""
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         root = self.shard_executions(shards, [(shard, 1) for shard in range(12)])
-        self.assertIn("Plans taken: attempt 1: shards 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11.",
-                      self.backend_job(shards, root))
+        known = {name: value for name, value in self.RUN_ENV.items() if name != "BACKEND_SHARD_RESULT"}
+        reason = ("a shard's newest execution may have left no plan, and an older plan of that shard is never "
+                  "taken in its place")
+        cases = {"failure": "the shard jobs' result is 'failure', not 'success': " + reason,
+                 "cancelled": "the shard jobs' result is 'cancelled', not 'success': " + reason,
+                 "skipped": "the shard jobs' result is 'skipped', not 'success': " + reason,
+                 "Success": "the shard jobs' result is 'Success', not 'success': " + reason,
+                 "": "the shard jobs' result was not passed in (BACKEND_SHARD_RESULT is unset or empty): " + reason,
+                 None: "the shard jobs' result was not passed in (BACKEND_SHARD_RESULT is unset or empty): " + reason}
+        for result, refusal in cases.items():
+            environ = dict(known) if result is None else {**known, "BACKEND_SHARD_RESULT": result}
+            for step in ("verify", "toolchain"):
+                with self.subTest(result=result, step=step), contextlib.redirect_stdout(io.StringIO()) as printed, \
+                        self.assertRaises(SystemExit) as refused:
+                    if step == "verify":
+                        shards.verify(12, root / "plans", environ=environ)
+                    else:
+                        shards.toolchain(12, root / "plans", root / "shards", environ=environ)
+                self.assertIn(refusal, str(refused.exception))
+                self.assertEqual(printed.getvalue(), "")
+        # With the result success the same folders are the ordinary first
+        # attempt, and the line says what it rests on.
+        answer = self.backend_job(shards, root)
+        self.assertIn("Plans taken: attempt 1: shards 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11.", answer)
+        self.assertIn("and the shard jobs' result is success", answer)
+        # Through the command line, with the environment the workflow gives.
+        for step in (["verify", "12", str(root / "plans")], ["toolchain", "12", str(root / "plans"), str(root / "shards")]):
+            with self.subTest(step=step[0]), mock.patch.dict(os.environ, {**known, "BACKEND_SHARD_RESULT": "failure"}), \
+                    self.assertRaises(SystemExit) as refused:
+                shards.main(step)
+            self.assertIn("the shard jobs' result is 'failure', not 'success'", str(refused.exception))
+
+    def test_the_backend_job_refuses_executions_that_ran_against_different_packages(self):
+        """Each execution names the Python packages installed where its tests
+        run (pip's own list) and the npm lock files its job installed from.
+        The taken executions must name one set of each; a retry long after
+        the first attempt is the case that can differ."""
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
+        others = [(shard, 1) for shard in range(12) if shard != 5]
+        # Equal: the join of two attempts passes and says what was compared.
+        root = self.shard_executions(shards, others + [(5, 2)])
+        answer = self.backend_job(shards, root)
+        self.assertIn("of one collection, one set of installed Python packages and one set of npm lock files", answer)
+        identity = json.loads((root / "plans/installer-shard-plan-5-2/installer-shard-identity.json").read_text())
+        self.assertEqual(identity["packages"], hashlib.sha256(b"pytest==8.3.4\n").hexdigest())
+        self.assertEqual(identity["locks"], "c" * 64)
+        # Different Python packages in the retried execution.
+        root = self.shard_executions(shards, others)
+        self.add_executions(shards, root, [(5, 2)], packages="pytest==8.3.5\n")
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED "), answer)
+        self.assertIn("plans of more than one set of installed Python packages: installer-shard-plan-5-2 has "
+                      + hashlib.sha256(b"pytest==8.3.5\n").hexdigest()[:12] + "; the other 11 have "
+                      + hashlib.sha256(b"pytest==8.3.4\n").hexdigest()[:12], answer)
+        # Different npm lock files.
+        root = self.shard_executions(shards, others)
+        self.add_executions(shards, root, [(5, 2)], locks="d" * 64)
+        self.assertIn("plans of more than one set of npm lock files: installer-shard-plan-5-2 has dddddddddddd; "
+                      "the other 11 have cccccccccccc", self.backend_job(shards, root))
+        # Missing or malformed: an execution that does not say is refused.
+        unreadable = "installer-shard-plan-5-2 has an unreadable installer-shard-identity.json"
+        path = "plans/installer-shard-plan-5-2/installer-shard-identity.json"
+        for change in (lambda value: value.pop("packages"), lambda value: value.pop("locks"),
+                       lambda value: value.pop("collection"), lambda value: value.update(packages=""),
+                       lambda value: value.update(packages="unknown"), lambda value: value.update(locks="C" * 64),
+                       lambda value: value.update(collection="0" * 63)):
+            root = self.shard_executions(shards, others + [(5, 2)])
+            value = json.loads((root / path).read_text())
+            change(value)
+            (root / path).write_text(json.dumps(value) + "\n")
+            with self.subTest(value=sorted(value.items())):
+                self.assertIn(unreadable, self.backend_job(shards, root))
+        # What the shard asks pip: the list is sorted, so its order does not
+        # matter; a failed or empty answer plans nothing.
+        def pip(code, output):
+            return mock.patch.object(shards.subprocess, "run",
+                                     return_value=subprocess.CompletedProcess([], code, output, ""))
+        with pip(0, "b==2\n\na==1\n") as asked:
+            self.assertEqual(shards.installed_packages(), "a==1\nb==2\n")
+        self.assertEqual(asked.call_args.args[0][1:], ["-m", "pip", "--disable-pip-version-check", "freeze", "--all"])
+        self.assertEqual(asked.call_args.args[0][0], sys.executable)
+        for code, output in ((1, "a==1\n"), (0, ""), (0, "\n")):
+            with self.subTest(code=code, output=output), pip(code, output), self.assertRaises(SystemExit) as refused:
+                shards.installed_packages()
+            self.assertIn("The installed Python packages cannot be listed", str(refused.exception))
+        # The lock files are the two the shard job's `npm ci` steps read.
+        self.assertEqual([path.relative_to(ROOT).as_posix() for path in shards.LOCKS],
+                         ["console/package-lock.json", "installer/web/package-lock.json"])
+        shard = job_block("backend-shard", FORGE_CI)
+        self.assertIn("          npm --prefix console ci --ignore-scripts\n", shard)
+        self.assertIn("      - run: npm --prefix installer/web ci\n", shard)
+        self.assertRegex(shards.lock_files_digest(), r"\A[0-9a-f]{64}\Z")
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        (folder / "a.json").write_text("{}")
+        one = shards.lock_files_digest((folder / "a.json",))
+        (folder / "a.json").write_text("{ }")
+        self.assertNotEqual(shards.lock_files_digest((folder / "a.json",)), one)
+        with self.assertRaises(SystemExit) as refused:
+            shards.lock_files_digest((folder / "a.json", folder / "missing.json"))
+        self.assertIn("missing.json is missing", str(refused.exception))
+        # A shard that cannot list its packages plans nothing.
+        collected = "".join(f"tests/{name}: 1\n" for name in shards.test_files())
+        with mock.patch.object(shards.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess([], 0, collected, ""), subprocess.CompletedProcess([], 1, "", "no pip")]), \
+                self.assertRaises(SystemExit):
+            shards.main(["0", "12", str(folder / "installer-shard-files.txt")])
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["a.json"])
 
     def test_the_backend_job_refuses_every_folder_that_is_not_one_execution(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
@@ -649,7 +777,7 @@ class WorkflowShapeTests(unittest.TestCase):
         unreadable = "installer-shard-plan-5-2 has an unreadable installer-shard-identity.json"
         for fields in ({"run_attempt": "2"}, {"run_attempt": True}, {"run_attempt": 2.0}, {"run_attempt": 0},
                        {"shard": -1}, {"shard": "5"}, {"shards": 0}, {"run_id": FORGE_RUN}, {"commit": ""},
-                       {"collection": None}, {"extra": 1}):
+                       {"collection": None}, {"collection": "xyz"}, {"extra": 1}):
             with self.subTest(fields=fields):
                 self.assertIn(unreadable, changed(rewrite("plans/installer-shard-plan-5-2", **fields)))
         for content in ("not json\n", "[]\n", "", '{"run_id": \n'):
@@ -713,7 +841,7 @@ class WorkflowShapeTests(unittest.TestCase):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         root = self.shard_executions(shards, [(shard, 1) for shard in range(12)])
         hosted = {"GITHUB_ACTIONS": "true", **self.RUN_ENV}
-        self.assertIn("12 shards ran", self.backend_job(shards, root, hosted))
+        self.assertIn("is in exactly one of the 12 taken plans", self.backend_job(shards, root, hosted))
         for variable, label in (("GITHUB_RUN_ID", "run id"), ("GITHUB_SHA", "tested commit")):
             for value in (None, ""):
                 with self.subTest(variable=variable, value=value):
@@ -725,7 +853,8 @@ class WorkflowShapeTests(unittest.TestCase):
                     self.assertIn(f"inside Actions without {variable}: this run's {label} is unknown", answer)
         # Outside Actions (a developer's shell) the plans are still compared
         # with each other; there is no run to compare them with.
-        self.assertIn("12 shards ran", self.backend_job(shards, root, {}))
+        self.assertIn("is in exactly one of the 12 taken plans",
+                      self.backend_job(shards, root, {"BACKEND_SHARD_RESULT": "success"}))
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder)
         collected = "".join(f"tests/{name}: 1\n" for name in shards.test_files())
@@ -741,11 +870,11 @@ class WorkflowShapeTests(unittest.TestCase):
             self.assertEqual(list(folder.iterdir()), [])
 
     def test_the_backend_job_takes_the_plans_of_one_attempt_when_every_shard_ran_once(self):
-        """ALL-ONCE: twelve shards ran in attempt 1."""
+        """ALL-ONCE: twelve shards planned and passed in attempt 1."""
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         root = self.shard_executions(shards, [(shard, 1) for shard in range(12)])
         answer = self.backend_job(shards, root)
-        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", answer)
+        self.assertIn(f"Every one of {len(shards.tracked_test_files())} test files is in exactly one of the 12 taken plans", answer)
         self.assertIn("attempt 1: shards 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11", answer)
         self.assertNotIn("superseded", answer)
         self.assertEqual(json.loads(answer.splitlines()[-1]), self.SHARD_TOOLCHAIN)
@@ -763,7 +892,7 @@ class WorkflowShapeTests(unittest.TestCase):
         # Shard 5's first execution failed before it planned: it left nothing.
         root = self.shard_executions(shards, others + [(5, 2)])
         answer = self.backend_job(shards, root)
-        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", answer)
+        self.assertIn(f"Every one of {len(shards.tracked_test_files())} test files is in exactly one of the 12 taken plans", answer)
         self.assertIn("attempt 1: shards 0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11; attempt 2: shard 5", answer)
         self.assertEqual(json.loads(answer.splitlines()[-1]), self.SHARD_TOOLCHAIN)
         # Or its first execution planned and then failed its tests: that plan
@@ -786,7 +915,7 @@ class WorkflowShapeTests(unittest.TestCase):
         old = root / "plans/installer-shard-plan-5-1/installer-shard-files.txt"
         old.write_text(old.read_text() + "installer/tests/test_not_in_this_tree.py\n")
         answer = self.backend_job(shards, root)
-        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", answer)
+        self.assertIn(f"Every one of {len(shards.tracked_test_files())} test files is in exactly one of the 12 taken plans", answer)
         self.assertIn("attempt 2: shard 5", answer)
         self.assertIn("superseded: installer-shard-plan-5-1", answer)
         # The newest execution must be the one that passed. One that planned
@@ -804,7 +933,7 @@ class WorkflowShapeTests(unittest.TestCase):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         root = self.shard_executions(shards, [(shard, 1) for shard in range(12) if shard != 7])
         answer = self.backend_job(shards, root)
-        self.assertTrue(answer.startswith("REFUSED The shards did not run the suite exactly once."), answer)
+        self.assertTrue(answer.startswith("REFUSED The taken plans do not hold every test file exactly once."), answer)
         self.assertIn("11 shard plans instead of 12", answer)
         self.assertIn("no plan of shard 7", answer)
         # A retry of shard 5 alone, read as before by the retry's attempt only.
@@ -892,6 +1021,20 @@ class WorkflowShapeTests(unittest.TestCase):
                       refused(lambda root: (root / f"{records}3-1/installer-shard-identity.json").unlink()))
         self.assertIn("installer-toolchain-backend-shard-3-1 has an unreadable installer-shard-identity.json",
                       refused(lambda root: (root / f"{records}3-1/installer-shard-identity.json").write_text("{")))
+        # A toolchain file that is not the two versions is unreadable, also
+        # when all twelve were to say the same.
+        for content in ("not json", "[]", '{"python": "Python 3.12.13"}', '{"python": "Python 3.12.13", "node": ""}',
+                        '{"python": "Python 3.12.13", "node": 22}',
+                        '{"python": "Python 3.12.13", "node": "v22.22.2", "pip": "25.0"}'):
+            with self.subTest(content=content):
+                self.assertIn("installer-toolchain-backend-shard-3-1 has an unreadable installer-toolchain.json",
+                              refused(lambda root: (root / f"{records}3-1/installer-toolchain.json").write_text(content)))
+
+        def all_unreadable(root):
+            for path in sorted((root / "shards").iterdir()):
+                (path / "installer-toolchain.json").write_text("{}\n")
+        self.assertIn("installer-toolchain-backend-shard-0-1 has an unreadable installer-toolchain.json",
+                      refused(all_unreadable))
         # A folder that carries another execution's identity: its name says so.
         self.assertIn("installer-toolchain-backend-shard-5-2 says it is shard 4 of attempt 1", refused(
             lambda root: shutil.copy(root / "plans/installer-shard-plan-4-1/installer-shard-identity.json",
@@ -981,7 +1124,7 @@ class WorkflowShapeTests(unittest.TestCase):
                 shards.main([str(shard), "12", str(folder / "installer-shard-files.txt")])
         with mock.patch.dict(os.environ, self.RUN_ENV), contextlib.redirect_stdout(io.StringIO()) as printed:
             shards.main(["verify", "12", str(plans)])
-        self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", printed.getvalue())
+        self.assertIn(f"Every one of {len(shards.tracked_test_files())} test files is in exactly one of the 12 taken plans", printed.getvalue())
         self.assertEqual(shards.tracked_test_files(), files)
 
         def refused(change):
@@ -1001,20 +1144,20 @@ class WorkflowShapeTests(unittest.TestCase):
 
         first = lambda text: text.splitlines(keepends=True)[0]
         dropped = refused(edit("installer-shard-files.txt", 3, lambda text: "".join(text.splitlines(keepends=True)[1:])))
-        self.assertIn("ran nowhere", dropped)
+        self.assertIn("in no plan", dropped)
         self.assertIn(first((plans / "installer-shard-plan-3-1/installer-shard-files.txt").read_text()).strip()
                       .removeprefix("installer/tests/"), dropped)
         twice = (plans / "installer-shard-plan-4-1/installer-shard-files.txt").read_text()
-        self.assertIn("ran more than once", refused(edit("installer-shard-files.txt", 5, lambda text: text + first(twice))))
-        self.assertIn("ran but is not expected", refused(edit("installer-shard-files.txt", 6,
+        self.assertIn("in more than one plan", refused(edit("installer-shard-files.txt", 5, lambda text: text + first(twice))))
+        self.assertIn("in a plan but not expected", refused(edit("installer-shard-files.txt", 6,
             lambda text: text + "installer/tests/test_not_in_this_tree.py\n")))
         self.assertIn("has no installer-shard-files.txt", refused(
             lambda copy: (copy / "installer-shard-plan-2-1" / "installer-shard-files.txt").unlink()))
         self.assertIn("11 shard plans instead of 12", refused(lambda copy: shutil.rmtree(copy / "installer-shard-plan-7-1")))
-        # A test file at any depth counts: one in a subdirectory ran nowhere.
+        # A test file at any depth counts: one in a subdirectory is in no plan.
         with self.assertRaises(SystemExit) as hidden:
             shards.verify(12, plans, files + ["test_nested/test_hidden.py"], environ=self.RUN_ENV)
-        self.assertIn("ran nowhere: test_nested/test_hidden.py", str(hidden.exception))
+        self.assertIn("in no plan: test_nested/test_hidden.py", str(hidden.exception))
 
     def test_a_collected_file_no_shard_can_place_fails_every_shard(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")

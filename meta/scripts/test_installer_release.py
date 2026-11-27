@@ -689,15 +689,15 @@ class WorkflowShapeTests(unittest.TestCase):
             self.add_executions(shards, root, [(5, attempt)], packages="pytest==8.3.5\n", locks="d" * 64)
             answer = self.backend_job(shards, root)
             self.assertFalse(answer.startswith("REFUSED "), answer)
-            self.assertIn("Their installed Python packages and npm lock files were not compared, because all ran in "
-                          f"attempt {attempt}: they name 2 sets of installed Python packages and 2 sets of npm lock "
-                          "files.", answer)
+            self.assertIn("Their collections, installed Python packages and npm lock files were not compared, "
+                          f"because all ran in attempt {attempt}: they name 1 collection, 2 sets of installed Python "
+                          "packages and 2 sets of npm lock files.", answer)
             self.assertNotIn(compared, answer)
             self.assertEqual(json.loads(answer.splitlines()[-1]), self.SHARD_TOOLCHAIN)
         # One attempt, equal: the same line, with one set of each.
         root = self.shard_executions(shards, [(shard, 1) for shard in range(12)])
-        self.assertIn("were not compared, because all ran in attempt 1: they name 1 set of installed Python packages "
-                      "and 1 set of npm lock files.", self.backend_job(shards, root))
+        self.assertIn("were not compared, because all ran in attempt 1: they name 1 collection, 1 set of installed "
+                      "Python packages and 1 set of npm lock files.", self.backend_job(shards, root))
         # Two attempts, equal: the join passes and says what was compared.
         root = self.shard_executions(shards, others + [(5, 2)])
         answer = self.backend_job(shards, root)
@@ -736,7 +736,7 @@ class WorkflowShapeTests(unittest.TestCase):
                 with self.subTest(attempt=attempt, value=sorted(value.items())):
                     self.assertIn(unreadable, self.backend_job(shards, root))
         # What the shard asks pip: the list is sorted, so its order does not
-        # matter; a failed or empty answer plans nothing.
+        # matter; a failed or empty answer is no list.
         def pip(code, output):
             return mock.patch.object(shards.subprocess, "run",
                                      return_value=subprocess.CompletedProcess([], code, output, ""))
@@ -745,9 +745,10 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(asked.call_args.args[0][1:], ["-m", "pip", "--disable-pip-version-check", "freeze", "--all"])
         self.assertEqual(asked.call_args.args[0][0], sys.executable)
         for code, output in ((1, "a==1\n"), (0, ""), (0, "\n")):
-            with self.subTest(code=code, output=output), pip(code, output), self.assertRaises(SystemExit) as refused:
-                shards.installed_packages()
-            self.assertIn("The installed Python packages cannot be listed", str(refused.exception))
+            with self.subTest(code=code, output=output), pip(code, output):
+                self.assertIsNone(shards.installed_packages())
+        with mock.patch.object(shards.subprocess, "run", side_effect=OSError("no interpreter")):
+            self.assertIsNone(shards.installed_packages())
         # The lock files are the two the shard job's `npm ci` steps read.
         self.assertEqual([path.relative_to(ROOT).as_posix() for path in shards.LOCKS],
                          ["console/package-lock.json", "installer/web/package-lock.json"])
@@ -764,13 +765,39 @@ class WorkflowShapeTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as refused:
             shards.lock_files_digest((folder / "a.json", folder / "missing.json"))
         self.assertIn("missing.json is missing", str(refused.exception))
-        # A shard that cannot list its packages plans nothing.
+        # A shard that cannot list its packages still plans, as it did before
+        # this check existed, and writes that the list is not available.
         collected = "".join(f"tests/{name}: 1\n" for name in shards.test_files())
         with mock.patch.object(shards.subprocess, "run", side_effect=[
-                subprocess.CompletedProcess([], 0, collected, ""), subprocess.CompletedProcess([], 1, "", "no pip")]), \
-                self.assertRaises(SystemExit):
+                subprocess.CompletedProcess([], 0, collected, ""), subprocess.CompletedProcess([], 1, "", "no pip")]):
             shards.main(["0", "12", str(folder / "installer-shard-files.txt")])
-        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["a.json"])
+        self.assertEqual(sorted(path.name for path in folder.iterdir()),
+                         ["a.json", "installer-shard-files.txt", "installer-shard-identity.json"])
+        self.assertEqual(json.loads((folder / "installer-shard-identity.json").read_text())["packages"],
+                         "not available")
+        # In one attempt that is reported in the not-compared line and
+        # refuses nothing.
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12) if shard not in (5, 7)])
+        self.add_executions(shards, root, [(5, 1), (7, 1)], packages=None)
+        answer = self.backend_job(shards, root)
+        self.assertFalse(answer.startswith("REFUSED "), answer)
+        self.assertIn("they name 1 collection, 1 set of installed Python packages (2 executions could not list "
+                      "theirs: installer-shard-plan-5-1, installer-shard-plan-7-1) and 1 set of npm lock files.", answer)
+        # In a join of attempts it refuses, naming the plan: there the
+        # packages are compared, and this execution has none to compare.
+        root = self.shard_executions(shards, others)
+        self.add_executions(shards, root, [(5, 2)], packages=None)
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED "), answer)
+        self.assertIn("installer-shard-plan-5-2 could not list its installed Python packages, and a join of attempts "
+                      "compares them", answer)
+        self.assertNotIn("plans of more than one set of installed Python packages", answer)
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12) if shard != 5], packages=None)
+        self.add_executions(shards, root, [(5, 2)])
+        answer = self.backend_job(shards, root)
+        self.assertIn("installer-shard-plan-0-1, installer-shard-plan-1-1, installer-shard-plan-2-1, ", answer)
+        self.assertIn("installer-shard-plan-11-1 could not list their installed Python packages, and a join of "
+                      "attempts compares them", answer)
 
     def test_the_backend_job_refuses_every_folder_that_is_not_one_execution(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
@@ -869,7 +896,7 @@ class WorkflowShapeTests(unittest.TestCase):
         hosted = {"GITHUB_ACTIONS": "true", **self.RUN_ENV}
         answer = self.backend_job(shards, root, hosted)
         self.assertIn("is in exactly one of the 12 taken plans", answer)
-        self.assertIn("The 12 executions are of this run and commit and of one collection", answer)
+        self.assertIn("The 12 executions are of this run and commit, and the shard jobs' result is success.", answer)
         for variable, label in (("GITHUB_RUN_ID", "run id"), ("GITHUB_SHA", "tested commit")):
             for value in (None, ""):
                 with self.subTest(variable=variable, value=value):
@@ -884,7 +911,7 @@ class WorkflowShapeTests(unittest.TestCase):
         answer = self.backend_job(shards, root, {"BACKEND_SHARD_RESULT": "success"})
         self.assertIn("is in exactly one of the 12 taken plans", answer)
         self.assertIn("The 12 executions are of one run and one commit (not compared with this job's own: its run "
-                      "id or commit is not in the environment) and of one collection", answer)
+                      "id or commit is not in the environment), and the shard jobs' result is success.", answer)
         self.assertNotIn("of this run and commit", answer)
         # One of the two is not enough to say "this run and commit".
         self.assertNotIn("of this run and commit", self.backend_job(
@@ -982,14 +1009,41 @@ class WorkflowShapeTests(unittest.TestCase):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         others = [(shard, 1) for shard in range(12) if shard != 5]
         files = shards.test_files()
-        # Another collection: the retried shard collected one more item.
-        other = "".join(f"tests/{name}: {index % 7 + (2 if index == 0 else 1)}\n" for index, name in enumerate(files))
+        # Another collection: one shard collected one more item in a file
+        # whose recorded seconds decide its place, so the twelve lists still
+        # hold every file once. In a join of attempts that is refused.
+        timed = next(name for name in files if name in shards.recorded_seconds())
+        other = "".join(f"tests/{name}: {index % 7 + (2 if name == timed else 1)}\n"
+                        for index, name in enumerate(files))
         root = self.shard_executions(shards, others)
         self.add_executions(shards, root, [(5, 2)], collected=other)
         answer = self.backend_job(shards, root)
         self.assertTrue(answer.startswith("REFUSED "), answer)
         self.assertIn("plans of more than one collection: installer-shard-plan-5-2 has ", answer)
         self.assertIn("the other 11 have ", answer)
+        self.assertNotIn("in no plan", answer)
+        # In one attempt it is not compared, as before this check existed: a
+        # dependency published between two shards' installs can change a
+        # collected count. The line says so and how many collections there are.
+        for attempt in (1, 2):
+            root = self.shard_executions(shards, [(shard, attempt) for shard in range(12) if shard != 5])
+            self.add_executions(shards, root, [(5, attempt)], collected=other)
+            answer = self.backend_job(shards, root)
+            self.assertFalse(answer.startswith("REFUSED "), answer)
+            self.assertIn("Their collections, installed Python packages and npm lock files were not compared, "
+                          f"because all ran in attempt {attempt}: they name 2 collections, 1 set of installed "
+                          "Python packages and 1 set of npm lock files.", answer)
+        # A collection that moved a file is refused in one attempt too, by
+        # the lists themselves: a file in no plan or in two.
+        untimed = next(name for name in files if name not in shards.recorded_seconds())
+        moved = "".join(f"tests/{name}: {index % 7 + (500 if name == untimed else 1)}\n"
+                        for index, name in enumerate(files))
+        root = self.shard_executions(shards, [(shard, 1) for shard in range(12) if shard != 5])
+        self.add_executions(shards, root, [(5, 1)], collected=moved)
+        answer = self.backend_job(shards, root)
+        self.assertTrue(answer.startswith("REFUSED The taken plans do not hold every test file exactly once."), answer)
+        self.assertRegex(answer, r"in no plan: |in more than one plan: ")
+        self.assertNotIn("plans of more than one collection", answer)
         # Another tested commit.
         root = self.shard_executions(shards, others)
         self.add_executions(shards, root, [(5, 2)], GITHUB_SHA=OTHER)

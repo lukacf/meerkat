@@ -25,12 +25,17 @@ lock files its job installed from) and again beside its toolchain file, which
 it writes only after its tests passed. The backend job collects the plans and
 toolchain files of every attempt of its run and takes, for each shard, the
 newest execution by those identities. It refuses plans that are not of its
-run, of one tested commit and one collection, a shard without a plan, a taken
-plan without its own readable toolchain file, and any folder it is given that
-is not one execution's. When the taken executions span more than one attempt
-it also refuses unless they name one set of installed Python packages and one
-set of npm lock files; within one attempt those are written and not compared,
-as an ordinary run was never refused for them, and the printed line says so.
+run and of one tested commit, a shard without a plan, a taken plan without
+its own readable toolchain file, and any folder it is given that is not one
+execution's. When the taken executions span more than one attempt it also
+refuses unless they name one collection, one set of installed Python packages
+and one set of npm lock files. Within one attempt those three are written and
+not compared: the shards of one attempt always collected and installed on
+their own, a dependency published between two of them can change a collected
+count or a package, and an ordinary run was never refused for that. The
+printed line says what was not compared and how many of each the executions
+name. A shard that cannot list its packages writes "not available" and goes
+on; a join of attempts refuses such an execution, one attempt reports it.
 
 What the folders cannot show: an execution that failed before it uploaded a
 plan leaves nothing, so among the folders "newest" is the newest execution
@@ -88,11 +93,14 @@ SUITE = (("run_id", "run id", "GITHUB_RUN_ID"), ("commit", "tested commit", "GIT
          ("collection", "collection", None), ("packages", "set of installed Python packages", None),
          ("locks", "set of npm lock files", None))
 # Compared only when the taken executions span more than one attempt. The
-# shards of one attempt installed their packages separately before this check
-# existed, and an ordinary run is not to fail because a dependency was
-# published between two shards' installs; a retry long after the first
-# attempt is the case that joins executions that may have resolved others.
-RESOLVED = ("packages", "locks")
+# shards of one attempt collected and installed on their own before this
+# check existed, and an ordinary run is not to fail because a dependency was
+# published between two shards' installs (it can change a package and a
+# collected count); a retry long after the first attempt is the case that
+# joins executions that may have resolved others.
+ACROSS_ATTEMPTS = ("collection", "packages", "locks")
+# What a shard writes for its packages when pip cannot list them.
+UNLISTED = "not available"
 
 
 def test_files():
@@ -172,13 +180,16 @@ def record(junit_files, path=SECONDS):
 def installed_packages():
     """Every package this interpreter's environment has installed, as pip
     lists it: what the shard's tests import. pip reads the environment; no
-    index is asked."""
-    result = subprocess.run([sys.executable, "-m", "pip", "--disable-pip-version-check", "freeze", "--all"],
-                            capture_output=True, text=True, check=False)
+    index is asked. None when pip cannot be run, fails or lists nothing: a
+    shard ran its tests without this list before, so it still does."""
+    try:
+        result = subprocess.run([sys.executable, "-m", "pip", "--disable-pip-version-check", "freeze", "--all"],
+                                capture_output=True, text=True, check=False)
+    except OSError:
+        return None
     lines = sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
     if result.returncode != 0 or not lines:
-        raise SystemExit(f"The installed Python packages cannot be listed (python -m pip freeze, exit "
-                         f"{result.returncode}): a shard does not plan without knowing what it runs against.")
+        return None
     return "".join(line + "\n" for line in lines)
 
 
@@ -201,12 +212,13 @@ def identity(shard, shards, counts, environ=None):
     if unset and environ.get("GITHUB_ACTIONS") == "true":
         raise SystemExit(f"Inside Actions without {', '.join(unset)}: this execution cannot say what it is.")
     collected = "".join(f"{name} {items}\n" for name, items in sorted(counts.items()))
+    packages = installed_packages()
     return {"run_id": environ.get("GITHUB_RUN_ID") or "local",
             "run_attempt": int(environ.get("GITHUB_RUN_ATTEMPT") or 1),
             "commit": environ.get("GITHUB_SHA") or "local",
             "shard": shard, "shards": shards,
             "collection": hashlib.sha256(collected.encode()).hexdigest(),
-            "packages": hashlib.sha256(installed_packages().encode()).hexdigest(),
+            "packages": UNLISTED if packages is None else hashlib.sha256(packages.encode()).hexdigest(),
             "locks": lock_files_digest()}
 
 
@@ -224,8 +236,9 @@ def read_identity(folder):
             and all(type(value[key]) is int for key in ("run_attempt", "shard", "shards"))
             and value["run_attempt"] >= 1 and value["shards"] >= 1 and value["shard"] >= 0
             and all(isinstance(value[key], str) and value[key] for key in ("run_id", "commit"))
-            and all(isinstance(value[key], str) and DIGEST.fullmatch(value[key])
-                    for key in ("collection", "packages", "locks"))):
+            and all(isinstance(value[key], str) and DIGEST.fullmatch(value[key]) for key in ("collection", "locks"))
+            and isinstance(value["packages"], str)
+            and (value["packages"] == UNLISTED or DIGEST.fullmatch(value["packages"]))):
         return None, f"{folder.name} has an unreadable {IDENTITY}"
     return value, None
 
@@ -284,11 +297,16 @@ def select(shards, plans, environ=None):
         problems.append(f"{len(chosen)} shard plans instead of {shards}")
         problems.append(f"no plan of shard {missing}")
     joined = len({value["run_attempt"] for _, value in chosen}) > 1
+    unlisted = [folder.name for folder, value in chosen if value["packages"] == UNLISTED]
+    if joined and unlisted:
+        problems.append(f"{', '.join(unlisted)} could not list {'its' if len(unlisted) == 1 else 'their'} installed "
+                        "Python packages, and a join of attempts compares them")
     for field, label, variable in SUITE:
         said = {}
         for folder, value in chosen:
-            said.setdefault(value[field], []).append(folder.name)
-        if len(said) > 1 and (joined or field not in RESOLVED):
+            if value[field] != UNLISTED:
+                said.setdefault(value[field], []).append(folder.name)
+        if len(said) > 1 and (joined or field not in ACROSS_ATTEMPTS):
             most = max(said, key=lambda value: (len(said[value]), value))
             others = "; ".join(f"{', '.join(names)} has {value[:12]}" for value, names in sorted(said.items())
                                if value != most)
@@ -338,11 +356,15 @@ def verify(shards, plans, expected_files=None, environ=None):
         suite = (f"{whose}, of one collection, one set of installed Python packages and one set of npm lock files, "
                  "and the shard jobs' result is success.")
     else:
-        sets = [len({value[field] for _, value in chosen}) for field in RESOLVED]
-        suite = (f"{whose} and of one collection, and the shard jobs' result is success. Their installed Python "
-                 f"packages and npm lock files were not compared, because all ran in attempt {min(attempts)}: they "
-                 f"name {sets[0]} set{'s' if sets[0] > 1 else ''} of installed Python packages and {sets[1]} "
-                 f"set{'s' if sets[1] > 1 else ''} of npm lock files.")
+        sets = [len({value[field] for _, value in chosen} - {UNLISTED}) for field in ACROSS_ATTEMPTS]
+        unlisted = [folder.name for folder, value in chosen if value["packages"] == UNLISTED]
+        without = (f" ({len(unlisted)} execution{'s' if len(unlisted) > 1 else ''} could not list "
+                   f"{'theirs' if len(unlisted) > 1 else 'its own'}: {', '.join(unlisted)})" if unlisted else "")
+        suite = (f"{whose}, and the shard jobs' result is success. Their collections, installed Python packages and "
+                 f"npm lock files were not compared, because all ran in attempt {min(attempts)}: they name "
+                 f"{sets[0]} collection{'s' if sets[0] != 1 else ''}, {sets[1]} set{'s' if sets[1] != 1 else ''} of "
+                 f"installed Python packages{without} and {sets[2]} set{'s' if sets[2] != 1 else ''} of npm lock "
+                 "files.")
     print(f"Every one of {len(planned)} test files is in exactly one of the {len(chosen)} taken plans. "
           f"The {len(chosen)} executions are {suite} Plans taken: {taken}."
           + (f" Not counted, superseded: {', '.join(folder.name for folder, _ in superseded)}." if superseded else ""))

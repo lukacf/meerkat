@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [8a276c1512a0](https://github.com/lukacf/meerkat/commit/8a276c1512a096373abdbc56596bbe2cb4454261) on 2026-11-27; Meta version 0.9.19 at that commit.*
+*Mirrored from Meerkat Meta main at [a395ca591ab4](https://github.com/lukacf/meerkat/commit/a395ca591ab4cbdc1e32b2607682300c8b6c8d88) on 2026-11-28; Meta version 0.9.19 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -428,12 +428,26 @@ under [`meta/decisions/decide`](/meta/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.
-The gateway writes the notices before a list answers; a handler may still be
-running after `decisionsList` resolves. Without an `attestation` the stdio
+The gateway writes a notice when a decision opens, once when the connection
+starts for a decision already open, and before a list answers; a handler may
+still be running after `decisionsList` resolves. A `held` notice that arrives
+before a handler is registered is kept (one per decision, the newest 1024
+decisions) and handed to the handler when it registers; an older one comes
+again at the host's own list. Without an `attestation` the stdio
 operator decides, eligible only for a decision presented to it on this
 connection. A decide called while the SDK serves a host tool callback rejects
 with `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`)
 and sends nothing: an agent's tool call never decides.
+
+A notice of `kind` `ask_user.questions` names a question set that is open in
+the store: read it with `handle.gatingQuestions()` and answer it with
+`handle.gatingAnswer()`. That works on a launch with a roster
+(`.rosterProvider(...)`): a gateway serves its agents' questions only there.
+On a launch without a roster the handler is still called for a set the store
+already holds, and `decisionsList()` returns it, but `gatingQuestions()`
+returns no set and `gatingAnswer()` rejects with `RpcError` (`-32602`: the
+`pending_id` was not found). Such a notice is genuine and is not a readable
+question: do not treat it as one.
 
 ## Member restore
 

@@ -2421,12 +2421,13 @@ async function runChatPaneTurnRailProof() {
     );
 
     // DIAGNOSTIC ONLY, not a fix. The rail*AtMs values exist to print how
-    // long after the scroll call the read was made. Three of them are taken
-    // BEFORE the measurement, because a time since the scroll call needs a
-    // clock value from before it: each is one synchronous clock read in this
-    // test process. None of them calls the page, awaits or waits, and the
-    // scroll, the 120 ms wait and the read are the same calls in the same
-    // order as before.
+    // long after the scroll call the read was made; the first of them is
+    // also where the settled read's bound below is counted from. Three of
+    // them are taken BEFORE the measurement, because a time since the
+    // scroll call needs a clock value from before it: each is one
+    // synchronous clock read in this test process. None of them calls the
+    // page, awaits or waits, and the scroll, the 120 ms wait and the read
+    // are the same calls in the same order as before.
     const railScrollCallAtMs = performance.now();
     await body.evaluate((node) => {
       node.scrollTo({ top: Math.round(node.scrollHeight * 0.55), behavior: "instant" });
@@ -2560,14 +2561,15 @@ async function runChatPaneTurnRailProof() {
     });
     const railReadReturnedAtMs = performance.now();
     // DIAGNOSTIC ONLY, not a fix. One line with a stable prefix, written on
-    // a pass and on a failure alike: it is written here, after the read and
-    // before the three assertions on that read, so a failing run prints it
-    // too. "ticks" is the object the assertions below format into their
-    // messages, from the same read (the page is not read a second time);
+    // a pass and on a failure alike: it is written here, right after the
+    // first read, so a failing run prints it too. "ticks" is what that
+    // first read saw (the page is not read a second time for it);
     // "beforeScroll" is what the scenario read before the scroll;
     // "readInPage" compares this process's clock with the page's, so it is
-    // an estimate. The assertions, their messages, the threshold and every
-    // wait are unchanged.
+    // an estimate. This first read is kept as a MEASUREMENT of the rail at
+    // the fixed moment the scenario has always sampled. Only the width
+    // check below still asserts on it; the marker and contrast checks are
+    // made on the settled read further down.
     const railMs = (value) => Math.round(value * 1000) / 1000;
     const railPageReadAtMs = railReadState?.clock?.pageTimeOriginMs + railReadState?.clock?.pageNowMs;
     process.stdout.write(`browser chat pane turn rail mid-scroll read: ${JSON.stringify({
@@ -2586,21 +2588,275 @@ async function runChatPaneTurnRailProof() {
       },
       readState: railReadState,
     })}\n`);
-    assert.deepEqual(
-      afterMiddleScroll.activeIndexes,
-      afterMiddleScroll.visibleIndexes,
-      `mid-scroll rail markers should highlight every visible turn: ${JSON.stringify(afterMiddleScroll)}`,
-    );
+    // The width check stays on the first read as well: a tick's width does
+    // not depend on when it is read (no rule changes it without a hover),
+    // so this still checks it while the transitions may be running.
     assert.equal(
       new Set(afterMiddleScroll.tickWidths).size,
       1,
       `visible markers should brighten without changing tick width when not hovered: ${JSON.stringify(afterMiddleScroll)}`,
     );
-    const weakestActiveDistance = Math.min(...afterMiddleScroll.activeTickStyles.map((tick) => tick.bodyDistance));
-    const strongestInactiveDistance = Math.max(...afterMiddleScroll.inactiveTickStyles.map((tick) => tick.bodyDistance));
+
+    // THE BOUND. It measures the time from the scroll call above to a
+    // SETTLED rail: the aria-current markers equal the turns in view (at
+    // least one turn), and no tick has a transition still running. A rail
+    // that is not settled this long after the scroll call fails the
+    // scenario. 3000 ms is the allowance this scenario already gives the
+    // rail at its two later waits (the marker after a click, the marker
+    // after a scroll to the end); it is that precedent, not a figure taken
+    // from a product requirement.
+    // WHAT THIS REPLACES. Until now the markers and the contrast were
+    // asserted at one fixed moment, the first read above (the scroll, a
+    // 120 ms wait, the read), where the tick's 120 ms background transition
+    // can still be running. That moment is still read and printed, and no
+    // longer asserted: a rail whose markers or contrast are right only
+    // later than that moment, up to this bound, now passes.
+    const TURN_RAIL_SETTLED_BOUND_MS = 3_000;
+    // One page function, used twice: as the wait's condition (it answers
+    // false until the rail is settled, and then returns the settled read
+    // taken in that same call, so nothing can change between "settled" and
+    // the read), and once more after a timeout to report the state the
+    // rail was left in.
+    const readTurnRailWhenSettled = ({ requireSettled }) => {
+      const node = document.querySelector('[data-testid="chat-pane:person-worker-alpha"]');
+      if (!node) {
+        return requireSettled ? false : { settled: false, state: { error: "chat pane not found" } };
+      }
+      const clock = {
+        pageNowMs: performance.now(),
+        pageTimeOriginMs: performance.timeOrigin,
+        timelineMs: document.timeline ? document.timeline.currentTime : null,
+      };
+      const body = node.querySelector(".conv__body");
+      const bodyRect = body?.getBoundingClientRect();
+      const visibleIndexes = [...node.querySelectorAll("[data-chat-turn-index]")]
+        .filter((turnNode) => {
+          const rect = turnNode.getBoundingClientRect();
+          return bodyRect && rect.bottom >= bodyRect.top && rect.top <= bodyRect.bottom;
+        })
+        .map((turnNode) => Number(turnNode.dataset.chatTurnIndex));
+      const rails = [...node.querySelectorAll('[data-testid^="chat-turn-rail:person-worker-alpha:"]')];
+      const activeIndexes = rails
+        .map((rail, index) => rail.getAttribute("aria-current") === "true" ? index : -1)
+        .filter((index) => index >= 0);
+      // Each tick's computed background is read BEFORE its transitions are
+      // listed, so that a transition which this call's own style
+      // computation starts (a marker that has just changed) is in the list
+      // read after it, and the rail is not taken for settled one step
+      // early. Were it missed all the same, the resting color check below
+      // would fail on that tick: it would not pass unseen.
+      const backgrounds = rails.map((rail) => {
+        const tick = rail.querySelector(".conv-turn-rail__tick");
+        return tick ? getComputedStyle(tick).backgroundColor : "";
+      });
+      const tickStates = rails.map((rail, index) => {
+        const tick = rail.querySelector(".conv-turn-rail__tick");
+        const animations = tick && typeof tick.getAnimations === "function" ? tick.getAnimations() : [];
+        return {
+          index,
+          ariaCurrent: rail.getAttribute("aria-current"),
+          isActiveClass: rail.classList.contains("is-active"),
+          hovered: rail.matches(":hover"),
+          focusVisible: rail.matches(":focus-visible"),
+          animations: animations.map((animation) => {
+            const effect = animation.effect;
+            const timing = effect && typeof effect.getComputedTiming === "function" ? effect.getComputedTiming() : null;
+            const keyframes = effect && typeof effect.getKeyframes === "function" ? effect.getKeyframes() : [];
+            return {
+              kind: animation.constructor ? animation.constructor.name : "",
+              property: animation.transitionProperty ?? null,
+              playState: animation.playState,
+              pending: animation.pending,
+              startTimeMs: typeof animation.startTime === "number" ? animation.startTime : null,
+              currentTimeMs: typeof animation.currentTime === "number" ? animation.currentTime : null,
+              progress: timing ? timing.progress : null,
+              durationMs: timing ? timing.duration : null,
+              delayMs: timing ? timing.delay : null,
+              easing: timing ? timing.easing : null,
+              keyframes: keyframes.map((keyframe) => {
+                const { offset, computedOffset, easing, composite, ...values } = keyframe;
+                return { offset: computedOffset, ...values };
+              }),
+            };
+          }),
+        };
+      });
+      const runningTicks = tickStates
+        .filter((tick) => tick.animations.some((animation) => animation.playState !== "finished" && animation.playState !== "idle"))
+        .map((tick) => tick.index);
+      const markersMatch = visibleIndexes.length > 0
+        && activeIndexes.length === visibleIndexes.length
+        && activeIndexes.every((value, position) => value === visibleIndexes[position]);
+      const state = { clock, activeIndexes, visibleIndexes, markersMatch, runningTicks, ticks: tickStates };
+      if (!markersMatch || runningTicks.length > 0) {
+        return requireSettled ? false : { settled: false, state };
+      }
+      // Settled. The rest is the settled read, with the first read's own
+      // measure: each tick's background as RGBA and its distance from the
+      // body color, and its width.
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      const toRgba = (color) => {
+        if (!context) {
+          return [0, 0, 0, 0];
+        }
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = "#0000";
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        return [...context.getImageData(0, 0, 1, 1).data];
+      };
+      const colorDistance = (a, b) => Math.hypot(
+        a[0] - b[0],
+        a[1] - b[1],
+        a[2] - b[2],
+        a[3] - b[3],
+      );
+      const bodyColor = toRgba(getComputedStyle(body || node).backgroundColor);
+      const tickData = rails.map((rail, index) => {
+        const tick = rail.querySelector(".conv-turn-rail__tick");
+        return {
+          index,
+          active: rail.getAttribute("aria-current") === "true",
+          background: backgrounds[index],
+          bodyDistance: colorDistance(toRgba(backgrounds[index]), bodyColor),
+          width: Math.round(tick?.getBoundingClientRect().width ?? 0),
+        };
+      });
+      // The resting colors, as THIS page computes them from the stylesheet's
+      // own rules, not as numbers written here: two ticks that have never
+      // been in any other state, one under a button marked as the rail
+      // marks a visible turn and one under an unmarked button. They sit in
+      // a display:none holder under the rail (so they inherit what the real
+      // ticks inherit and take no box), are added after every tick above
+      // has been read, and are removed before this call returns.
+      const probeHolder = document.createElement("div");
+      probeHolder.style.display = "none";
+      const addProbeTick = (active) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = active ? "conv-turn-rail__button is-active" : "conv-turn-rail__button";
+        if (active) {
+          button.setAttribute("aria-current", "true");
+        }
+        const tick = document.createElement("span");
+        tick.className = "conv-turn-rail__tick";
+        button.appendChild(tick);
+        probeHolder.appendChild(button);
+        return tick;
+      };
+      const activeProbe = addProbeTick(true);
+      const inactiveProbe = addProbeTick(false);
+      (rails[0]?.closest(".conv-turn-rail") ?? node).appendChild(probeHolder);
+      let activeBackground = "";
+      let inactiveBackground = "";
+      try {
+        activeBackground = getComputedStyle(activeProbe).backgroundColor;
+        inactiveBackground = getComputedStyle(inactiveProbe).backgroundColor;
+      } finally {
+        probeHolder.remove();
+      }
+      const activeResting = toRgba(activeBackground);
+      const inactiveResting = toRgba(inactiveBackground);
+      return {
+        settled: true,
+        ticks: {
+          activeIndexes,
+          tickWidths: tickData.map((tick) => tick.width),
+          visibleIndexes,
+          activeTickStyles: tickData.filter((tick) => tick.active),
+          inactiveTickStyles: tickData.filter((tick) => !tick.active),
+        },
+        resting: {
+          activeBackground,
+          inactiveBackground,
+          referenceDistance: colorDistance(activeResting, inactiveResting),
+          distances: tickData.map((tick) => ({
+            index: tick.index,
+            active: tick.active,
+            restingDistance: colorDistance(toRgba(tick.background), tick.active ? activeResting : inactiveResting),
+          })),
+        },
+        state,
+      };
+    };
+    const railSettleWaitCallAtMs = performance.now();
+    let settledRail = null;
+    let railAfterTimeout = null;
+    try {
+      const settledHandle = await page.waitForFunction(
+        readTurnRailWhenSettled,
+        { requireSettled: true },
+        // What is left of the bound, counted from the scroll call. Never 0:
+        // the library reads a timeout of 0 as no timeout.
+        { timeout: Math.max(1, Math.round(TURN_RAIL_SETTLED_BOUND_MS - (railSettleWaitCallAtMs - railScrollCallAtMs))) },
+      );
+      settledRail = await settledHandle.jsonValue();
+      await settledHandle.dispose();
+    } catch (error) {
+      // Only the wait's own timeout is turned into the failure below; any
+      // other error is thrown as it came.
+      if (error?.name !== "TimeoutError") {
+        throw error;
+      }
+      // One read of the state the rail was left in, for the message. It is
+      // not a second chance: a rail found settled here is still too late.
+      railAfterTimeout = await page.evaluate(readTurnRailWhenSettled, { requireSettled: false })
+        .catch((probeError) => ({ settled: false, state: { error: String(probeError) } }));
+    }
+    const railSettleWaitReturnedAtMs = performance.now();
+    const railSettledClock = settledRail?.state?.clock;
+    const railSettledPageAtMs = railSettledClock?.pageTimeOriginMs + railSettledClock?.pageNowMs;
+    const railSettledReport = {
+      settled: Boolean(settledRail),
+      boundMs: TURN_RAIL_SETTLED_BOUND_MS,
+      ticks: settledRail ? settledRail.ticks : null,
+      resting: settledRail ? settledRail.resting : null,
+      sinceScrollCallMs: {
+        waitCalled: railMs(railSettleWaitCallAtMs - railScrollCallAtMs),
+        settledInPage: Number.isFinite(railSettledPageAtMs)
+          ? railMs(railSettledPageAtMs - (performance.timeOrigin + railScrollCallAtMs))
+          : null,
+        waitReturned: railMs(railSettleWaitReturnedAtMs - railScrollCallAtMs),
+      },
+      readState: settledRail ? settledRail.state : (railAfterTimeout?.state ?? null),
+      settledAfterBound: settledRail ? null : Boolean(railAfterTimeout?.settled),
+    };
+    // The second line, on a pass and on a failure alike (a timeout
+    // included): the settled read in the shape of the first line, with the
+    // time from the scroll call to the settled rail.
+    process.stdout.write(`browser chat pane turn rail settled read: ${JSON.stringify(railSettledReport)}\n`);
+    assert(
+      settledRail,
+      `turn rail should be settled (markers equal to the visible turns, no tick transition running) within ${TURN_RAIL_SETTLED_BOUND_MS} ms of the scroll call: ${JSON.stringify(railSettledReport)}`,
+    );
+    assert.deepEqual(
+      settledRail.ticks.activeIndexes,
+      settledRail.ticks.visibleIndexes,
+      `mid-scroll rail markers should highlight every visible turn: ${JSON.stringify(settledRail.ticks)}`,
+    );
+    assert.equal(
+      new Set(settledRail.ticks.tickWidths).size,
+      1,
+      `visible markers should brighten without changing tick width when not hovered: ${JSON.stringify(settledRail.ticks)}`,
+    );
+    assert.deepEqual(
+      settledRail.ticks.tickWidths,
+      afterMiddleScroll.tickWidths,
+      `settled tick widths should equal the widths at the first read: ${JSON.stringify({ first: afterMiddleScroll.tickWidths, settled: settledRail.ticks.tickWidths })}`,
+    );
+    assert(
+      settledRail.resting.referenceDistance > 0
+        && settledRail.resting.distances.every((tick) => tick.restingDistance === 0),
+      `settled rail ticks should rest at the colors the stylesheet gives a marked and an unmarked tick: ${JSON.stringify({ resting: settledRail.resting, ticks: settledRail.ticks })}`,
+    );
+    const weakestActiveDistance = Math.min(...settledRail.ticks.activeTickStyles.map((tick) => tick.bodyDistance));
+    const strongestInactiveDistance = Math.max(...settledRail.ticks.inactiveTickStyles.map((tick) => tick.bodyDistance));
     assert(
       weakestActiveDistance > strongestInactiveDistance,
-      `visible markers should be visually stronger than inactive markers without growing: ${JSON.stringify(afterMiddleScroll)}`,
+      `visible markers should be visually stronger than inactive markers without growing: ${JSON.stringify(settledRail.ticks)}`,
     );
 
     await pane.getByTestId("chat-turn-rail:person-worker-alpha:0").click();

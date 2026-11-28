@@ -3571,11 +3571,13 @@ A decision that is no longer open when its notice is due (decided, withdrawn
 or past its deadline since the gateway read or opened it) is not noticed,
 and neither is one whose read the store still refuses after a few tries;
 the host's list shows both as they are. The read before a notice records
-nothing, with one exception: for a decision the gateway's own runtime
-opened it records an expiry it observes. Any other expiry the notices pass
-over is recorded by the decision's executor at its next pass (on a launch
-with a roster; no executor runs without one) or by the next request that
-reads the decision.
+nothing, with one exception: a decision the gateway is told its own runtime
+opened is read with the read that records an expiry it observes. A decision
+the gateway comes to by its list after it fell behind is read without
+recording, whoever opened it. Any other expiry the notices pass over is
+recorded by the decision's executor at its next pass (on a launch with a
+roster; no executor runs without one) or by the next request that reads
+the decision.
 
 A notice of `kind` `ask_user.questions` says that a question set is open in
 the store. Whether the host can read and answer it depends on the launch: a

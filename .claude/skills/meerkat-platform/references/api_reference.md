@@ -580,7 +580,9 @@ owner through `SessionRuntime::decision_service`, a Rust embedding through
 Lifecycle and identity:
 
 - `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`,
-  `mob/restore_retry` (`mob/list` names quarantined mobs under `quarantined`)
+  `mob/restore_retry` (`mob/list` names quarantined mobs under `quarantined`),
+  `mob/standing` (where a mob stands: `busy`, `finished`, `closed`, `stopped` or
+  `unknown` with `causes`, or why it is not served; never idle; console owner)
 - `mob/members`, `mob/list_members_matching`, `mob/member_status`
 - `mob/spawn`, `mob/spawn_many`, `mob/spawn_helper`, `mob/fork_helper`
 - `mob/ensure_member`, `mob/reconcile`
@@ -791,6 +793,7 @@ Client methods:
 - `create_mob(*, definition)` → `Mob` — call `await client.create_mob(definition=definition)`
 - `list_mobs()` → `list[dict[str, Any]]`
 - `list_quarantined_mobs()` → `list[dict[str, Any]]` / `mob_restore_retry(mob_id)`; `mob_quarantined(error)` reads the refusal
+- `mob_standing(mob_id)` → `MobStandingResult` (`standing`, and where they apply `reason`, `causes`, `counts`); a word this SDK does not know is kept as sent
 - `get_config()` / `set_config(...)` / `patch_config(...)`
 - `mcp_add(session_id, server_config, *, persisted=False)`
 - `mcp_remove(session_id, server_name, *, persisted=False)`
@@ -935,6 +938,7 @@ Client methods:
 - `createMob({ definition })` → `Mob` — call `await client.createMob({ definition })`; neither mob creation nor a mob role `Profile` declares an initial auth binding. Configure host/realm credentials, or select a preconfigured realm binding through supported per-member spawn/helper auth options.
 - `listMobs()` → `MobSummary[]`
 - `listQuarantinedMobs()` → `QuarantinedMobSummary[]` / `mobRestoreRetry(mobId)`; `mobQuarantined(err)` reads the refusal
+- `mobStanding(mobId)` → `MobStandingResult` (`standing`, and where they apply `reason`, `causes`, `counts`); a word this SDK does not know is kept as sent
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
 - `listSkills()`
@@ -1253,8 +1257,8 @@ objective/durable-fork prerequisites:
 | `fork_off` | Take `member_id` + `task`, fork an exact committed transcript prefix through the durable resume path into a child the caller owns, and run the task; returns `status: "running"` + `job_id`; the outcome is recorded once in the forker's transcript as a durable `BackgroundJob` system notice (`persisted: true`) that joins a running forker's turn at its next model call or wakes an idle forker (blocks on one-shot hosts such as `rkat run` without `--keep-alive`); optional `expected_output` is guidance, not a schema; optional `max_run_secs` is an opt-in autokill; unknown arguments are rejected |
 | `council` | Take a `topic` and existing `{mob_id, member_id, role}` participants; fork them into a bounded temporary discussion mob and clean up; the sealed outcome is recorded once in the convener's transcript as a durable `BackgroundJob` system notice (blocks on one-shot hosts) |
 | `mob_retire_member` | Archive a member and its session; manage scope, or the caller owns the member (retiring a fork child also retires its own forks) |
-| `mob_check_member` | Check a member's execution status and output; manage scope, or the caller owns the member |
-| `mob_list_members` | List members of a mob; without manage scope, only the caller's own descendants |
+| `mob_check_member` | Check a member's execution status and output; `standing` says where the member stands in one word (`finished`, `running`, `retiring`, `broken`, `no_run_open`, `run_state_unread`, `unknown`), never idle; manage scope, or the caller owns the member |
+| `mob_list_members` | List members of a mob; without manage scope, only the caller's own descendants. With manage scope and `include_standing: true` the result also carries the mob's own `standing` (`busy`, `finished`, `closed`, `stopped`, `unknown` with `causes`), never idle |
 | `mob_list` | List all mobs |
 | `mob_wire` | Wire a local mob member to a local or typed external peer |
 | `mob_unwire` | Remove a mob wiring relationship |

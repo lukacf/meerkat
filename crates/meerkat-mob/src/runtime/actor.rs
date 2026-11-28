@@ -22480,7 +22480,61 @@ impl MobActor {
         deferred_commands: &VecDeque<RoutedMobCommand>,
     ) -> super::admission_close::MobIdleObservation {
         let busy = self.admission_in_flight(deferred_commands).await;
-        self.ownership.observe(busy)
+        let machine_held = self.dsl_authority.state().held_work_for_idle_observation();
+        let unread = self.observation_unread().await;
+        self.ownership
+            .observe(busy, self.state(), machine_held, unread)
+    }
+
+    /// What an idle observation does not read, each as the fact it is: the
+    /// members the machine records a placement for, the members with no
+    /// session the runtime of this process holds, whether there is a
+    /// runtime adapter at all, and the two stretches no observation of this
+    /// release reads (a peer message between its delivery and the member's
+    /// accepted input, and work handed to a task of the actor's own that
+    /// has not come back). Reads only; the idle close is not decided on it.
+    async fn observation_unread(&self) -> super::admission_close::MobUnread {
+        let (members_placed, local_sessions) = {
+            let roster = self.roster.read().await;
+            let state = self.dsl_authority.state();
+            let mut members_placed = 0_usize;
+            let mut local_sessions: Vec<Option<SessionId>> = Vec::new();
+            for entry in roster.list() {
+                let identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+                if state.member_placement.contains_key(&identity) {
+                    members_placed = members_placed.saturating_add(1);
+                } else {
+                    local_sessions.push(entry.bridge_session_id().cloned());
+                }
+            }
+            (members_placed, local_sessions)
+        };
+        let sessionless = local_sessions
+            .iter()
+            .filter(|session| session.is_none())
+            .count();
+        #[cfg(feature = "runtime-adapter")]
+        let (no_runtime_adapter, unregistered) = match self.runtime_adapter.as_ref() {
+            Some(runtime) => {
+                let mut unregistered = 0_usize;
+                for session_id in local_sessions.iter().flatten() {
+                    if !runtime.contains_session(session_id).await {
+                        unregistered = unregistered.saturating_add(1);
+                    }
+                }
+                (false, unregistered)
+            }
+            None => (true, 0_usize),
+        };
+        #[cfg(not(feature = "runtime-adapter"))]
+        let (no_runtime_adapter, unregistered) = (true, 0_usize);
+        super::admission_close::MobUnread {
+            no_runtime_adapter,
+            members_placed,
+            sessions_not_readable: sessionless.saturating_add(unregistered),
+            peer_delivery_not_traced: true,
+            handoffs_not_tracked: true,
+        }
     }
 
     /// Close admission if the mob is idle and no foreground owner holds a

@@ -148050,6 +148050,264 @@
     "title": "MobSpawnResult",
     "type": "object"
   },
+  "MobStandingResult": {
+    "$defs": {
+      "WireMobStanding": {
+        "anyOf": [
+          {
+            "const": "busy",
+            "description": "Work is in flight or owed in the mob.",
+            "type": "string"
+          },
+          {
+            "const": "finished",
+            "description": "The mob has finished and takes no more work; `reason` says how.\nAlso given, with `destroyed` and no counts, for an id whose mob\nthis host process destroyed, until the process restarts.",
+            "type": "string"
+          },
+          {
+            "const": "closed",
+            "description": "The mob's admission is closed and this actor takes no more work;\n`reason` says why. Closed is not finished.",
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "The mob is stopped: paused until it is resumed. Also given, with\nno counts, for a mob that is not loaded when the host's record of\nit says it is stopped.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Nothing was counted in flight, but the read cannot say that the\nmob is idle; `causes` names the evidence it did not read.",
+            "type": "string"
+          },
+          {
+            "const": "unloading",
+            "description": "The mob's idle unload is admitted and not answered yet: its actor\nmay still answer busy.",
+            "type": "string"
+          },
+          {
+            "const": "held",
+            "description": "A child mob held before activation, until its owner resolves.",
+            "type": "string"
+          },
+          {
+            "const": "quarantined",
+            "description": "The mob's store did not restore and is kept quarantined.",
+            "type": "string"
+          },
+          {
+            "const": "dormant",
+            "description": "The mob is known and not loaded; this read loads nothing. A mob\nthat completed and was then unloaded reads this: finished is told\nonly while the mob is loaded or, for a destroy, until the host\nprocess restarts. A stopped mob reads this until the host has\nread its store's stop.",
+            "type": "string"
+          },
+          {
+            "const": "loading",
+            "description": "The mob's one load is in flight.",
+            "type": "string"
+          },
+          {
+            "const": "changed",
+            "description": "Another actor serves the mob by now: ask again.",
+            "type": "string"
+          },
+          {
+            "const": "set_incomplete",
+            "description": "The host has not read every mob it holds yet: a mob of this id\nmay exist.",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "The host has no mob of this id. An id whose create is in flight\nreads this until the mob is there, and so does a mob that was\ndestroyed before the host process last started.",
+            "type": "string"
+          },
+          {
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
+          }
+        ],
+        "description": "Where a mob stands, as `mob/standing` answers it. The first five words\nare a served mob's, from what its actor observed; the others say why\nthe mob is not served, and none of them means idle. Two of the first\nfive are also given without counts from the host's own record of a\nmob that has no actor to ask: see `finished` and `stopped`. No word\nsays idle:\na quiet running mob reads `unknown`. The vocabulary may grow: a reader\nkeeps a word it does not know and treats it as unknown, never as idle."
+      },
+      "WireMobStandingCounts": {
+        "description": "The four counts an idle close reads, as diagnostics of a `mob/standing`\nanswer. All four at zero is not idle: see `standing`.",
+        "properties": {
+          "foreground_owners": {
+            "description": "Foreground owners of the mob.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "parked_admission": {
+            "description": "Commands parked before their admission.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "roster_transitions": {
+            "description": "Roster changes in flight: spawns, retirements, respawns.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "runs": {
+            "description": "Member turns and flow runs in flight or accepted.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "roster_transitions",
+          "runs",
+          "parked_admission",
+          "foreground_owners"
+        ],
+        "type": "object"
+      },
+      "WireMobStandingReason": {
+        "anyOf": [
+          {
+            "const": "completed",
+            "description": "Finished: the mob completed.",
+            "type": "string"
+          },
+          {
+            "const": "destroyed",
+            "description": "Finished: the mob was destroyed. Closed: its destroy is admitted\nand not complete yet.",
+            "type": "string"
+          },
+          {
+            "const": "idle_close",
+            "description": "Closed: an explicit idle close found the mob idle.",
+            "type": "string"
+          },
+          {
+            "const": "last_owner_released",
+            "description": "Closed: the last public owner released the mob and it was then\nidle.",
+            "type": "string"
+          },
+          {
+            "const": "stand_down",
+            "description": "Closed: the embedder stood the mob down.",
+            "type": "string"
+          },
+          {
+            "const": "shutdown",
+            "description": "Closed: the mob admitted a shutdown.",
+            "type": "string"
+          },
+          {
+            "const": "durability_fail_stop",
+            "description": "Closed: the actor stopped because a durable write's outcome\nstayed uncertain or its recovery failed.",
+            "type": "string"
+          },
+          {
+            "const": "actor_lost",
+            "description": "Closed: the actor task ended without its loop returning.",
+            "type": "string"
+          },
+          {
+            "const": "dispatch_failed",
+            "description": "Closed: a dispatch failure stopped the actor.",
+            "type": "string"
+          },
+          {
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
+          }
+        ],
+        "description": "How a mob finished (`completed`, `destroyed`) or why its admission\nclosed (every other word). The vocabulary may grow: a reader keeps a\nword it does not know."
+      },
+      "WireMobUnknownCause": {
+        "anyOf": [
+          {
+            "const": "no_runtime_adapter",
+            "description": "The mob has no runtime to ask about its members' sessions.",
+            "type": "string"
+          },
+          {
+            "const": "members_placed",
+            "description": "Members are placed on another host, whose work is not read.",
+            "type": "string"
+          },
+          {
+            "const": "sessions_not_readable",
+            "description": "Members' sessions could not be asked.",
+            "type": "string"
+          },
+          {
+            "const": "peer_delivery_not_traced",
+            "description": "A peer delivery between members is not followed to its admission.",
+            "type": "string"
+          },
+          {
+            "const": "handoffs_not_tracked",
+            "description": "Work the actor hands to a task of its own is not counted.",
+            "type": "string"
+          },
+          {
+            "const": "observation_timed_out",
+            "description": "The mob's actor did not answer the observation within the\nsurface's bound: it may be inside a long command.",
+            "type": "string"
+          },
+          {
+            "const": "observation_failed",
+            "description": "The mob's actor refused the observation or could not be asked\n(it is shutting down, or it is gone). `mob/standing` answers an\nerror only for the read's own refusals: a caller without the\nlist scope, or a host that is standing down.",
+            "type": "string"
+          },
+          {
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
+          }
+        ],
+        "description": "One piece of evidence an observation of a quiet mob did not read, so\nthat it answers `unknown` instead of idle. The vocabulary may grow: a\nreader keeps a cause it does not know."
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/standing`.",
+    "properties": {
+      "causes": {
+        "description": "For `unknown`: the evidence the observation did not read.",
+        "items": {
+          "$ref": "#/$defs/WireMobUnknownCause"
+        },
+        "type": "array"
+      },
+      "counts": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobStandingCounts"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The idle close's four counts. Present when the mob's actor answered."
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobStandingReason"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For `finished`, how; for `closed`, why. Absent otherwise, and for a\nreason this vocabulary does not name."
+      },
+      "standing": {
+        "$ref": "#/$defs/WireMobStanding",
+        "description": "Where the mob stands."
+      }
+    },
+    "required": [
+      "mob_id",
+      "standing"
+    ],
+    "title": "MobStandingResult",
+    "type": "object"
+  },
   "MobStatusResult": {
     "$defs": {
       "ErrorCode": {
@@ -208018,6 +208276,176 @@
     "title": "WireMobRuntimeMode",
     "type": "string"
   },
+  "WireMobStanding": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "const": "busy",
+        "description": "Work is in flight or owed in the mob.",
+        "type": "string"
+      },
+      {
+        "const": "finished",
+        "description": "The mob has finished and takes no more work; `reason` says how.\nAlso given, with `destroyed` and no counts, for an id whose mob\nthis host process destroyed, until the process restarts.",
+        "type": "string"
+      },
+      {
+        "const": "closed",
+        "description": "The mob's admission is closed and this actor takes no more work;\n`reason` says why. Closed is not finished.",
+        "type": "string"
+      },
+      {
+        "const": "stopped",
+        "description": "The mob is stopped: paused until it is resumed. Also given, with\nno counts, for a mob that is not loaded when the host's record of\nit says it is stopped.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Nothing was counted in flight, but the read cannot say that the\nmob is idle; `causes` names the evidence it did not read.",
+        "type": "string"
+      },
+      {
+        "const": "unloading",
+        "description": "The mob's idle unload is admitted and not answered yet: its actor\nmay still answer busy.",
+        "type": "string"
+      },
+      {
+        "const": "held",
+        "description": "A child mob held before activation, until its owner resolves.",
+        "type": "string"
+      },
+      {
+        "const": "quarantined",
+        "description": "The mob's store did not restore and is kept quarantined.",
+        "type": "string"
+      },
+      {
+        "const": "dormant",
+        "description": "The mob is known and not loaded; this read loads nothing. A mob\nthat completed and was then unloaded reads this: finished is told\nonly while the mob is loaded or, for a destroy, until the host\nprocess restarts. A stopped mob reads this until the host has\nread its store's stop.",
+        "type": "string"
+      },
+      {
+        "const": "loading",
+        "description": "The mob's one load is in flight.",
+        "type": "string"
+      },
+      {
+        "const": "changed",
+        "description": "Another actor serves the mob by now: ask again.",
+        "type": "string"
+      },
+      {
+        "const": "set_incomplete",
+        "description": "The host has not read every mob it holds yet: a mob of this id\nmay exist.",
+        "type": "string"
+      },
+      {
+        "const": "absent",
+        "description": "The host has no mob of this id. An id whose create is in flight\nreads this until the mob is there, and so does a mob that was\ndestroyed before the host process last started.",
+        "type": "string"
+      },
+      {
+        "description": "A word this version does not know, as it was sent.",
+        "type": "string"
+      }
+    ],
+    "description": "Where a mob stands, as `mob/standing` answers it. The first five words\nare a served mob's, from what its actor observed; the others say why\nthe mob is not served, and none of them means idle. Two of the first\nfive are also given without counts from the host's own record of a\nmob that has no actor to ask: see `finished` and `stopped`. No word\nsays idle:\na quiet running mob reads `unknown`. The vocabulary may grow: a reader\nkeeps a word it does not know and treats it as unknown, never as idle.",
+    "title": "WireMobStanding"
+  },
+  "WireMobStandingCounts": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The four counts an idle close reads, as diagnostics of a `mob/standing`\nanswer. All four at zero is not idle: see `standing`.",
+    "properties": {
+      "foreground_owners": {
+        "description": "Foreground owners of the mob.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "parked_admission": {
+        "description": "Commands parked before their admission.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "roster_transitions": {
+        "description": "Roster changes in flight: spawns, retirements, respawns.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "runs": {
+        "description": "Member turns and flow runs in flight or accepted.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "roster_transitions",
+      "runs",
+      "parked_admission",
+      "foreground_owners"
+    ],
+    "title": "WireMobStandingCounts",
+    "type": "object"
+  },
+  "WireMobStandingReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "const": "completed",
+        "description": "Finished: the mob completed.",
+        "type": "string"
+      },
+      {
+        "const": "destroyed",
+        "description": "Finished: the mob was destroyed. Closed: its destroy is admitted\nand not complete yet.",
+        "type": "string"
+      },
+      {
+        "const": "idle_close",
+        "description": "Closed: an explicit idle close found the mob idle.",
+        "type": "string"
+      },
+      {
+        "const": "last_owner_released",
+        "description": "Closed: the last public owner released the mob and it was then\nidle.",
+        "type": "string"
+      },
+      {
+        "const": "stand_down",
+        "description": "Closed: the embedder stood the mob down.",
+        "type": "string"
+      },
+      {
+        "const": "shutdown",
+        "description": "Closed: the mob admitted a shutdown.",
+        "type": "string"
+      },
+      {
+        "const": "durability_fail_stop",
+        "description": "Closed: the actor stopped because a durable write's outcome\nstayed uncertain or its recovery failed.",
+        "type": "string"
+      },
+      {
+        "const": "actor_lost",
+        "description": "Closed: the actor task ended without its loop returning.",
+        "type": "string"
+      },
+      {
+        "const": "dispatch_failed",
+        "description": "Closed: a dispatch failure stopped the actor.",
+        "type": "string"
+      },
+      {
+        "description": "A word this version does not know, as it was sent.",
+        "type": "string"
+      }
+    ],
+    "description": "How a mob finished (`completed`, `destroyed`) or why its admission\nclosed (every other word). The vocabulary may grow: a reader keeps a\nword it does not know.",
+    "title": "WireMobStandingReason"
+  },
   "WireMobToolAuthorityContext": {
     "$defs": {
       "WireMobToolCallerProvenance": {
@@ -208236,6 +208664,52 @@
     },
     "title": "WireMobToolConfig",
     "type": "object"
+  },
+  "WireMobUnknownCause": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "const": "no_runtime_adapter",
+        "description": "The mob has no runtime to ask about its members' sessions.",
+        "type": "string"
+      },
+      {
+        "const": "members_placed",
+        "description": "Members are placed on another host, whose work is not read.",
+        "type": "string"
+      },
+      {
+        "const": "sessions_not_readable",
+        "description": "Members' sessions could not be asked.",
+        "type": "string"
+      },
+      {
+        "const": "peer_delivery_not_traced",
+        "description": "A peer delivery between members is not followed to its admission.",
+        "type": "string"
+      },
+      {
+        "const": "handoffs_not_tracked",
+        "description": "Work the actor hands to a task of its own is not counted.",
+        "type": "string"
+      },
+      {
+        "const": "observation_timed_out",
+        "description": "The mob's actor did not answer the observation within the\nsurface's bound: it may be inside a long command.",
+        "type": "string"
+      },
+      {
+        "const": "observation_failed",
+        "description": "The mob's actor refused the observation or could not be asked\n(it is shutting down, or it is gone). `mob/standing` answers an\nerror only for the read's own refusals: a caller without the\nlist scope, or a host that is standing down.",
+        "type": "string"
+      },
+      {
+        "description": "A word this version does not know, as it was sent.",
+        "type": "string"
+      }
+    ],
+    "description": "One piece of evidence an observation of a quiet mob did not read, so\nthat it answers `unknown` instead of idle. The vocabulary may grow: a\nreader keeps a cause it does not know.",
+    "title": "WireMobUnknownCause"
   },
   "WireModelRoutingApprovalPhase": {
     "$defs": {

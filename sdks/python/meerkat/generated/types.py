@@ -4279,6 +4279,26 @@ class MobRestoreRetryResult:
 
 
 @dataclass
+class MobStandingResult:
+    """Response payload for `mob/standing`."""
+    mob_id: str
+    standing: WireMobStanding
+    causes: Optional[list[WireMobUnknownCause]] = None
+    counts: Optional[WireMobStandingCounts] = None
+    reason: Optional[WireMobStandingReason] = None
+
+
+@dataclass
+class WireMobStandingCounts:
+    """The four counts an idle close reads, as diagnostics of a `mob/standing`
+answer. All four at zero is not idle: see `standing`."""
+    foreground_owners: int
+    parked_admission: int
+    roster_transitions: int
+    runs: int
+
+
+@dataclass
 class MobClaimCallbackRouteParams:
     """Request payload for `mob/claim_callback_route`."""
     claim_token: str = field(repr=False)
@@ -8357,6 +8377,26 @@ WireMobQuarantineClass = Literal['store_unavailable', 'store_unreadable', 'resum
 # How a `mob/restore_retry` ended. A re-attempt that fails answers the
 # `mob_quarantined` refusal instead.
 WireMobRestoreRetryOutcome = Literal['restored', 'held', 'settled', 'not_quarantined']
+
+# Where a mob stands, as `mob/standing` answers it. The first five words
+# are a served mob's, from what its actor observed; the others say why
+# the mob is not served, and none of them means idle. Two of the first
+# five are also given without counts from the host's own record of a
+# mob that has no actor to ask: see `finished` and `stopped`. No word
+# says idle:
+# a quiet running mob reads `unknown`. The vocabulary may grow: a reader
+# keeps a word it does not know and treats it as unknown, never as idle.
+WireMobStanding = Literal['busy'] | Literal['finished'] | Literal['closed'] | Literal['stopped'] | Literal['unknown'] | Literal['unloading'] | Literal['held'] | Literal['quarantined'] | Literal['dormant'] | Literal['loading'] | Literal['changed'] | Literal['set_incomplete'] | Literal['absent'] | str
+
+# How a mob finished (`completed`, `destroyed`) or why its admission
+# closed (every other word). The vocabulary may grow: a reader keeps a
+# word it does not know.
+WireMobStandingReason = Literal['completed'] | Literal['destroyed'] | Literal['idle_close'] | Literal['last_owner_released'] | Literal['stand_down'] | Literal['shutdown'] | Literal['durability_fail_stop'] | Literal['actor_lost'] | Literal['dispatch_failed'] | str
+
+# One piece of evidence an observation of a quiet mob did not read, so
+# that it answers `unknown` instead of idle. The vocabulary may grow: a
+# reader keeps a cause it does not know.
+WireMobUnknownCause = Literal['no_runtime_adapter'] | Literal['members_placed'] | Literal['sessions_not_readable'] | Literal['peer_delivery_not_traced'] | Literal['handoffs_not_tracked'] | Literal['observation_timed_out'] | Literal['observation_failed'] | str
 
 # Lifecycle status of a flow run on the wire. Mirrors
 # `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than

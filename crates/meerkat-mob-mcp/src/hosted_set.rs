@@ -1022,6 +1022,15 @@ impl HostedStores {
             .collect()
     }
 
+    /// Whether the mob under `mob_id`, which is not loaded, is stopped by
+    /// its record: [`Self::stopped_unloaded_ids`] for one id. A record that
+    /// has not read the store's stop says nothing, and nothing is read or
+    /// loaded here.
+    pub(crate) fn stopped_unloaded(&self, mob_id: &MobId) -> bool {
+        self.stores_of(mob_id)
+            .any(|store| store.stop() == Some(true))
+    }
+
     /// Keep what the creation record of the mob of the live record at
     /// `path` says: who created the mob and the mob's own incarnation
     /// ([`HostedStore`]'s `creation` and `incarnation`). Both are given in

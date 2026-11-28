@@ -1350,6 +1350,54 @@ async fn degraded_member_is_rejected_typed_without_delaying_peers() {
     mob.service.release_live_session_lookups().await;
 }
 
+/// A delivery held before its durable admission is work the mob counts: an
+/// idle observation asked while the store holds that write answers not idle,
+/// with the admission count and admission open, however often it is asked,
+/// and asking it brings no second write to the store. Only the stretch
+/// before admission is read here: what the observation answers once the
+/// delivery is admitted and running is other rows' subject.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_observation_counts_a_delivery_held_before_its_admission() {
+    let mob = create_isolation_mob(2).await;
+    mob.store.park_admissions(mob.session(1));
+    // Hang guard only: every wait below resolves on a typed event.
+    let guard = Duration::from_secs(30);
+
+    let held = send_task(&mob.handle, mob.member(1), "held".to_string());
+    tokio::time::timeout(
+        guard,
+        mob.store.wait_parked_admission_arrivals(mob.session(1), 1),
+    )
+    .await
+    .expect("the delivery's admission write is held in the store");
+
+    for asked in ["first", "second"] {
+        let observed = tokio::time::timeout(guard, mob.handle.observe_idle())
+            .await
+            .unwrap_or_else(|_| panic!("the {asked} observation answers while the write is held"))
+            .unwrap_or_else(|error| panic!("the {asked} observation: {error}"));
+        assert!(!observed.is_idle(), "{asked}: {observed:?}");
+        assert!(observed.busy.parked_admission >= 1, "{asked}: {observed:?}");
+        assert!(observed.admission_closed.is_none(), "{asked}: {observed:?}");
+    }
+    assert_eq!(
+        mob.store.parked_admission_arrivals(mob.session(1)),
+        1,
+        "observing brought no second admission write"
+    );
+    assert!(
+        !held.is_finished(),
+        "the delivery has not answered while its admission is held"
+    );
+
+    mob.store.release_admissions();
+    tokio::time::timeout(guard, held)
+        .await
+        .expect("the delivery answers once its admission is released")
+        .expect("join the delivery")
+        .expect("the delivery is admitted");
+}
+
 /// A delivery whose caller left while it was parked behind the member's
 /// in-flight admission must never execute. (Fails-old, 3/30 at 10 copies on
 /// two cores: SubmitWork ran on a stack-relief task whose reply receiver

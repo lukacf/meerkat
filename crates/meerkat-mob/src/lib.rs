@@ -493,6 +493,7 @@ pub use runtime::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationT
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::{MemberToolGrant, MemberToolGrantError};
 pub use runtime::{MobBeforeActivation, MobLifecycleObservation, MobReadHandle};
+pub use runtime::{MobFinished, MobMachineHeld, MobStanding, MobUnknownCause, MobUnread};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
 

@@ -1360,6 +1360,247 @@ pub struct MobRestoreRetryResult {
     pub outcome: WireMobRestoreRetryOutcome,
 }
 
+/// The open form of a growing vocabulary's schema: the words the derived
+/// schema lists, and any other string. A known word matches its own
+/// alternative and the plain string one, so the alternatives are `anyOf`.
+/// A derived schema that lists its words in another way is left as it was
+/// derived: no vocabulary of the macro below has one.
+#[cfg(feature = "schema")]
+fn open_vocabulary_schema(mut known: schemars::Schema) -> schemars::Schema {
+    let object = known.ensure_object();
+    if let Some(serde_json::Value::Array(mut words)) = object.remove("oneOf") {
+        words.push(serde_json::json!({
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
+        }));
+        object.insert("anyOf".to_owned(), serde_json::Value::Array(words));
+    }
+    known
+}
+
+/// A vocabulary of the wire that may grow: a closed list of the words this
+/// version knows, and a carrier for any other word. A word this version
+/// does not know decodes as `Unrecognized` with the value as it was sent
+/// and is written back the same, so a reader built on an older version
+/// keeps the answer instead of failing it. The schema lists the known words
+/// and accepts any other string, so a reader generated from it keeps such a
+/// word too.
+macro_rules! tolerant_wire_vocabulary {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident, schema $schema_mod:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident => $word:literal, )+
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+        #[serde(from = "String", into = "String")]
+        #[non_exhaustive]
+        pub enum $name {
+            $( $(#[$variant_meta])* $variant, )+
+            /// A word this version does not know, as it was sent.
+            Unrecognized(String),
+        }
+
+        impl $name {
+            /// The value on the wire.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                match self {
+                    $( Self::$variant => $word, )+
+                    Self::Unrecognized(raw) => raw,
+                }
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(raw: String) -> Self {
+                match raw.as_str() {
+                    $( $word => Self::$variant, )+
+                    _ => Self::Unrecognized(raw),
+                }
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(word: $name) -> Self {
+                match word {
+                    $name::Unrecognized(raw) => raw,
+                    known => known.as_str().to_owned(),
+                }
+            }
+        }
+
+        // The schema of the vocabulary: the words this version knows, and
+        // any other string, which a reader keeps as a word it does not know.
+        #[cfg(feature = "schema")]
+        mod $schema_mod {
+            $(#[$meta])*
+            #[derive(schemars::JsonSchema)]
+            #[schemars(rename_all = "snake_case")]
+            #[allow(dead_code)]
+            pub(super) enum $name {
+                $( $(#[$variant_meta])* $variant, )+
+            }
+        }
+
+        #[cfg(feature = "schema")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                open_vocabulary_schema(
+                    <$schema_mod::$name as schemars::JsonSchema>::json_schema(generator),
+                )
+            }
+        }
+    };
+}
+
+tolerant_wire_vocabulary! {
+    /// Where a mob stands, as `mob/standing` answers it. The first five words
+    /// are a served mob's, from what its actor observed; the others say why
+    /// the mob is not served, and none of them means idle. Two of the first
+    /// five are also given without counts from the host's own record of a
+    /// mob that has no actor to ask: see `finished` and `stopped`. No word
+    /// says idle:
+    /// a quiet running mob reads `unknown`. The vocabulary may grow: a reader
+    /// keeps a word it does not know and treats it as unknown, never as idle.
+    pub enum WireMobStanding, schema mob_standing_schema {
+        /// Work is in flight or owed in the mob.
+        Busy => "busy",
+        /// The mob has finished and takes no more work; `reason` says how.
+        /// Also given, with `destroyed` and no counts, for an id whose mob
+        /// this host process destroyed, until the process restarts.
+        Finished => "finished",
+        /// The mob's admission is closed and this actor takes no more work;
+        /// `reason` says why. Closed is not finished.
+        Closed => "closed",
+        /// The mob is stopped: paused until it is resumed. Also given, with
+        /// no counts, for a mob that is not loaded when the host's record of
+        /// it says it is stopped.
+        Stopped => "stopped",
+        /// Nothing was counted in flight, but the read cannot say that the
+        /// mob is idle; `causes` names the evidence it did not read.
+        Unknown => "unknown",
+        /// The mob's idle unload is admitted and not answered yet: its actor
+        /// may still answer busy.
+        Unloading => "unloading",
+        /// A child mob held before activation, until its owner resolves.
+        Held => "held",
+        /// The mob's store did not restore and is kept quarantined.
+        Quarantined => "quarantined",
+        /// The mob is known and not loaded; this read loads nothing. A mob
+        /// that completed and was then unloaded reads this: finished is told
+        /// only while the mob is loaded or, for a destroy, until the host
+        /// process restarts. A stopped mob reads this until the host has
+        /// read its store's stop.
+        Dormant => "dormant",
+        /// The mob's one load is in flight.
+        Loading => "loading",
+        /// Another actor serves the mob by now: ask again.
+        Changed => "changed",
+        /// The host has not read every mob it holds yet: a mob of this id
+        /// may exist.
+        SetIncomplete => "set_incomplete",
+        /// The host has no mob of this id. An id whose create is in flight
+        /// reads this until the mob is there, and so does a mob that was
+        /// destroyed before the host process last started.
+        Absent => "absent",
+    }
+}
+
+tolerant_wire_vocabulary! {
+    /// How a mob finished (`completed`, `destroyed`) or why its admission
+    /// closed (every other word). The vocabulary may grow: a reader keeps a
+    /// word it does not know.
+    pub enum WireMobStandingReason, schema mob_standing_reason_schema {
+        /// Finished: the mob completed.
+        Completed => "completed",
+        /// Finished: the mob was destroyed. Closed: its destroy is admitted
+        /// and not complete yet.
+        Destroyed => "destroyed",
+        /// Closed: an explicit idle close found the mob idle.
+        IdleClose => "idle_close",
+        /// Closed: the last public owner released the mob and it was then
+        /// idle.
+        LastOwnerReleased => "last_owner_released",
+        /// Closed: the embedder stood the mob down.
+        StandDown => "stand_down",
+        /// Closed: the mob admitted a shutdown.
+        Shutdown => "shutdown",
+        /// Closed: the actor stopped because a durable write's outcome
+        /// stayed uncertain or its recovery failed.
+        DurabilityFailStop => "durability_fail_stop",
+        /// Closed: the actor task ended without its loop returning.
+        ActorLost => "actor_lost",
+        /// Closed: a dispatch failure stopped the actor.
+        DispatchFailed => "dispatch_failed",
+    }
+}
+
+tolerant_wire_vocabulary! {
+    /// One piece of evidence an observation of a quiet mob did not read, so
+    /// that it answers `unknown` instead of idle. The vocabulary may grow: a
+    /// reader keeps a cause it does not know.
+    pub enum WireMobUnknownCause, schema mob_unknown_cause_schema {
+        /// The mob has no runtime to ask about its members' sessions.
+        NoRuntimeAdapter => "no_runtime_adapter",
+        /// Members are placed on another host, whose work is not read.
+        MembersPlaced => "members_placed",
+        /// Members' sessions could not be asked.
+        SessionsNotReadable => "sessions_not_readable",
+        /// A peer delivery between members is not followed to its admission.
+        PeerDeliveryNotTraced => "peer_delivery_not_traced",
+        /// Work the actor hands to a task of its own is not counted.
+        HandoffsNotTracked => "handoffs_not_tracked",
+        /// The mob's actor did not answer the observation within the
+        /// surface's bound: it may be inside a long command.
+        ObservationTimedOut => "observation_timed_out",
+        /// The mob's actor refused the observation or could not be asked
+        /// (it is shutting down, or it is gone). `mob/standing` answers an
+        /// error only for the read's own refusals: a caller without the
+        /// list scope, or a host that is standing down.
+        ObservationFailed => "observation_failed",
+    }
+}
+
+/// The four counts an idle close reads, as diagnostics of a `mob/standing`
+/// answer. All four at zero is not idle: see `standing`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobStandingCounts {
+    /// Roster changes in flight: spawns, retirements, respawns.
+    pub roster_transitions: u64,
+    /// Member turns and flow runs in flight or accepted.
+    pub runs: u64,
+    /// Commands parked before their admission.
+    pub parked_admission: u64,
+    /// Foreground owners of the mob.
+    pub foreground_owners: u64,
+}
+
+/// Response payload for `mob/standing`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobStandingResult {
+    pub mob_id: String,
+    /// Where the mob stands.
+    pub standing: WireMobStanding,
+    /// For `finished`, how; for `closed`, why. Absent otherwise, and for a
+    /// reason this vocabulary does not name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<WireMobStandingReason>,
+    /// For `unknown`: the evidence the observation did not read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub causes: Vec<WireMobUnknownCause>,
+    /// The idle close's four counts. Present when the mob's actor answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<WireMobStandingCounts>,
+}
+
 /// Request payload for `mob/spawn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -5569,6 +5810,321 @@ mod tests {
                 serde_json::from_value(value).expect("decode retry result");
             assert_eq!(decoded, result);
         }
+    }
+
+    /// Each word this version knows of the three `mob/standing` vocabularies
+    /// is the one `as_str` gives, decodes to its variant and is written back
+    /// the same. No word this version knows is "idle".
+    #[test]
+    fn each_known_mob_standing_word_round_trips_and_none_says_idle() {
+        let standings = [
+            (WireMobStanding::Busy, "busy"),
+            (WireMobStanding::Finished, "finished"),
+            (WireMobStanding::Closed, "closed"),
+            (WireMobStanding::Stopped, "stopped"),
+            (WireMobStanding::Unknown, "unknown"),
+            (WireMobStanding::Unloading, "unloading"),
+            (WireMobStanding::Held, "held"),
+            (WireMobStanding::Quarantined, "quarantined"),
+            (WireMobStanding::Dormant, "dormant"),
+            (WireMobStanding::Loading, "loading"),
+            (WireMobStanding::Changed, "changed"),
+            (WireMobStanding::SetIncomplete, "set_incomplete"),
+            (WireMobStanding::Absent, "absent"),
+        ];
+        for (standing, wire) in standings {
+            assert_eq!(standing.as_str(), wire);
+            assert_ne!(wire, "idle");
+            let value = serde_json::to_value(&standing).expect("serialize standing");
+            assert_eq!(value, serde_json::json!(wire));
+            let decoded: WireMobStanding = serde_json::from_value(value).expect("decode standing");
+            assert_eq!(decoded, standing);
+        }
+
+        for (reason, wire) in [
+            (WireMobStandingReason::Completed, "completed"),
+            (WireMobStandingReason::Destroyed, "destroyed"),
+            (WireMobStandingReason::IdleClose, "idle_close"),
+            (
+                WireMobStandingReason::LastOwnerReleased,
+                "last_owner_released",
+            ),
+            (WireMobStandingReason::StandDown, "stand_down"),
+            (WireMobStandingReason::Shutdown, "shutdown"),
+            (
+                WireMobStandingReason::DurabilityFailStop,
+                "durability_fail_stop",
+            ),
+            (WireMobStandingReason::ActorLost, "actor_lost"),
+            (WireMobStandingReason::DispatchFailed, "dispatch_failed"),
+        ] {
+            assert_eq!(reason.as_str(), wire);
+            let value = serde_json::to_value(&reason).expect("serialize reason");
+            assert_eq!(value, serde_json::json!(wire));
+            let decoded: WireMobStandingReason =
+                serde_json::from_value(value).expect("decode reason");
+            assert_eq!(decoded, reason);
+        }
+
+        for (cause, wire) in [
+            (WireMobUnknownCause::NoRuntimeAdapter, "no_runtime_adapter"),
+            (WireMobUnknownCause::MembersPlaced, "members_placed"),
+            (
+                WireMobUnknownCause::SessionsNotReadable,
+                "sessions_not_readable",
+            ),
+            (
+                WireMobUnknownCause::PeerDeliveryNotTraced,
+                "peer_delivery_not_traced",
+            ),
+            (
+                WireMobUnknownCause::HandoffsNotTracked,
+                "handoffs_not_tracked",
+            ),
+            (
+                WireMobUnknownCause::ObservationTimedOut,
+                "observation_timed_out",
+            ),
+            (WireMobUnknownCause::ObservationFailed, "observation_failed"),
+        ] {
+            assert_eq!(cause.as_str(), wire);
+            let value = serde_json::to_value(&cause).expect("serialize cause");
+            assert_eq!(value, serde_json::json!(wire));
+            let decoded: WireMobUnknownCause = serde_json::from_value(value).expect("decode cause");
+            assert_eq!(decoded, cause);
+        }
+    }
+
+    /// The three vocabularies may grow. A word a later server sends is kept
+    /// as it was sent, in its own variant, and written back the same; the
+    /// answer that carries it still decodes. Only a value that is not a
+    /// string is refused.
+    #[test]
+    fn a_mob_standing_word_this_version_does_not_know_is_kept_as_sent() {
+        let standing: WireMobStanding =
+            serde_json::from_value(serde_json::json!("a_later_word")).expect("decode standing");
+        assert_eq!(
+            standing,
+            WireMobStanding::Unrecognized("a_later_word".to_string())
+        );
+        assert_eq!(standing.as_str(), "a_later_word");
+        assert_eq!(
+            serde_json::to_value(&standing).expect("serialize standing"),
+            serde_json::json!("a_later_word")
+        );
+
+        let reason: WireMobStandingReason =
+            serde_json::from_value(serde_json::json!("a_later_reason")).expect("decode reason");
+        assert_eq!(
+            reason,
+            WireMobStandingReason::Unrecognized("a_later_reason".to_string())
+        );
+        assert_eq!(
+            serde_json::to_value(&reason).expect("serialize reason"),
+            serde_json::json!("a_later_reason")
+        );
+
+        let cause: WireMobUnknownCause =
+            serde_json::from_value(serde_json::json!("a_later_cause")).expect("decode cause");
+        assert_eq!(
+            cause,
+            WireMobUnknownCause::Unrecognized("a_later_cause".to_string())
+        );
+        assert_eq!(
+            serde_json::to_value(&cause).expect("serialize cause"),
+            serde_json::json!("a_later_cause")
+        );
+
+        // The whole answer of a later server decodes and is written back.
+        let later = serde_json::json!({
+            "mob_id": "quiet",
+            "standing": "a_later_word",
+            "reason": "a_later_reason",
+            "causes": ["members_placed", "a_later_cause"],
+        });
+        let decoded: MobStandingResult =
+            serde_json::from_value(later.clone()).expect("decode a later server's answer");
+        assert_eq!(
+            decoded.causes,
+            vec![
+                WireMobUnknownCause::MembersPlaced,
+                WireMobUnknownCause::Unrecognized("a_later_cause".to_string()),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("serialize the answer"),
+            later
+        );
+
+        assert!(serde_json::from_value::<WireMobStanding>(serde_json::json!(7)).is_err());
+        assert!(serde_json::from_value::<WireMobStandingReason>(serde_json::json!(null)).is_err());
+        assert!(serde_json::from_value::<WireMobUnknownCause>(serde_json::json!(["x"])).is_err());
+    }
+
+    /// The schema of each vocabulary is open: it lists exactly the words
+    /// `as_str` gives for the variants this version knows, in their order,
+    /// and then accepts any other string, so a reader generated from it
+    /// keeps a word it does not know. Only these three: the quarantine
+    /// class, a released vocabulary, keeps the closed list it was released
+    /// with.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn the_mob_standing_schemas_list_the_known_words() {
+        fn consts(schema: &schemars::Schema) -> Vec<String> {
+            let value = serde_json::to_value(schema).expect("schema value");
+            assert!(
+                value.get("oneOf").is_none(),
+                "an open vocabulary is not a oneOf of its known words: {value}"
+            );
+            let alternatives = value["anyOf"]
+                .as_array()
+                .expect("an anyOf of the known words and any other string");
+            let (open, known) = alternatives
+                .split_last()
+                .expect("at least the plain string alternative");
+            assert_eq!(open["type"], "string", "{open}");
+            assert!(
+                open.get("const").is_none() && open.get("enum").is_none(),
+                "the last alternative is any string: {open}"
+            );
+            known
+                .iter()
+                .map(|word| {
+                    assert_eq!(word["type"], "string", "{word}");
+                    word["const"]
+                        .as_str()
+                        .expect("each known word is a const")
+                        .to_string()
+                })
+                .collect()
+        }
+        assert_eq!(
+            consts(&schemars::schema_for!(WireMobStanding)),
+            [
+                "busy",
+                "finished",
+                "closed",
+                "stopped",
+                "unknown",
+                "unloading",
+                "held",
+                "quarantined",
+                "dormant",
+                "loading",
+                "changed",
+                "set_incomplete",
+                "absent",
+            ]
+        );
+        assert_eq!(
+            consts(&schemars::schema_for!(WireMobStandingReason)),
+            [
+                "completed",
+                "destroyed",
+                "idle_close",
+                "last_owner_released",
+                "stand_down",
+                "shutdown",
+                "durability_fail_stop",
+                "actor_lost",
+                "dispatch_failed",
+            ]
+        );
+        assert_eq!(
+            consts(&schemars::schema_for!(WireMobUnknownCause)),
+            [
+                "no_runtime_adapter",
+                "members_placed",
+                "sessions_not_readable",
+                "peer_delivery_not_traced",
+                "handoffs_not_tracked",
+                "observation_timed_out",
+                "observation_failed",
+            ]
+        );
+
+        // A guard of this change's scope: the released vocabulary beside
+        // them keeps its closed list here. A change that opens it moves this
+        // line with it.
+        let released = serde_json::to_value(schemars::schema_for!(WireMobQuarantineClass))
+            .expect("schema value");
+        assert!(released.get("anyOf").is_none(), "{released}");
+        let classes = released["oneOf"]
+            .as_array()
+            .expect("a oneOf of the known classes");
+        assert_eq!(classes.len(), 3, "{released}");
+        assert!(
+            classes.iter().all(|class| class["const"].is_string()),
+            "{released}"
+        );
+    }
+
+    /// A `mob/standing` answer carries the reason only for a finished or
+    /// closed mob, the causes only for an unknown one, and the counts only
+    /// for a served one; a mob that is not served answers its word alone.
+    #[test]
+    fn a_mob_standing_result_leaves_out_what_does_not_apply() {
+        let counts = WireMobStandingCounts {
+            roster_transitions: 0,
+            runs: 0,
+            parked_admission: 0,
+            foreground_owners: 0,
+        };
+        let unknown = MobStandingResult {
+            mob_id: "quiet".to_string(),
+            standing: WireMobStanding::Unknown,
+            reason: None,
+            causes: vec![
+                WireMobUnknownCause::PeerDeliveryNotTraced,
+                WireMobUnknownCause::HandoffsNotTracked,
+            ],
+            counts: Some(counts),
+        };
+        let value = serde_json::to_value(&unknown).expect("serialize unknown standing");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "mob_id": "quiet",
+                "standing": "unknown",
+                "causes": ["peer_delivery_not_traced", "handoffs_not_tracked"],
+                "counts": {
+                    "roster_transitions": 0,
+                    "runs": 0,
+                    "parked_admission": 0,
+                    "foreground_owners": 0,
+                },
+            })
+        );
+        let decoded: MobStandingResult =
+            serde_json::from_value(value).expect("decode unknown standing");
+        assert_eq!(decoded, unknown);
+
+        let finished = MobStandingResult {
+            mob_id: "done".to_string(),
+            standing: WireMobStanding::Finished,
+            reason: Some(WireMobStandingReason::Completed),
+            causes: Vec::new(),
+            counts: Some(counts),
+        };
+        let value = serde_json::to_value(&finished).expect("serialize finished standing");
+        assert_eq!(value["reason"], serde_json::json!("completed"));
+        assert!(value.get("causes").is_none());
+
+        let dormant = MobStandingResult {
+            mob_id: "asleep".to_string(),
+            standing: WireMobStanding::Dormant,
+            reason: None,
+            causes: Vec::new(),
+            counts: None,
+        };
+        let value = serde_json::to_value(&dormant).expect("serialize dormant standing");
+        assert_eq!(
+            value,
+            serde_json::json!({ "mob_id": "asleep", "standing": "dormant" })
+        );
+        let decoded: MobStandingResult =
+            serde_json::from_value(value).expect("decode dormant standing");
+        assert_eq!(decoded, dormant);
     }
 
     /// A deferred custody restore is a closed snake_case object at the top

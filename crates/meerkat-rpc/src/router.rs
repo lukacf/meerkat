@@ -3470,6 +3470,10 @@ impl MethodRouter {
                     .await
             }
             #[cfg(feature = "mob")]
+            "mob/standing" => {
+                routed_arm(|| handlers::mob::handle_standing(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
             "mob/claim_callback_route" => {
                 routed_arm(|| {
                     handlers::mob::handle_claim_callback_route(
@@ -24416,6 +24420,159 @@ mod tests {
             .await
             .expect("mob/restore_retry answers");
         assert!(unknown.error.is_some(), "an unknown id is not found");
+    }
+
+    /// `mob/standing` answers one word of its vocabulary and never idle. A
+    /// quiet running mob reads `unknown` and names the evidence that was not read,
+    /// with the idle close's four counts at zero; a stopped mob reads
+    /// `stopped`; a completed one `finished` with its reason. A quarantined
+    /// store and an id no mob has answer their own words without an error,
+    /// and without counts: nothing was loaded to count.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_standing_answers_a_closed_word_and_never_idle() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        std::fs::create_dir_all(root_path.join("mobs")).unwrap();
+        std::fs::write(
+            root_path.join("mobs").join("mob--broken.db"),
+            b"not a sqlite database",
+        )
+        .unwrap();
+        let config_store = meerkat_core::TaggedConfigStore::new(
+            Arc::new(MemoryConfigStore::new(
+                anthropic_test_config(),
+                meerkat_models::canonical(),
+            )),
+            meerkat_core::ConfigStoreMetadata {
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                    root: root_path.display().to_string(),
+                    manifest_path: root_path.join("realm.toml").display().to_string(),
+                    config_path: root_path.join("config.toml").display().to_string(),
+                    sessions_sqlite_path: None,
+                    sessions_jsonl_dir: root_path.join("sessions").display().to_string(),
+                }),
+            },
+        );
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(config_store)).await;
+        let standing = |mob_id: &'static str| {
+            let router = &router;
+            async move {
+                let answered = router
+                    .dispatch(make_request(
+                        "mob/standing",
+                        serde_json::json!({ "mob_id": mob_id }),
+                    ))
+                    .await
+                    .expect("mob/standing answers");
+                assert!(answered.error.is_none(), "{mob_id}: {:?}", answered.error);
+                let value = result_value(&answered);
+                assert_eq!(value["mob_id"], mob_id, "{value}");
+                assert_ne!(value["standing"], "idle", "{value}");
+                value
+            }
+        };
+
+        // The list reads every store, so the set is complete from here on.
+        router
+            .dispatch(make_request("mob/list", serde_json::json!({})))
+            .await
+            .expect("mob/list answers");
+        assert_eq!(
+            standing("broken").await,
+            serde_json::json!({ "mob_id": "broken", "standing": "quarantined" })
+        );
+        assert_eq!(
+            standing("never-existed").await,
+            serde_json::json!({ "mob_id": "never-existed", "standing": "absent" })
+        );
+
+        let created = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "quiet",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .expect("mob/create answers");
+        assert!(created.error.is_none(), "{:?}", created.error);
+
+        // Work that a create or a lifecycle step leaves behind drains on
+        // the actor's own loop, so each word is polled for, within a bound.
+        const SETTLE_BOUND: Duration = Duration::from_secs(10);
+        let settled = |word: &'static str| {
+            let standing = &standing;
+            async move {
+                tokio::time::timeout(SETTLE_BOUND, async {
+                    loop {
+                        let stood = standing("quiet").await;
+                        if stood["standing"] == word {
+                            break stood;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("the mob never stood {word}"))
+            }
+        };
+
+        let quiet = settled("unknown").await;
+        assert_eq!(quiet["standing"], "unknown", "{quiet}");
+        assert!(quiet.get("reason").is_none(), "{quiet}");
+        let causes = quiet["causes"].as_array().expect("an unknown names causes");
+        for cause in ["peer_delivery_not_traced", "handoffs_not_tracked"] {
+            assert!(causes.contains(&serde_json::json!(cause)), "{quiet}");
+        }
+        assert_eq!(
+            quiet["counts"],
+            serde_json::json!({
+                "roster_transitions": 0,
+                "runs": 0,
+                "parked_admission": 0,
+                "foreground_owners": 0,
+            }),
+            "{quiet}"
+        );
+
+        for (action, word, reason) in [
+            ("stop", "stopped", None),
+            ("resume", "unknown", None),
+            ("complete", "finished", Some("completed")),
+        ] {
+            let changed = router
+                .dispatch(make_request(
+                    "mob/lifecycle",
+                    serde_json::json!({ "mob_id": "quiet", "action": action }),
+                ))
+                .await
+                .expect("mob/lifecycle answers");
+            assert!(changed.error.is_none(), "{action}: {:?}", changed.error);
+            let stood = settled(word).await;
+            assert_eq!(stood["standing"], word, "{action}: {stood}");
+            assert_eq!(
+                stood.get("reason").and_then(serde_json::Value::as_str),
+                reason,
+                "{action}: {stood}"
+            );
+            assert_eq!(
+                stood.get("causes").is_some(),
+                word == "unknown",
+                "{action}: {stood}"
+            );
+        }
     }
 
     /// A `mob/create` whose RPC handler is dropped mid-creation (a cancelled

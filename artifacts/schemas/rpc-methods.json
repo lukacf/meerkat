@@ -967,6 +967,12 @@
       "result_type": "MobRestoreRetryResult"
     },
     {
+      "description": "Where a mob stands: busy, finished, closed, stopped or unknown, or why it is not served; reads without loading the mob and never answers idle",
+      "name": "mob/standing",
+      "params_type": "MobIdParams",
+      "result_type": "MobStandingResult"
+    },
+    {
       "description": "Bind a mob's member callback route to this connection with the mob's claim token",
       "name": "mob/claim_callback_route",
       "params_type": "MobClaimCallbackRouteParams",

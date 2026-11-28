@@ -3488,8 +3488,13 @@ impl AgentMobToolSurface {
                 format!("failed to project mob member status: {e}"),
             )
         })?;
-        let note = check_member_note(&status);
-        let result = CheckMemberResult { status, note };
+        let standing = MemberStanding::of(&status);
+        let note = check_member_note(&status, standing);
+        let result = CheckMemberResult {
+            status,
+            standing,
+            note,
+        };
         Self::encode_result(call, json!(result))
     }
 
@@ -3497,9 +3502,10 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let args: MobIdArgs = call
+        let args: ListMembersArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let include_standing = args.include_standing;
 
         let mob_id = MobId::from(args.mob_id);
         // One resolution: the admission, the owner view and the list all
@@ -3548,6 +3554,20 @@ impl AgentMobToolSurface {
         // member's wiring names it.
         let members = handle.member_rows_shown_to(caller.as_ref(), members).await;
 
+        // The list does not observe the mob: it reads the roster. Only a
+        // caller with manage scope that ASKS for it (`include_standing`)
+        // also gets the mob's own standing: the typed observation of the
+        // mob the list was read from, in the words every surface renders.
+        // That costs one command on the mob's actor loop, so it is not done
+        // on every list. A caller without manage scope sees its own members
+        // only and is not told the standing of the whole mob, asked or not.
+        // An actor that refuses the read or does not answer within the
+        // bound reads `unknown` with that cause; nothing of an error's text
+        // is given.
+        if manage && include_standing {
+            let standing = crate::MobStandingView::ask(&handle).await;
+            return Self::encode_result(call, json!({"members": members, "standing": standing}));
+        }
         Self::encode_result(call, json!({"members": members}))
     }
 
@@ -4495,8 +4515,15 @@ fn build_tool_defs_with_profile_support(
         tool_def(
             TOOL_MOB_CHECK_MEMBER,
             "Check a member's execution status, output preview, and token usage.\n\n\
-             Returns the member's current state: running, completed, or failed, along with \
-             a preview of its latest output and cumulative token usage.\n\n\
+             Returns the member's status (active, retiring, broken, completed or unknown), \
+             a preview of its latest output and cumulative token usage, and `standing`: one \
+             word that says where the member stands (finished, running, retiring, broken, \
+             no_run_open, run_state_unread or unknown). `note` opens with that word's \
+             sentence. finished means its retirement is recorded and it takes no more work; \
+             unknown means the mob has no record of it; no_run_open means it is seated with \
+             no turn open (its queued inputs and pending operations are not read, so this is \
+             not a promise that it is idle); run_state_unread means the run state could not \
+             be read.\n\n\
              POLLING GUIDANCE:\n\
              Members in autonomous_host mode run asynchronously. Rather than polling in a \
              tight loop, check at reasonable intervals (e.g., after completing your own work \
@@ -4517,13 +4544,23 @@ fn build_tool_defs_with_profile_support(
         tool_def(
             TOOL_MOB_LIST_MEMBERS,
             "List all members of a mob with their status and session info.\n\n\
-             Returns each member's id, profile, status (running/completed/failed), runtime_mode, \
+             Returns each member's id, profile, status (active, retiring, broken, completed \
+             or unknown), runtime_mode, \
              and session metadata. More efficient than calling mob_check_member on each member \
              individually when you need a status overview of the whole mob.\n\n\
+             The list reads the roster only. To learn where the mob as a whole stands, pass \
+             include_standing: true (it needs manage scope over the mob): the result then also \
+             carries `standing`, one word with a sentence: busy, finished (completed or \
+             destroyed), closed (with the reason), stopped, or unknown with `causes`, each \
+             piece of evidence the read did not have (observation_timed_out when the mob did \
+             not answer in time). It never says idle: a quiet mob reads unknown. Asking costs \
+             the mob one step of its own work loop, so ask when you need the answer, not on \
+             every list. Without manage scope the result has no `standing`, asked or not: \
+             you are told about your own members, not about the mob as a whole.\n\n\
              Without manage scope over the mob, you see only the members you own: the members \
              you forked and, transitively, the members they forked. A member the mob's host \
              keeps from your member tools is not listed, with manage scope too.",
-            typed_schema::<MobIdArgs>(),
+            typed_schema::<ListMembersArgs>(),
         ),
         tool_def(
             TOOL_MOB_LIST,
@@ -5085,12 +5122,78 @@ struct ForkOffResult {
 /// `mob_check_member` result. The status read never waits for the member's
 /// running turn, so while that turn is open, or when the read could not
 /// observe the member's session, the note says which fields are current.
+/// `standing` is the member's standing as one closed word, chosen from the
+/// typed status fields; the note opens with the sentence for that word.
 #[derive(Serialize)]
 struct CheckMemberResult {
     #[serde(flatten)]
     status: meerkat_contracts::MobMemberStatusResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<String>,
+    standing: MemberStanding,
+    note: String,
+}
+
+/// A member's standing as one closed word, chosen from the typed fields of
+/// its status result and from nothing else. No word says "idle": the status
+/// reads whether a turn is open, not the member's queued inputs or pending
+/// operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MemberStanding {
+    /// This incarnation's retirement is recorded.
+    Finished,
+    /// A turn of the member is open.
+    Running,
+    /// The member is retiring.
+    Retiring,
+    /// The member failed to restore and needs repair.
+    Broken,
+    /// The member is seated and no turn of it is open.
+    NoRunOpen,
+    /// The member is seated and its run state could not be read.
+    RunStateUnread,
+    /// The mob has no record of the member.
+    Unknown,
+}
+
+impl MemberStanding {
+    fn of(status: &meerkat_contracts::MobMemberStatusResult) -> Self {
+        use meerkat_contracts::{WireMemberRunState, WireMobMemberStatus};
+        match status.status {
+            WireMobMemberStatus::Completed => Self::Finished,
+            WireMobMemberStatus::Unknown => Self::Unknown,
+            WireMobMemberStatus::Broken => Self::Broken,
+            WireMobMemberStatus::Retiring => Self::Retiring,
+            WireMobMemberStatus::Active => {
+                match status.progress.as_ref().map(|progress| progress.run_state) {
+                    Some(WireMemberRunState::RunOpen) => Self::Running,
+                    Some(WireMemberRunState::Idle) => Self::NoRunOpen,
+                    Some(WireMemberRunState::Unknown) | None => Self::RunStateUnread,
+                }
+            }
+        }
+    }
+
+    /// The sentence the note opens with. A running member's is the running
+    /// note itself.
+    const fn sentence(self) -> &'static str {
+        match self {
+            Self::Finished => {
+                "The member has finished: its retirement is recorded and it takes no more work."
+            }
+            Self::Running => MEMBER_TURN_RUNNING_SENTENCE,
+            Self::Retiring => "The member is retiring.",
+            Self::Broken => "The member failed to restore and needs repair.",
+            Self::NoRunOpen => {
+                "The member is seated and no turn is open. Queued inputs and pending operations \
+                 are not read by this status."
+            }
+            Self::RunStateUnread => {
+                "The member is seated, but its run state could not be read: do not take it for \
+                 idle."
+            }
+            Self::Unknown => "The mob has no record of this member.",
+        }
+    }
 }
 
 /// What `auto_wire_parent` did for one `mob_spawn_member` call, reported as
@@ -5166,16 +5269,15 @@ const PREVIEW_STORE_REFUSED_NOTE: &str = "The store refuses to read the member's
      are current; the other progress fields may be from an earlier read.";
 
 /// The plain-language note a `mob_check_member` result carries, chosen from
-/// the typed status fields: the preview marker's variant says why the
-/// preview is missing and whether it can come back, and an open turn keeps
-/// its running note.
-fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Option<String> {
-    let running = status.progress.as_ref().is_some_and(|progress| {
-        matches!(
-            progress.run_state,
-            meerkat_contracts::WireMemberRunState::RunOpen
-        )
-    });
+/// the typed status fields: it opens with the sentence of the member's
+/// standing, the preview marker's variant then says why the preview is
+/// missing and whether it can come back, and an open turn keeps its running
+/// note.
+fn check_member_note(
+    status: &meerkat_contracts::MobMemberStatusResult,
+    standing: MemberStanding,
+) -> String {
+    let running = standing == MemberStanding::Running;
     let preview_note = status.preview_unavailable.map(|marker| match marker {
         meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline => {
             PREVIEW_OBSERVATION_DEADLINE_NOTE
@@ -5189,13 +5291,15 @@ fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Optio
         }
         meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused => PREVIEW_STORE_REFUSED_NOTE,
     });
+    // The retiring marker's own note opens with the standing's sentence.
+    let retiring_unread = standing == MemberStanding::Retiring
+        && status.preview_unavailable
+            == Some(meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring);
     match (running, preview_note) {
-        (true, Some(preview_note)) => {
-            Some(format!("{MEMBER_TURN_RUNNING_SENTENCE} {preview_note}"))
-        }
-        (true, None) => Some(MEMBER_TURN_RUNNING_NOTE.to_string()),
-        (false, Some(preview_note)) => Some(preview_note.to_string()),
-        (false, None) => None,
+        (true, None) => MEMBER_TURN_RUNNING_NOTE.to_string(),
+        (_, Some(preview_note)) if retiring_unread => preview_note.to_string(),
+        (_, Some(preview_note)) => format!("{} {preview_note}", standing.sentence()),
+        (false, None) => standing.sentence().to_string(),
     }
 }
 
@@ -5599,6 +5703,17 @@ struct MobIdArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ListMembersArgs {
+    /// Mob identifier.
+    mob_id: String,
+    /// Also say where the mob as a whole stands (busy, finished, closed,
+    /// stopped or unknown). Needs manage scope over the mob. Off by
+    /// default: it costs the mob one step of its own work loop.
+    #[serde(default)]
+    include_standing: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct SpawnMemberArgs {
     /// Mob identifier (from mob_create response).
     mob_id: String,
@@ -5925,7 +6040,285 @@ mod tests {
         }
     }
 
-    /// The `mob_check_member` note is chosen from typed fields. Each preview
+    /// A mob that is not served has a word of its own for each reason, and
+    /// none of them reads idle, busy or finished.
+    #[test]
+    fn a_mob_that_is_not_served_stands_by_its_own_word() {
+        use crate::{HostedMobIdle, MobStandingView};
+        for (observed, word) in [
+            (HostedMobIdle::Unloading, "unloading"),
+            (HostedMobIdle::Held, "held"),
+            (HostedMobIdle::Quarantined, "quarantined"),
+            (HostedMobIdle::Dormant, "dormant"),
+            (HostedMobIdle::Loading, "loading"),
+            (HostedMobIdle::Changed, "changed"),
+            (HostedMobIdle::SetIncomplete, "set_incomplete"),
+            (HostedMobIdle::Absent, "absent"),
+        ] {
+            let view = MobStandingView::of(&observed);
+            assert_eq!(view.standing.as_str(), word);
+            assert!(view.counts.is_none() && view.causes.is_empty() && view.reason.is_none());
+            assert!(!view.sentence.is_empty());
+            let rendered = json!(view);
+            assert_eq!(rendered["standing"], json!(word));
+            assert!(rendered.get("counts").is_none(), "{rendered}");
+            // The wire answer is the same word and nothing else.
+            let mob_id = MobId::from("asked");
+            assert_eq!(
+                json!(crate::wire_mob_standing(&mob_id, &observed)),
+                json!({ "mob_id": "asked", "standing": word })
+            );
+        }
+    }
+
+    /// What the set's own record answers for a mob with no actor to ask
+    /// reads in a served mob's words, with no counts: a mob that is not
+    /// loaded and stopped reads `stopped`, and a mob this process destroyed
+    /// reads `finished` with `destroyed`.
+    #[test]
+    fn a_mob_the_sets_record_answers_for_stands_in_a_served_mobs_words_without_counts() {
+        use crate::{HostedMobIdle, MobStandingView};
+        let mob_id = MobId::from("asked");
+
+        let stopped = MobStandingView::of(&HostedMobIdle::DormantStopped);
+        assert_eq!(stopped.standing.as_str(), "stopped");
+        assert!(stopped.reason.is_none() && stopped.counts.is_none() && stopped.causes.is_empty());
+        assert_eq!(
+            json!(crate::wire_mob_standing(
+                &mob_id,
+                &HostedMobIdle::DormantStopped
+            )),
+            json!({ "mob_id": "asked", "standing": "stopped" })
+        );
+
+        let destroyed = MobStandingView::of(&HostedMobIdle::Destroyed);
+        assert_eq!(destroyed.standing.as_str(), "finished");
+        assert_eq!(
+            destroyed
+                .reason
+                .as_ref()
+                .map(meerkat_contracts::WireMobStandingReason::as_str),
+            Some("destroyed")
+        );
+        assert!(destroyed.counts.is_none() && destroyed.causes.is_empty());
+        assert!(
+            destroyed.sentence.contains("finished (destroyed)"),
+            "{}",
+            destroyed.sentence
+        );
+        assert_eq!(
+            json!(crate::wire_mob_standing(&mob_id, &HostedMobIdle::Destroyed)),
+            json!({ "mob_id": "asked", "standing": "finished", "reason": "destroyed" })
+        );
+    }
+
+    /// The served words through this crate's one projection, on real mobs:
+    /// a mob closed idle reads `closed` with the reason's wire word, in the
+    /// view and on the wire; a completed mob reads `finished` with
+    /// `completed` and no causes; the counts are the wire's four; and a mob
+    /// whose actor can no longer be asked reads `unknown` with the cause
+    /// `observation_failed`, no counts and nothing of an error's text.
+    #[tokio::test]
+    async fn a_served_mob_stands_in_the_wires_words_in_the_view_and_on_the_wire() {
+        use crate::{HostedMobIdle, MobStandingView};
+        let zero_counts = json!({
+            "roster_transitions": 0,
+            "runs": 0,
+            "parked_admission": 0,
+            "foreground_owners": 0,
+        });
+        let state = MobMcpState::new_in_memory();
+
+        let closed_id = state
+            .mob_create_definition(sample_definition("standing-closed"))
+            .await
+            .expect("create the mob to close");
+        let handle = state.handle_for(&closed_id).await.expect("its handle");
+        assert!(
+            matches!(
+                handle.close_if_idle().await,
+                Ok(meerkat_mob::CloseIfIdleOutcome::Closed)
+            ),
+            "a quiet mob closes idle"
+        );
+        let observation = handle
+            .observe_idle()
+            .await
+            .expect("a closed actor still answers the read");
+        let view = MobStandingView::of_observation(&observation);
+        assert_eq!(view.standing.as_str(), "closed");
+        assert_eq!(
+            view.reason
+                .as_ref()
+                .map(meerkat_contracts::WireMobStandingReason::as_str),
+            Some("idle_close")
+        );
+        assert!(view.causes.is_empty());
+        assert!(
+            view.sentence.contains("closed (idle_close)") && view.sentence.contains("not finished"),
+            "{}",
+            view.sentence
+        );
+        let rendered = json!(view);
+        assert_eq!(rendered["reason"], json!("idle_close"), "{rendered}");
+        assert_eq!(rendered["counts"], zero_counts, "{rendered}");
+        assert_eq!(
+            json!(crate::wire_mob_standing(
+                &closed_id,
+                &HostedMobIdle::Observed(observation)
+            )),
+            json!({
+                "mob_id": "standing-closed",
+                "standing": "closed",
+                "reason": "idle_close",
+                "counts": zero_counts,
+            })
+        );
+
+        let finished_id = state
+            .mob_create_definition(sample_definition("standing-finished"))
+            .await
+            .expect("create the mob to complete");
+        state
+            .mob_complete(&finished_id)
+            .await
+            .expect("complete the mob");
+        let finished = state
+            .mob_standing(&finished_id)
+            .await
+            .expect("the standing of a completed mob");
+        assert_eq!(
+            json!(finished),
+            json!({
+                "mob_id": "standing-finished",
+                "standing": "finished",
+                "reason": "completed",
+                "counts": zero_counts,
+            })
+        );
+
+        let gone_id = state
+            .mob_create_definition(sample_definition("standing-gone"))
+            .await
+            .expect("create the mob to destroy");
+        let gone = state.handle_for(&gone_id).await.expect("its handle");
+        state.mob_destroy(&gone_id).await.expect("destroy the mob");
+        let unanswered = json!(MobStandingView::ask(&gone).await);
+        assert_eq!(unanswered["standing"], json!("unknown"), "{unanswered}");
+        assert_eq!(
+            unanswered["causes"],
+            json!(["observation_failed"]),
+            "{unanswered}"
+        );
+        assert!(unanswered.get("counts").is_none(), "{unanswered}");
+        assert!(unanswered.get("reason").is_none(), "{unanswered}");
+        assert_eq!(
+            unanswered["sentence"],
+            json!(
+                "The mob's actor refused this read or could not be asked: where the mob stands \
+                 is unknown, not idle."
+            ),
+            "the sentence is the cause's own, never an error's text"
+        );
+    }
+
+    /// The standing read of a hosted mob is bounded. An observation that
+    /// does not come back within the bound reads `unknown` with the cause
+    /// `observation_timed_out` and no counts, as a typed answer and not an
+    /// error; the read after it answers what the actor observed.
+    #[tokio::test(start_paused = true)]
+    async fn a_standing_read_not_answered_in_time_reads_unknown_with_its_cause() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("standing-slow"))
+            .await
+            .expect("create the mob");
+        // Park the observation right after the actor answered it, so that
+        // it does not come back to the caller.
+        let hold = Arc::new(crate::InsertHold::default());
+        *state
+            .idle_observation_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hold));
+
+        let late = state
+            .mob_standing(&mob_id)
+            .await
+            .expect("a late observation is a typed answer, not an error");
+        assert!(
+            hold.reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the observation was parked, so the bound is what answered"
+        );
+        assert_eq!(
+            json!(late),
+            json!({
+                "mob_id": "standing-slow",
+                "standing": "unknown",
+                "causes": ["observation_timed_out"],
+            })
+        );
+        hold.release.notify_waiters();
+
+        let answered = json!(
+            state
+                .mob_standing(&mob_id)
+                .await
+                .expect("the next read is answered")
+        );
+        assert_eq!(answered["standing"], json!("unknown"), "{answered}");
+        assert!(answered["counts"].is_object(), "{answered}");
+        assert!(
+            !answered["causes"]
+                .as_array()
+                .is_some_and(|causes| causes.contains(&json!("observation_timed_out"))),
+            "{answered}"
+        );
+    }
+
+    /// One answer on both paths for an actor that cannot be asked: a mob
+    /// whose actor is gone while the set's record still serves it reads
+    /// `unknown` with `observation_failed` and no counts on the wire answer,
+    /// as the handle's view reads it, and the released observation still
+    /// answers the actor's error.
+    #[tokio::test]
+    async fn the_wire_answer_reads_unknown_when_the_serving_actor_cannot_be_asked() {
+        use crate::MobStandingView;
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("standing-unasked"))
+            .await
+            .expect("create the mob");
+        // Ended through its own handle, behind the set's back: the record
+        // still serves this actor.
+        let handle = state.handle_for(&mob_id).await.expect("its handle");
+        handle.destroy().await.expect("destroy through the handle");
+
+        let on_the_wire = json!(
+            state
+                .mob_standing(&mob_id)
+                .await
+                .expect("an actor's refusal is a typed answer on the wire")
+        );
+        println!("the serving actor cannot be asked: {on_the_wire}");
+        assert_eq!(
+            on_the_wire,
+            json!({
+                "mob_id": "standing-unasked",
+                "standing": "unknown",
+                "causes": ["observation_failed"],
+            })
+        );
+        let in_the_view = json!(MobStandingView::ask(&handle).await);
+        assert_eq!(in_the_view["standing"], on_the_wire["standing"]);
+        assert_eq!(in_the_view["causes"], on_the_wire["causes"]);
+        assert!(
+            state.mob_idle_observation(&mob_id).await.is_err(),
+            "the released observation still answers the actor's error"
+        );
+    }
+
+    /// The `mob_check_member` note is chosen from typed fields. It opens
+    /// with the sentence of the member's standing. Each preview
     /// marker says why the preview is missing and whether checking again
     /// helps, and claims only `status` and `progress.run_state` as current
     /// where a degraded read still observed them; an open turn keeps its
@@ -5972,16 +6365,29 @@ mod tests {
             }
         };
         let note = |marker: Option<Marker>, run_state: Option<WireMemberRunState>| {
-            check_member_note(&status(marker, run_state))
+            let status = status(marker, run_state);
+            Some(check_member_note(&status, MemberStanding::of(&status)))
         };
+        let seated = MemberStanding::NoRunOpen.sentence();
+        let unread = MemberStanding::RunStateUnread.sentence();
+        assert!(seated.contains("no turn is open") && !seated.contains("idle"));
+        assert!(unread.contains("do not take it for idle"));
 
-        // No marker: the running note while a turn is open, nothing when idle.
+        // No marker: the running note while a turn is open; otherwise the
+        // standing's own sentence, which never says idle.
         assert_eq!(
             note(None, Some(WireMemberRunState::RunOpen)).as_deref(),
             Some(MEMBER_TURN_RUNNING_NOTE)
         );
-        assert_eq!(note(None, Some(WireMemberRunState::Idle)), None);
-        assert_eq!(note(None, None), None);
+        assert_eq!(
+            note(None, Some(WireMemberRunState::Idle)).as_deref(),
+            Some(seated)
+        );
+        assert_eq!(
+            note(None, Some(WireMemberRunState::Unknown)).as_deref(),
+            Some(unread)
+        );
+        assert_eq!(note(None, None).as_deref(), Some(unread));
 
         // A transient miss: retry later; only status and run_state are claimed
         // current.
@@ -5993,8 +6399,8 @@ mod tests {
             (Marker::ReadFailed, PREVIEW_READ_FAILED_NOTE),
         ] {
             assert_eq!(
-                note(Some(marker), Some(WireMemberRunState::Idle)).as_deref(),
-                Some(expected)
+                note(Some(marker), Some(WireMemberRunState::Idle)),
+                Some(format!("{seated} {expected}"))
             );
             assert!(expected.contains("Check again later"));
             assert!(expected.contains("status and progress.run_state are current"));
@@ -6009,14 +6415,21 @@ mod tests {
         // No readable session: the preview will not come back by retrying.
         let absent = note(Some(Marker::SessionAbsent), Some(WireMemberRunState::Idle))
             .expect("an absent session is called out");
-        assert_eq!(absent, PREVIEW_SESSION_ABSENT_NOTE);
+        assert_eq!(absent, format!("{seated} {PREVIEW_SESSION_ABSENT_NOTE}"));
         assert!(absent.contains("no readable session"));
         assert!(absent.contains("checking again will not bring them back"));
         assert!(!absent.contains("Check again later"));
 
         // Retiring: the fast path reads no session and carries no progress.
-        let retiring = note(Some(Marker::NotObservedWhileRetiring), None)
-            .expect("a retiring member's unread session is called out");
+        // The marker's note opens with the standing itself, so it stands
+        // alone.
+        let mut retiring_status = status(Some(Marker::NotObservedWhileRetiring), None);
+        retiring_status.status = meerkat_contracts::WireMobMemberStatus::Retiring;
+        assert_eq!(
+            MemberStanding::of(&retiring_status),
+            MemberStanding::Retiring
+        );
+        let retiring = check_member_note(&retiring_status, MemberStanding::Retiring);
         assert_eq!(retiring, PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE);
         assert!(retiring.contains("retiring"));
         assert!(!retiring.contains("progress"));
@@ -6026,7 +6439,7 @@ mod tests {
         // state was still observed.
         let refused = note(Some(Marker::StoreRefused), Some(WireMemberRunState::Idle))
             .expect("a refused session read is called out");
-        assert_eq!(refused, PREVIEW_STORE_REFUSED_NOTE);
+        assert_eq!(refused, format!("{seated} {PREVIEW_STORE_REFUSED_NOTE}"));
         assert!(refused.contains("until its realm is reopened"));
         assert!(refused.contains("checking again will not bring them back"));
         assert!(!refused.contains("Check again later"));
@@ -6041,6 +6454,72 @@ mod tests {
             )),
             "an open turn keeps its running note alongside the marker's"
         );
+
+        // The standing is chosen from the typed status alone, one word for
+        // each: finished and unknown never read as seated, and a seated
+        // member whose run state was not read has a word of its own.
+        for (wire, run_state, expected, word) in [
+            (
+                meerkat_contracts::WireMobMemberStatus::Completed,
+                Some(WireMemberRunState::Idle),
+                MemberStanding::Finished,
+                "finished",
+            ),
+            (
+                meerkat_contracts::WireMobMemberStatus::Unknown,
+                None,
+                MemberStanding::Unknown,
+                "unknown",
+            ),
+            (
+                meerkat_contracts::WireMobMemberStatus::Broken,
+                None,
+                MemberStanding::Broken,
+                "broken",
+            ),
+            (
+                meerkat_contracts::WireMobMemberStatus::Active,
+                Some(WireMemberRunState::RunOpen),
+                MemberStanding::Running,
+                "running",
+            ),
+            (
+                meerkat_contracts::WireMobMemberStatus::Active,
+                Some(WireMemberRunState::Idle),
+                MemberStanding::NoRunOpen,
+                "no_run_open",
+            ),
+            (
+                meerkat_contracts::WireMobMemberStatus::Active,
+                Some(WireMemberRunState::Unknown),
+                MemberStanding::RunStateUnread,
+                "run_state_unread",
+            ),
+            (
+                meerkat_contracts::WireMobMemberStatus::Active,
+                None,
+                MemberStanding::RunStateUnread,
+                "run_state_unread",
+            ),
+        ] {
+            let mut member = status(None, run_state);
+            member.status = wire;
+            let standing = MemberStanding::of(&member);
+            assert_eq!(standing, expected, "{wire:?} {run_state:?}");
+            assert_eq!(json!(standing), json!(word));
+            let rendered = json!(CheckMemberResult {
+                note: check_member_note(&member, standing),
+                status: member,
+                standing,
+            });
+            assert_eq!(rendered["standing"], json!(word));
+            assert!(
+                rendered["note"]
+                    .as_str()
+                    .is_some_and(|note| !note.is_empty()),
+                "{rendered}"
+            );
+        }
 
         // Every note is distinct: the variant decides it.
         let notes = [
@@ -11344,6 +11823,39 @@ mod tests {
         let listed: serde_json::Value =
             serde_json::from_str(&list_members_result.result.text_content()).unwrap();
         assert_eq!(listed["members"], json!([]));
+        // The list reads the roster and does not observe the mob: with
+        // manage scope too it carries no standing unless it is asked for.
+        assert!(listed.get("standing").is_none(), "{listed}");
+
+        let asked_args = serde_json::value::RawValue::from_string(
+            json!({ "mob_id": mob_id, "include_standing": true }).to_string(),
+        )
+        .unwrap();
+        let asked_result = surface
+            .dispatch(ToolCallView {
+                id: "members-2",
+                name: "mob_list_members",
+                args: &asked_args,
+            })
+            .await
+            .expect("in-scope operator read should succeed");
+        let listed: serde_json::Value =
+            serde_json::from_str(&asked_result.result.text_content()).unwrap();
+        assert_eq!(listed["members"], json!([]));
+        // Asked with manage scope, the list carries the mob's own standing:
+        // a quiet mob reads unknown, never idle, and names what was not read.
+        assert_eq!(listed["standing"]["standing"], json!("unknown"), "{listed}");
+        let causes = listed["standing"]["causes"]
+            .as_array()
+            .expect("an unknown standing names its causes");
+        assert!(causes.contains(&json!("handoffs_not_tracked")), "{listed}");
+        assert!(
+            listed["standing"]["sentence"]
+                .as_str()
+                .is_some_and(|sentence| sentence.contains("cannot say that the mob is idle")),
+            "{listed}"
+        );
+        assert!(listed["standing"]["counts"].is_object(), "{listed}");
     }
 
     #[tokio::test]

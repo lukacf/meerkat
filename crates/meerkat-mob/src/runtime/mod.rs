@@ -483,7 +483,8 @@ use tools::compose_external_tools_for_profile;
 
 pub use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use admission_close::{
-    CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy, MobIdleObservation,
+    CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy, MobFinished, MobIdleObservation,
+    MobMachineHeld, MobStanding, MobUnknownCause, MobUnread,
 };
 pub(crate) use builder::owner_bridge_binding_from_history;
 pub(crate) use builder::recovered_lifecycle_quiesce_intent;

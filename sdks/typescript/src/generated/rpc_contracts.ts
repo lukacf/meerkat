@@ -225,6 +225,7 @@ import type {
   MobSpawnManyResult,
   MobSpawnParams,
   MobSpawnResult,
+  MobStandingResult,
   MobStatusResult,
   MobStopMemberRunParams,
   MobStopMemberRunResult,
@@ -979,6 +980,10 @@ export interface RpcMethodContracts {
   "mob/restore_retry": {
     params: MobIdParams;
     result: (MobRestoreRetryResult) & Record<string, unknown>;
+  };
+  "mob/standing": {
+    params: MobIdParams;
+    result: (MobStandingResult) & Record<string, unknown>;
   };
   "mob/claim_callback_route": {
     params: MobClaimCallbackRouteParams;

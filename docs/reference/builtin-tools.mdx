@@ -56,8 +56,8 @@ may apply explicit presets of their own.
 | `mob_destroy` | Mob | Yes | `mob` + mob scope | Destroy an explicit mob |
 | `mob_spawn_member` | Mob | Yes | `mob` + spawn scope | Spawn a member; the result's `wired` and `parent_wiring` say whether the caller and the new member are wired peers |
 | `mob_retire_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Retire a member and archive its session |
-| `mob_check_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Read member execution status and output |
-| `mob_list_members` | Mob | Yes | `mob` + mob scope; without it, only the members the caller owns | List a mob's members |
+| `mob_check_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Read member execution status and output; `standing` says where the member stands in one word (`finished`, `running`, `retiring`, `broken`, `no_run_open`, `run_state_unread`, `unknown`), never idle |
+| `mob_list_members` | Mob | Yes | `mob` + mob scope; without it, only the members the caller owns | List a mob's members; with mob scope and `include_standing: true` the result also carries the mob's own `standing` (`busy`, `finished`, `closed`, `stopped`, `unknown` with `causes`), never idle |
 | `mob_list` | Mob | Yes | `mob` + generated authority | List the managed mobs the caller may manage |
 | `mob_wire` | Mob | Yes | `mob` + mob scope | Wire a member to a local or external peer |
 | `mob_unwire` | Mob | Yes | `mob` + mob scope | Remove a member wiring relationship |

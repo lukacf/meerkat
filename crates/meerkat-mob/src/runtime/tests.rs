@@ -106508,6 +106508,8 @@ mod identity_fence_contention;
 /// the edges another identity's declaration owns.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod identity_owned_wiring_reconcile;
+/// The pure idle observation changes nothing it reads; the idle close does.
+mod idle_observation_non_mutation;
 /// A mob's lifecycle as its handles observe it without asking its actor.
 #[cfg(not(target_arch = "wasm32"))]
 mod lifecycle_observation;

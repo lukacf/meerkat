@@ -309,7 +309,11 @@ one attempt at a time (a verb that meets an attempt in flight answers the
 quarantine at once); a list never does. `mob/restore_retry`
 (`MobMcpState::mob_restore_retry`) re-attempts any class after a repair, and
 every start classifies the stores again; `mob/list` names quarantined mobs
-under `quarantined`. `MobMcpState::mob_inventory` reads the managed, held and quarantined
+under `quarantined`. `mob/standing` (`MobMcpState::mob_standing`, console
+owner) says where one mob stands without loading it: `busy`, `finished`,
+`closed`, `stopped` or `unknown` with `causes` for a served mob, and why a
+mob is not served otherwise (`dormant`, `quarantined`, `absent` and so on);
+it never says idle. `MobMcpState::mob_inventory` reads the managed, held and quarantined
 mobs in one read (each id in exactly one), and `quarantined_mobs` and
 `held_child_mobs` fail rather than answer empty when the restore fails. A
 quarantined store's roster still counts for provenance, so a create by a
@@ -1162,8 +1166,8 @@ With generated authority, `AgentMobToolSurface`
 | `fork_off` | Fork the current durable member's committed transcript prefix through the resume path into a child the caller owns, and run the task in the background; the outcome is recorded in the forker's transcript as a durable `BackgroundJob` notice (blocking on one-shot hosts) |
 | `council` | Fork existing specialist members into a temporary discussion mob, run bounded rounds/merge, and clean up; the sealed outcome is recorded in the convener's transcript as a durable `BackgroundJob` notice (blocking on one-shot hosts) |
 | `mob_retire_member` | Archive a member and its session (manage scope, or the caller owns the member) |
-| `mob_check_member` | Check a member's execution status and output (manage scope, or the caller owns the member) |
-| `mob_list_members` | List members of a mob (without manage scope: only the caller's own descendants) |
+| `mob_check_member` | Check a member's execution status and output; `standing` says where the member stands in one word, never idle (manage scope, or the caller owns the member) |
+| `mob_list_members` | List members of a mob (without manage scope: only the caller's own descendants). With manage scope and `include_standing: true` the result also carries the mob's own `standing`, never idle |
 | `mob_list` | List all mobs |
 | `mob_wire` | Wire a member to a local or external peer (creates comms trust) |
 | `mob_unwire` | Remove a wiring relationship between a member and a peer |

@@ -3322,6 +3322,21 @@ export interface MobRestoreRetryResult {
   outcome: WireMobRestoreRetryOutcome;
 }
 
+export interface MobStandingResult {
+  causes?: WireMobUnknownCause[];
+  counts?: WireMobStandingCounts | null;
+  mob_id: string;
+  reason?: WireMobStandingReason | null;
+  standing: WireMobStanding;
+}
+
+export interface WireMobStandingCounts {
+  foreground_owners: number;
+  parked_admission: number;
+  roster_transitions: number;
+  runs: number;
+}
+
 export interface MobClaimCallbackRouteParams {
   claim_token: string;
   mob_id: string;
@@ -4998,6 +5013,12 @@ export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unava
 export type WireMobQuarantineClass = "store_unavailable" | "store_unreadable" | "resume_refused";
 
 export type WireMobRestoreRetryOutcome = "restored" | "held" | "settled" | "not_quarantined";
+
+export type WireMobStanding = "busy" | "finished" | "closed" | "stopped" | "unknown" | "unloading" | "held" | "quarantined" | "dormant" | "loading" | "changed" | "set_incomplete" | "absent" | string;
+
+export type WireMobStandingReason = "completed" | "destroyed" | "idle_close" | "last_owner_released" | "stand_down" | "shutdown" | "durability_fail_stop" | "actor_lost" | "dispatch_failed" | string;
+
+export type WireMobUnknownCause = "no_runtime_adapter" | "members_placed" | "sessions_not_readable" | "peer_delivery_not_traced" | "handoffs_not_tracked" | "observation_timed_out" | "observation_failed" | string;
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 

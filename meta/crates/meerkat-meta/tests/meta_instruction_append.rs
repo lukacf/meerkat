@@ -758,10 +758,29 @@ fn child_root_released(outcome: &meerkat_meta::ChildMobStandDownOutcome) -> bool
 /// no holder the wait returns at once. Where the kernel's lock table cannot
 /// name the file (btrfs subvolumes, overlayfs) nothing can be read, and the
 /// wait returns at once while the lock is held too.
+///
+/// Which of the two holds here is read before the wait, while the lock is
+/// held: three readings of the table, each printed. The table can name the
+/// file when any of them names the holder. One reading can skip a held entry
+/// (the kernel hands the table out a page at a time and resumes by position),
+/// which is why the wait asks three free readings and the start probe reads
+/// three times; one reading alone would send this row down the other branch.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reopen_waits_until_the_execution_custody_is_released() {
     const HELD_FOR: Duration = Duration::from_millis(400);
+    /// The readings of the lock table that decide the branch, as many as
+    /// the wait asks free in a row.
+    const TABLE_READINGS: usize = 3;
+    /// What one reading said: a failed read is also a custody file whose
+    /// metadata could not be read.
+    fn reading_words(reading: Option<bool>) -> &'static str {
+        match reading {
+            Some(true) => "named a holder",
+            Some(false) => "named none",
+            None => "the read failed",
+        }
+    }
     let temp = tempfile::tempdir().unwrap();
     let mut custody = temp
         .path()
@@ -777,7 +796,13 @@ async fn a_reopen_waits_until_the_execution_custody_is_released() {
         .expect("create the custody file");
     held.lock_shared()
         .expect("hold the custody as a hosted runtime does");
-    let readable = custody_wait::custody_holder_named(Path::new(&custody)) == Some(true);
+    let readings: [Option<bool>; TABLE_READINGS] =
+        std::array::from_fn(|_| custody_wait::custody_holder_named(Path::new(&custody)));
+    eprintln!(
+        "the lock table's readings of the held custody before the wait: {}",
+        readings.map(reading_words).join(", ")
+    );
+    let readable = readings.contains(&Some(true));
 
     let started = std::time::Instant::now();
     let release = std::thread::spawn(move || {

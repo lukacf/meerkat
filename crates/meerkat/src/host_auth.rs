@@ -1547,8 +1547,8 @@ impl HostAuthService {
     /// redirect derived from it (the base followed by the slot's binding
     /// segment), byte for byte; any other is refused.
     /// [`Self::mcp_registered_redirect_uri`] then answers the profile's
-    /// redirect. Refused when a profile is already installed. The secret
-    /// lives only in the credential store; it never appears in
+    /// redirect. Refused when a profile is already installed. A confidential
+    /// profile's secret lives only in the credential store; it never appears in
     /// configuration, errors, `Debug` or logs. The update is admitted as the
     /// host's own administration; [`Self::mcp_install_client_profile_entered`]
     /// re-checks an authenticated caller at the update's entry.
@@ -1587,7 +1587,8 @@ impl HostAuthService {
     /// Replace the client profile installed for `target`'s MCP credential
     /// slot with `profile`; refused when none is installed. The same facts
     /// with a new secret rotate the secret, which the next code exchange or
-    /// refresh uses. Changed facts are another profile: a credential minted
+    /// refresh uses. Changed facts, the method among them (public or
+    /// confidential), are another profile: a credential minted
     /// under the previous one can no longer refresh, and its next refresh
     /// ends it as needing a new login (see
     /// [`McpOAuthAuthority::replace_client_profile_entered`]).
@@ -1623,7 +1624,7 @@ impl HostAuthService {
     /// none succeeds. The slot's later logins use dynamic registration again.
     /// A credential minted under the removed profile is used until it needs
     /// a refresh, which ends it as needing a new login; it is never refreshed
-    /// as a public client (see
+    /// by another method or through dynamic registration (see
     /// [`McpOAuthAuthority::remove_client_profile_entered`]).
     pub async fn mcp_remove_client_profile(
         &self,
@@ -2609,6 +2610,114 @@ mod tests {
             let rendered = format!("{refusal} {refusal:?} {}", refusal.public_message());
             assert!(!rendered.contains(SECRET), "{rendered}");
         }
+    }
+
+    /// A public profile through the host's service: installed on a loopback
+    /// redirect and read back with method `none`, with no registered
+    /// redirect to log in on; replaced by another public profile; refused
+    /// typed (`configuration_invalid`), writing nothing, on the host's
+    /// registered `https` redirect, on `[::1]` and with a secret.
+    #[tokio::test]
+    async fn the_host_installs_and_replaces_a_public_mcp_client_profile() {
+        use meerkat_providers::mcp_oauth::{McpOAuthClientAuthMethod, McpOAuthClientSecret};
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let persistence = ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let service = HostAuthService::new(persistence, runtime.provider_auth_runtime_authority())
+            .with_mcp_realm(RealmId::parse("realm-a").expect("realm"))
+            .with_mcp_registered_redirect_base(
+                McpRegisteredRedirectBase::parse("https://host.example/mcp/oauth/callback")
+                    .expect("base"),
+            );
+        let target = McpServerIdentity::from_server_config("remote", "https://mcp.example/mcp")
+            .with_expected_account("subject-1")
+            .expect("target");
+        let public = |client: &str, redirect: &str| {
+            McpOAuthClientProfile::public("https://mcp.example", client, redirect)
+        };
+        let installed = async || {
+            service
+                .mcp_client_profile(&target)
+                .await
+                .expect("read")
+                .expect("the profile is installed")
+        };
+
+        service
+            .mcp_install_client_profile(
+                &target,
+                public("public-a", "http://127.0.0.1:3118/callback"),
+            )
+            .await
+            .expect("installed");
+        let read = installed().await;
+        assert_eq!(read.client_id, "public-a");
+        assert_eq!(read.redirect_uri, "http://127.0.0.1:3118/callback");
+        assert_eq!(read.auth_method, McpOAuthClientAuthMethod::None);
+        assert_eq!(
+            service
+                .mcp_registered_redirect_uri(&target)
+                .await
+                .expect("redirect"),
+            None,
+            "a loopback profile has no registered redirect"
+        );
+
+        service
+            .mcp_replace_client_profile(
+                &target,
+                public("public-b", "http://localhost:3119/callback"),
+            )
+            .await
+            .expect("replaced");
+        let read = installed().await;
+        assert_eq!(read.client_id, "public-b");
+        assert_eq!(read.redirect_uri, "http://localhost:3119/callback");
+        assert_eq!(read.auth_method, McpOAuthClientAuthMethod::None);
+
+        let central = "https://host.example/mcp/oauth/callback";
+        let refusals = [
+            service
+                .mcp_replace_client_profile(&target, public("public-c", central))
+                .await
+                .expect_err("a registered https redirect is a confidential client's"),
+            service
+                .mcp_replace_client_profile(
+                    &target,
+                    public("public-c", "http://[::1]:3118/callback"),
+                )
+                .await
+                .expect_err("IPv4 loopback names only"),
+            service
+                .mcp_replace_client_profile(
+                    &target,
+                    McpOAuthClientProfile::new(
+                        "https://mcp.example",
+                        "public-c",
+                        "http://127.0.0.1:3118/callback",
+                        McpOAuthClientAuthMethod::None,
+                        McpOAuthClientSecret::new("host-public-secret-canary"),
+                    ),
+                )
+                .await
+                .expect_err("a public client has no secret"),
+        ];
+        for refusal in &refusals {
+            assert!(
+                matches!(
+                    refusal,
+                    HostAuthError::McpOAuth(McpOAuthError::ClientProfile { .. })
+                ),
+                "{refusal:?}"
+            );
+            assert_eq!(
+                refusal.reason(),
+                meerkat_contracts::WireAuthErrorReason::ConfigurationInvalid
+            );
+        }
+        assert_eq!(installed().await.client_id, "public-b", "nothing written");
     }
 
     #[tokio::test]

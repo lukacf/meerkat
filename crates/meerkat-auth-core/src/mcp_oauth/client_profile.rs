@@ -27,8 +27,9 @@
 //! authentication).
 //! A credential minted under a profile refreshes only under that exact
 //! profile; with the profile removed or replaced, its refresh closes the
-//! credential as needing a new login, and a credential minted under a
-//! confidential profile is never sent as a public client.
+//! credential as needing a new login. It is never refreshed by another
+//! method (a confidential profile's credential never as a public client, a
+//! public profile's never with a secret) or through dynamic registration.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -486,9 +487,18 @@ impl ClientProfileRecord {
 /// secret, for one login or refresh.
 pub(super) struct BoundClientProfile {
     record: ClientProfileRecord,
-    /// The secret of a confidential profile; `None` for a public one.
-    secret: Option<McpOAuthClientSecret>,
+    auth: BoundClientAuth,
     binding: String,
+}
+
+/// How a bound profile's client authenticates: as a public client, or by a
+/// confidential method with the secret its row holds. A confidential method
+/// without a secret has no value here, so no token request authenticates
+/// with an empty secret.
+enum BoundClientAuth {
+    Public,
+    SecretBasic(McpOAuthClientSecret),
+    SecretPost(McpOAuthClientSecret),
 }
 
 impl BoundClientProfile {
@@ -525,21 +535,17 @@ impl BoundClientProfile {
     /// How a token request authenticates this client. A public profile's
     /// requests carry its `client_id` and no client authentication, as a
     /// dynamically registered client's do. A confidential method always
-    /// authenticates by that method, never as a public client: its row
-    /// holds a secret ([`bound_profile_from_row`]).
+    /// authenticates by that method with its row's secret, never as a
+    /// public client ([`bound_profile_from_row`]).
     pub(super) fn client_authentication(&self) -> OAuthClientAuthentication<'_> {
-        let secret = self
-            .secret
-            .as_ref()
-            .map_or("", McpOAuthClientSecret::expose);
-        match self.record.auth_method {
-            McpOAuthClientAuthMethod::ClientSecretBasic => {
-                OAuthClientAuthentication::SecretBasic(secret)
+        match &self.auth {
+            BoundClientAuth::Public => OAuthClientAuthentication::Public,
+            BoundClientAuth::SecretBasic(secret) => {
+                OAuthClientAuthentication::SecretBasic(secret.expose())
             }
-            McpOAuthClientAuthMethod::ClientSecretPost => {
-                OAuthClientAuthentication::SecretPost(secret)
+            BoundClientAuth::SecretPost(secret) => {
+                OAuthClientAuthentication::SecretPost(secret.expose())
             }
-            McpOAuthClientAuthMethod::None => OAuthClientAuthentication::Public,
         }
     }
 
@@ -610,19 +616,20 @@ fn bound_profile_from_row(
         return Err(mismatch());
     }
     // A confidential profile's row holds its secret; a public one's none.
-    let secret = match (record.auth_method, row.primary_secret) {
-        (McpOAuthClientAuthMethod::None, None) => None,
-        (
-            McpOAuthClientAuthMethod::ClientSecretBasic
-            | McpOAuthClientAuthMethod::ClientSecretPost,
-            Some(secret),
-        ) if !secret.is_empty() => Some(McpOAuthClientSecret::new(secret)),
+    let auth = match (record.auth_method, row.primary_secret) {
+        (McpOAuthClientAuthMethod::None, None) => BoundClientAuth::Public,
+        (McpOAuthClientAuthMethod::ClientSecretBasic, Some(secret)) if !secret.is_empty() => {
+            BoundClientAuth::SecretBasic(McpOAuthClientSecret::new(secret))
+        }
+        (McpOAuthClientAuthMethod::ClientSecretPost, Some(secret)) if !secret.is_empty() => {
+            BoundClientAuth::SecretPost(McpOAuthClientSecret::new(secret))
+        }
         _ => return Err(mismatch()),
     };
     Ok(BoundClientProfile {
         binding: record.binding(),
         record,
-        secret,
+        auth,
     })
 }
 
@@ -752,7 +759,9 @@ impl McpOAuthAuthority {
     /// The same facts with a new secret rotate the secret: attempts and
     /// credentials bound to the profile keep it, and the next code exchange
     /// or refresh authenticates with the new secret. Changed facts are
-    /// another profile: an attempt admitted under the previous one no longer
+    /// another profile (the method among them: a public profile and a
+    /// confidential one with the same client id and redirect are two
+    /// profiles): an attempt admitted under the previous one no longer
     /// completes, and a credential minted under it can no longer refresh
     /// (its next refresh closes it as needing a new login).
     pub async fn replace_client_profile_entered(
@@ -1407,5 +1416,43 @@ mod tests {
             bound.client_authentication(),
             OAuthClientAuthentication::SecretBasic(SECRET)
         ));
+    }
+
+    /// A row whose method this build does not know (as `none` is to a build
+    /// before public profiles) is not a valid profile: the slot is refused,
+    /// with or without a secret in the row, and never read as another method.
+    #[test]
+    fn a_profile_row_with_an_unknown_method_is_refused_as_a_binding_mismatch() {
+        let target = target();
+        let row_with = |method: &str, secret: Option<&str>| {
+            let mut row = PersistedTokens::api_key(String::new());
+            row.primary_secret = secret.map(str::to_owned);
+            row.auth_mode = PersistedAuthMode::McpOauthClient;
+            row.metadata = serde_json::json!({
+                "mcp_oauth_client": {
+                    "slot": target.binding_slug(),
+                    "server_name": "remote",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "issuer": "https://mcp.example.test",
+                    "client_id": "registered-client",
+                    "redirect_uri": "http://127.0.0.1:3118/callback",
+                    "auth_method": method,
+                }
+            });
+            row
+        };
+        // The control: the same row with a known method loads.
+        assert!(
+            bound_profile_from_row(&target, row_with("client_secret_basic", Some(SECRET))).is_ok()
+        );
+        for secret in [None, Some(SECRET)] {
+            assert!(matches!(
+                bound_profile_from_row(&target, row_with("private_key_jwt", secret)),
+                Err(McpOAuthError::ClientProfile {
+                    refusal: McpOAuthClientProfileRefusal::BindingMismatch,
+                    ..
+                })
+            ));
+        }
     }
 }

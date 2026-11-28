@@ -3278,7 +3278,10 @@ impl McpOAuthAuthority {
         // An attempt admitted under a host-registered client completes only
         // under that exact profile, read now: one removed or replaced since
         // the start ends the attempt here, before anything is sent, and the
-        // code is never exchanged as a public client.
+        // code is never exchanged as another client: not by another
+        // profile's method (a confidential profile's code never as a public
+        // client, a public profile's never with a secret) and never as a
+        // dynamically registered client.
         let profile = match attempt_client_profile(facts) {
             None => None,
             Some(bound) => {
@@ -3917,8 +3920,10 @@ impl McpOAuthAuthority {
         // as that exact client, authenticated by its profile's method. With
         // the profile removed or replaced, or its row unusable for this slot,
         // the refresh cannot authenticate: the credential is closed as
-        // needing a new login, and is never refreshed as a public client or
-        // through dynamic registration. A profile the store did not answer
+        // needing a new login, and is never refreshed by another profile's
+        // method (a confidential profile's credential never as a public
+        // client, a public profile's never with a secret) or through dynamic
+        // registration. A profile the store did not answer
         // for closes the refresh transiently and keeps the credential.
         let profile = match metadata.client.client_profile.as_deref() {
             None => None,
@@ -3956,9 +3961,10 @@ impl McpOAuthAuthority {
                 }
             },
         };
-        // The client secret goes only to a token endpoint that fits the
-        // profile's issuer ([`require_client_secret_endpoint`]). A stored
-        // endpoint that does not is never sent the secret: the credential is
+        // A host-registered client's refresh (a confidential client's secret,
+        // a public client's refresh token) goes only to a token endpoint that
+        // fits the profile's issuer ([`require_client_secret_endpoint`]). A
+        // stored endpoint that does not is sent nothing: the credential is
         // closed as needing a new login, whose discovery refuses it.
         if let Some(profile) = &profile
             && require_client_secret_endpoint(
@@ -6096,12 +6102,14 @@ pub(crate) fn is_loopback_url(url: &reqwest::Url) -> bool {
     )
 }
 
-/// Refuse a token endpoint a host-registered client's secret would be sent
-/// to unless it fits the client's `issuer`. Under an `https` issuer the
-/// endpoint must use `https` as well, with no loopback exception: a plaintext
-/// loopback endpoint would hand the secret to whatever local process holds
-/// the port. Only a plain `http` loopback issuer, a local authorization
-/// server, keeps loopback endpoints ([`require_https_or_loopback`]).
+/// Refuse a token endpoint a host-registered client's token requests would
+/// be sent to (a confidential client's secret, a public client's code and
+/// refresh token) unless it fits the client's `issuer`. Under an `https`
+/// issuer the endpoint must use `https` as well, with no loopback exception:
+/// a plaintext loopback endpoint would hand the secret, or the public
+/// client's code and refresh token, to whatever local process holds the
+/// port. Only a plain `http` loopback issuer, a local authorization server,
+/// keeps loopback endpoints ([`require_https_or_loopback`]).
 fn require_client_secret_endpoint(
     target: &McpServerIdentity,
     issuer: &str,
@@ -7855,8 +7863,11 @@ mod tests {
     /// endpoint is refused at discovery, typed; a credential minted under
     /// the profile whose stored token endpoint is such an endpoint is closed
     /// at its refresh as needing a new login, and nothing reaches that
-    /// endpoint. A plain http loopback issuer keeps loopback endpoints, and a
-    /// dynamically registered (public) client keeps them as before.
+    /// endpoint. A public profile is held to the same rule (its code and
+    /// refresh token go to that endpoint): its discovery is a host-registered
+    /// client's, and its credential is closed the same way. A plain http
+    /// loopback issuer keeps loopback endpoints, and a dynamically registered
+    /// client keeps them as before.
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn an_https_issuer_never_sends_the_client_secret_to_a_plaintext_endpoint() {
@@ -7903,95 +7914,141 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{issuer} {endpoint}: {error:?}"));
         }
         require_https_or_loopback(&target, &plaintext, "token endpoint")
-            .expect("a public client sends no secret: loopback stays allowed");
+            .expect("a dynamically registered client keeps loopback endpoints");
 
         // Refresh: the stored token endpoint of a credential minted under the
-        // profile.
-        let store = Arc::new(EphemeralTokenStore::new());
-        let authority = ce_refresh_authority(store.clone(), test_auth_lease());
-        authority
-            .install_client_profile_entered(
-                &target,
+        // profile, confidential or public. Under the https issuer it is
+        // refused; under a plain http loopback issuer (the control) the same
+        // profile's refresh is sent there, a public one's with no client
+        // secret.
+        let local = format!("http://localhost:{port}");
+        for (public, issuer) in [
+            (false, ISSUER),
+            (true, ISSUER),
+            (false, local.as_str()),
+            (true, local.as_str()),
+        ] {
+            let case = format!("public {public}, issuer {issuer}");
+            let store = Arc::new(EphemeralTokenStore::new());
+            let authority = ce_refresh_authority(store.clone(), test_auth_lease());
+            let installing = if public {
+                McpOAuthClientProfile::public(
+                    issuer,
+                    "registered-client",
+                    "http://127.0.0.1:3118/callback",
+                )
+            } else {
                 McpOAuthClientProfile::new(
-                    ISSUER,
+                    issuer,
                     "registered-client",
                     "http://127.0.0.1:3118/callback",
                     McpOAuthClientAuthMethod::ClientSecretPost,
                     McpOAuthClientSecret::new("client-secret-canary"),
+                )
+            };
+            authority
+                .install_client_profile_entered(&target, installing, None, Arc::new(AdmitAll))
+                .await
+                .unwrap();
+            let profile =
+                load_client_profile(store.as_ref(), &target, TokenStoreAccess::Unattended)
+                    .await
+                    .unwrap()
+                    .expect("the profile is installed");
+            // Its discovery applies the rule: a public profile is a
+            // host-registered client too.
+            assert!(
+                ClientRegistration::of(Some(&profile)) == ClientRegistration::HostRegistered,
+                "{case}"
+            );
+            let discovery = StoredMcpOAuthDiscovery {
+                resource: target.server_url().to_string(),
+                resource_metadata_url: format!("{base}/.well-known/oauth-protected-resource/mcp"),
+                authorization_server: issuer.to_string(),
+                authorization_metadata_url: format!(
+                    "{issuer}/.well-known/oauth-authorization-server"
                 ),
+                authorization_endpoint: format!("{issuer}/authorize"),
+                token_endpoint: plaintext.clone(),
+                registration_endpoint: None,
+                scopes: vec!["mcp.read".to_string()],
+            };
+            let result = OAuthTokenResult {
+                access_token: "access-token".to_string(),
+                refresh_token: Some("refresh-token".to_string()),
+                id_token: None,
+                expires_in_secs: Some(3600),
+                scope: Some("mcp.read".to_string()),
+            };
+            let mut tokens = persisted_tokens_from_result_with_binding(
+                &result,
+                &discovery,
+                &profile.stored_client(),
+                &target,
                 None,
-                Arc::new(AdmitAll),
+                Utc::now(),
+            )
+            .unwrap();
+            tokens.account_id = Some("subject-1".to_string());
+            crate::save_tokens_and_publish_lifecycle(
+                authority.provider_auth_persistence.clone(),
+                authority.auth_lease.clone(),
+                target.auth_binding_ref().unwrap().into(),
+                tokens,
             )
             .await
             .unwrap();
-        let profile = load_client_profile(store.as_ref(), &target, TokenStoreAccess::Unattended)
-            .await
-            .unwrap()
-            .expect("the profile is installed");
-        let discovery = StoredMcpOAuthDiscovery {
-            resource: target.server_url().to_string(),
-            resource_metadata_url: format!("{base}/.well-known/oauth-protected-resource/mcp"),
-            authorization_server: ISSUER.to_string(),
-            authorization_metadata_url: format!("{ISSUER}/.well-known/oauth-authorization-server"),
-            authorization_endpoint: format!("{ISSUER}/authorize"),
-            token_endpoint: plaintext,
-            registration_endpoint: None,
-            scopes: vec!["mcp.read".to_string()],
-        };
-        let result = OAuthTokenResult {
-            access_token: "access-token".to_string(),
-            refresh_token: Some("refresh-token".to_string()),
-            id_token: None,
-            expires_in_secs: Some(3600),
-            scope: Some("mcp.read".to_string()),
-        };
-        let mut tokens = persisted_tokens_from_result_with_binding(
-            &result,
-            &discovery,
-            &profile.stored_client(),
-            &target,
-            None,
-            Utc::now(),
-        )
-        .unwrap();
-        tokens.account_id = Some("subject-1".to_string());
-        crate::save_tokens_and_publish_lifecycle(
-            authority.provider_auth_persistence.clone(),
-            authority.auth_lease.clone(),
-            target.auth_binding_ref().unwrap().into(),
-            tokens,
-        )
-        .await
-        .unwrap();
-        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
-            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
-        })
-        .await;
+            republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+                tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+            })
+            .await;
 
-        let refused = authority.stored_bearer_token(&target).await;
-        assert!(
-            matches!(refused, Err(McpOAuthError::ReauthRequired { .. })),
-            "{refused:?}"
-        );
-        assert!(
-            state.token_requests.lock().is_empty(),
-            "nothing reached the plaintext token endpoint"
-        );
-        assert_eq!(
-            authority
-                .auth_lease
-                .snapshot(&target.lease_key().unwrap())
-                .phase,
-            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
-        );
-        assert!(
-            store
-                .load(&target.token_key().unwrap())
-                .await
-                .unwrap()
-                .is_none(),
-            "the credential is closed for a new login"
-        );
+            let sent_before = state.token_requests.lock().len();
+            let used = authority.stored_bearer_token(&target).await;
+            if issuer != ISSUER {
+                // The control's refresh reaches the endpoint. Its outcome is
+                // not this test's: this authority has no account strategy to
+                // check the refreshed subject with.
+                assert_eq!(
+                    state.token_requests.lock().len(),
+                    sent_before + 1,
+                    "{case}: {used:?}"
+                );
+                let request = state.token_requests.lock().last().cloned().unwrap();
+                assert_eq!(request["client_id"], "registered-client", "{case}");
+                assert_eq!(
+                    request.get("client_secret").is_some(),
+                    !public,
+                    "{case}: {request}"
+                );
+                continue;
+            }
+            assert!(
+                matches!(used, Err(McpOAuthError::ReauthRequired { .. })),
+                "{case}: {used:?}"
+            );
+            assert!(
+                state.token_requests.lock().is_empty(),
+                "{case}: nothing reached the plaintext token endpoint"
+            );
+            assert_eq!(
+                authority
+                    .auth_lease
+                    .snapshot(&target.lease_key().unwrap())
+                    .phase,
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
+                "{case}"
+            );
+            assert!(
+                store
+                    .load(&target.token_key().unwrap())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{case}: the credential is closed for a new login"
+            );
+        }
+        assert_eq!(state.token_requests.lock().len(), 2, "the two controls");
     }
 
     /// Discovery is admitted URL by URL: a protected resource outside the

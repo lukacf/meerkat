@@ -509,6 +509,48 @@ class TestDispatchMethod:
     """dispatch() accepts DispatchInput."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_pair", [False, True])
+    async def test_dispatch_preserves_connector_helper_keys(self, with_pair):
+        rt, transport = _make_runtime(result={"accepted": True})
+        keys = (
+            {"correlation_id": "source-thread-7", "idempotency_key": "source-event-42"}
+            if with_pair else {}
+        )
+        dispatch = DispatchInput.connector("connector event", **keys)
+
+        await rt.dispatch("gate:main", dispatch)
+
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["method"] == "meta/dispatch"
+        assert transport.calls[0]["params"] == {
+            "identity": "gate:main",
+            "dispatch_input": {
+                "content": "connector event",
+                "origin": "connector",
+                **keys,
+            },
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "half",
+        [{"correlation_id": "source-thread-7"}, {"idempotency_key": "source-event-42"}],
+        ids=["correlation-id-alone", "idempotency-key-alone"],
+    )
+    async def test_dispatch_sends_nothing_for_a_connector_helper_half_pair(self, half):
+        # The helper refuses one key without the other where the input is
+        # built. A dispatch written as one expression therefore raises
+        # before the runtime is asked for anything: no request is sent.
+        rt, transport = _make_runtime(result={"accepted": True})
+        with pytest.raises(
+            ValueError, match="correlation_id and idempotency_key must be supplied together"
+        ):
+            await rt.dispatch(
+                "gate:main", DispatchInput.connector("connector event", **half)
+            )
+        assert transport.calls == []
+
+    @pytest.mark.asyncio
     async def test_dispatch_sends_correct_params(self):
         rt, transport = _make_runtime(result={"accepted": True})
         di = DispatchInput(content="test", origin="scheduler", correlation_id="c1")
@@ -547,6 +589,30 @@ class TestDispatchMethod:
                 "content": "Lab closed.\nKeep both paragraphs.",
                 "origin": "connector",
                 **pair,
+            },
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("through_handle", [False, True])
+    @pytest.mark.parametrize(
+        "half", [{"correlation_id": "lab-event-1"}, {"idempotency_key": "lab:event-1"}]
+    )
+    async def test_dispatch_text_still_sends_half_pair(self, through_handle, half):
+        # dispatch_text does not check the pair: one key without the other is
+        # sent as given, and the gateway refuses it at dispatch.
+        rt, transport = _make_runtime(result={"accepted": True})
+        if through_handle:
+            await rt.agent("gate:main").dispatch_text("Lab closed.", origin="connector", **half)
+        else:
+            await rt.dispatch_text("gate:main", "Lab closed.", origin="connector", **half)
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["method"] == "meta/dispatch"
+        assert transport.calls[0]["params"] == {
+            "identity": "gate:main",
+            "dispatch_input": {
+                "content": "Lab closed.",
+                "origin": "connector",
+                **half,
             },
         }
 

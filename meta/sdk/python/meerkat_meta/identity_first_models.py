@@ -724,9 +724,25 @@ class DispatchInput:
         return cls(content=content, origin="system")
 
     @classmethod
-    def connector(cls, content: str, *, correlation_id: str | None = None) -> DispatchInput:
-        """Connector-origin dispatch."""
-        return cls(content=content, origin="connector", correlation_id=correlation_id)
+    def connector(
+        cls,
+        content: str,
+        *,
+        correlation_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> DispatchInput:
+        """Connector-origin dispatch, with both delivery keys or neither.
+
+        Raises ValueError when only one delivery key is supplied.
+        """
+        if (correlation_id is None) != (idempotency_key is None):
+            raise ValueError("correlation_id and idempotency_key must be supplied together")
+        return cls(
+            content=content,
+            origin="connector",
+            correlation_id=correlation_id,
+            idempotency_key=idempotency_key,
+        )
 
     @classmethod
     def scheduler(cls, content: str) -> DispatchInput:

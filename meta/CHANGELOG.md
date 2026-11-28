@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Meta Python SDK: `DispatchInput.connector(content, correlation_id=cid)` now raises `ValueError` when constructing the input. Previously the helper returned an input; dispatch with only a correlation ID was refused later. Code that handled only the dispatch refusal must now handle the error at construction. The gateway key-pair rule and wire format are unchanged.
+
 ### Added
 
 - `StdioDecisionConnection::notice_openings(owner)` (Rust): the task a stdio gateway starts so that its connection tells the host of open decisions without a list.
@@ -140,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Upgrade notes
 
 - A host that speaks JSON-RPC to the stdio gateway itself, never calls `meta/decisions/list`, and treats a notification it does not expect as an error now receives a `meta/decisions/notice` for each durable decision the runtime opens and for each one already open when it connects: ignore the notification, or read it. The sentence "a host that never lists decisions receives no notices" no longer holds. Hosts on the SDKs see no change unless they registered a notice handler.
+
+- For a keyed connector input, use `DispatchInput.connector(content, correlation_id=cid, idempotency_key=key)`. For an unkeyed input, use `DispatchInput.connector(content)`. Supply both values or neither. The old helper had no `idempotency_key` parameter; passing only that new parameter raises `ValueError` in the updated helper. Existing paired inputs built with the full `DispatchInput` constructor need no change.
 
 ## [0.9.19] - 2026-11-26
 

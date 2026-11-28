@@ -65,6 +65,15 @@ describe("mobStanding", () => {
       causes: ["a_cause_from_a_later_server"],
     };
     const { client } = answeringClient(later);
-    assert.deepEqual(await client.mobStanding("quiet"), later);
+    const answered = await client.mobStanding("quiet");
+    assert.deepEqual(answered, later);
+    // Each unknown word is kept as it was sent. The SDK has no helper that
+    // classifies a standing: nothing reads the word as idle or as finished,
+    // and the reason and the cause are neither defaulted nor dropped.
+    assert.equal(answered.standing, "a_word_from_a_later_server");
+    assert.notEqual(answered.standing, "idle");
+    assert.notEqual(answered.standing, "finished");
+    assert.equal(answered.reason, "a_reason_from_a_later_server");
+    assert.deepEqual(answered.causes, ["a_cause_from_a_later_server"]);
   });
 });

@@ -148053,8 +148053,7 @@
   "MobStandingResult": {
     "$defs": {
       "WireMobStanding": {
-        "description": "Where a mob stands, as `mob/standing` answers it. The first five words\nare a served mob's, from what its actor observed; the others say why\nthe mob is not served, and none of them means idle. Two of the first\nfive are also given without counts from the host's own record of a\nmob that has no actor to ask: see `finished` and `stopped`. No word\nsays idle:\na quiet running mob reads `unknown`. The vocabulary may grow: a reader\nkeeps a word it does not know and treats it as unknown, never as idle.",
-        "oneOf": [
+        "anyOf": [
           {
             "const": "busy",
             "description": "Work is in flight or owed in the mob.",
@@ -148119,8 +148118,13 @@
             "const": "absent",
             "description": "The host has no mob of this id. An id whose create is in flight\nreads this until the mob is there, and so does a mob that was\ndestroyed before the host process last started.",
             "type": "string"
+          },
+          {
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
           }
-        ]
+        ],
+        "description": "Where a mob stands, as `mob/standing` answers it. The first five words\nare a served mob's, from what its actor observed; the others say why\nthe mob is not served, and none of them means idle. Two of the first\nfive are also given without counts from the host's own record of a\nmob that has no actor to ask: see `finished` and `stopped`. No word\nsays idle:\na quiet running mob reads `unknown`. The vocabulary may grow: a reader\nkeeps a word it does not know and treats it as unknown, never as idle."
       },
       "WireMobStandingCounts": {
         "description": "The four counts an idle close reads, as diagnostics of a `mob/standing`\nanswer. All four at zero is not idle: see `standing`.",
@@ -148159,8 +148163,7 @@
         "type": "object"
       },
       "WireMobStandingReason": {
-        "description": "How a mob finished (`completed`, `destroyed`) or why its admission\nclosed (every other word). The vocabulary may grow: a reader keeps a\nword it does not know.",
-        "oneOf": [
+        "anyOf": [
           {
             "const": "completed",
             "description": "Finished: the mob completed.",
@@ -148205,12 +148208,16 @@
             "const": "dispatch_failed",
             "description": "Closed: a dispatch failure stopped the actor.",
             "type": "string"
+          },
+          {
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
           }
-        ]
+        ],
+        "description": "How a mob finished (`completed`, `destroyed`) or why its admission\nclosed (every other word). The vocabulary may grow: a reader keeps a\nword it does not know."
       },
       "WireMobUnknownCause": {
-        "description": "One piece of evidence an observation of a quiet mob did not read, so\nthat it answers `unknown` instead of idle. The vocabulary may grow: a\nreader keeps a cause it does not know.",
-        "oneOf": [
+        "anyOf": [
           {
             "const": "no_runtime_adapter",
             "description": "The mob has no runtime to ask about its members' sessions.",
@@ -148245,8 +148252,13 @@
             "const": "observation_failed",
             "description": "The mob's actor refused the observation or could not be asked\n(it is shutting down, or it is gone). `mob/standing` answers an\nerror only for the read's own refusals: a caller without the\nlist scope, or a host that is standing down.",
             "type": "string"
+          },
+          {
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
           }
-        ]
+        ],
+        "description": "One piece of evidence an observation of a quiet mob did not read, so\nthat it answers `unknown` instead of idle. The vocabulary may grow: a\nreader keeps a cause it does not know."
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -208266,8 +208278,7 @@
   },
   "WireMobStanding": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Where a mob stands, as `mob/standing` answers it. The first five words\nare a served mob's, from what its actor observed; the others say why\nthe mob is not served, and none of them means idle. Two of the first\nfive are also given without counts from the host's own record of a\nmob that has no actor to ask: see `finished` and `stopped`. No word\nsays idle:\na quiet running mob reads `unknown`. The vocabulary may grow: a reader\nkeeps a word it does not know and treats it as unknown, never as idle.",
-    "oneOf": [
+    "anyOf": [
       {
         "const": "busy",
         "description": "Work is in flight or owed in the mob.",
@@ -208332,8 +208343,13 @@
         "const": "absent",
         "description": "The host has no mob of this id. An id whose create is in flight\nreads this until the mob is there, and so does a mob that was\ndestroyed before the host process last started.",
         "type": "string"
+      },
+      {
+        "description": "A word this version does not know, as it was sent.",
+        "type": "string"
       }
     ],
+    "description": "Where a mob stands, as `mob/standing` answers it. The first five words\nare a served mob's, from what its actor observed; the others say why\nthe mob is not served, and none of them means idle. Two of the first\nfive are also given without counts from the host's own record of a\nmob that has no actor to ask: see `finished` and `stopped`. No word\nsays idle:\na quiet running mob reads `unknown`. The vocabulary may grow: a reader\nkeeps a word it does not know and treats it as unknown, never as idle.",
     "title": "WireMobStanding"
   },
   "WireMobStandingCounts": {
@@ -208376,8 +208392,7 @@
   },
   "WireMobStandingReason": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "How a mob finished (`completed`, `destroyed`) or why its admission\nclosed (every other word). The vocabulary may grow: a reader keeps a\nword it does not know.",
-    "oneOf": [
+    "anyOf": [
       {
         "const": "completed",
         "description": "Finished: the mob completed.",
@@ -208422,8 +208437,13 @@
         "const": "dispatch_failed",
         "description": "Closed: a dispatch failure stopped the actor.",
         "type": "string"
+      },
+      {
+        "description": "A word this version does not know, as it was sent.",
+        "type": "string"
       }
     ],
+    "description": "How a mob finished (`completed`, `destroyed`) or why its admission\nclosed (every other word). The vocabulary may grow: a reader keeps a\nword it does not know.",
     "title": "WireMobStandingReason"
   },
   "WireMobToolAuthorityContext": {
@@ -208647,8 +208667,7 @@
   },
   "WireMobUnknownCause": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "One piece of evidence an observation of a quiet mob did not read, so\nthat it answers `unknown` instead of idle. The vocabulary may grow: a\nreader keeps a cause it does not know.",
-    "oneOf": [
+    "anyOf": [
       {
         "const": "no_runtime_adapter",
         "description": "The mob has no runtime to ask about its members' sessions.",
@@ -208683,8 +208702,13 @@
         "const": "observation_failed",
         "description": "The mob's actor refused the observation or could not be asked\n(it is shutting down, or it is gone). `mob/standing` answers an\nerror only for the read's own refusals: a caller without the\nlist scope, or a host that is standing down.",
         "type": "string"
+      },
+      {
+        "description": "A word this version does not know, as it was sent.",
+        "type": "string"
       }
     ],
+    "description": "One piece of evidence an observation of a quiet mob did not read, so\nthat it answers `unknown` instead of idle. The vocabulary may grow: a\nreader keeps a cause it does not know.",
     "title": "WireMobUnknownCause"
   },
   "WireModelRoutingApprovalPhase": {

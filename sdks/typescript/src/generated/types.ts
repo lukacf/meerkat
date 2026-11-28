@@ -5014,11 +5014,11 @@ export type WireMobQuarantineClass = "store_unavailable" | "store_unreadable" | 
 
 export type WireMobRestoreRetryOutcome = "restored" | "held" | "settled" | "not_quarantined";
 
-export type WireMobStanding = "busy" | "finished" | "closed" | "stopped" | "unknown" | "unloading" | "held" | "quarantined" | "dormant" | "loading" | "changed" | "set_incomplete" | "absent";
+export type WireMobStanding = "busy" | "finished" | "closed" | "stopped" | "unknown" | "unloading" | "held" | "quarantined" | "dormant" | "loading" | "changed" | "set_incomplete" | "absent" | string;
 
-export type WireMobStandingReason = "completed" | "destroyed" | "idle_close" | "last_owner_released" | "stand_down" | "shutdown" | "durability_fail_stop" | "actor_lost" | "dispatch_failed";
+export type WireMobStandingReason = "completed" | "destroyed" | "idle_close" | "last_owner_released" | "stand_down" | "shutdown" | "durability_fail_stop" | "actor_lost" | "dispatch_failed" | string;
 
-export type WireMobUnknownCause = "no_runtime_adapter" | "members_placed" | "sessions_not_readable" | "peer_delivery_not_traced" | "handoffs_not_tracked" | "observation_timed_out" | "observation_failed";
+export type WireMobUnknownCause = "no_runtime_adapter" | "members_placed" | "sessions_not_readable" | "peer_delivery_not_traced" | "handoffs_not_tracked" | "observation_timed_out" | "observation_failed" | string;
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 

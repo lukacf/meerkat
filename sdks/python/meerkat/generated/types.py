@@ -8386,17 +8386,17 @@ WireMobRestoreRetryOutcome = Literal['restored', 'held', 'settled', 'not_quarant
 # says idle:
 # a quiet running mob reads `unknown`. The vocabulary may grow: a reader
 # keeps a word it does not know and treats it as unknown, never as idle.
-WireMobStanding = Literal['busy', 'finished', 'closed', 'stopped', 'unknown', 'unloading', 'held', 'quarantined', 'dormant', 'loading', 'changed', 'set_incomplete', 'absent']
+WireMobStanding = Literal['busy'] | Literal['finished'] | Literal['closed'] | Literal['stopped'] | Literal['unknown'] | Literal['unloading'] | Literal['held'] | Literal['quarantined'] | Literal['dormant'] | Literal['loading'] | Literal['changed'] | Literal['set_incomplete'] | Literal['absent'] | str
 
 # How a mob finished (`completed`, `destroyed`) or why its admission
 # closed (every other word). The vocabulary may grow: a reader keeps a
 # word it does not know.
-WireMobStandingReason = Literal['completed', 'destroyed', 'idle_close', 'last_owner_released', 'stand_down', 'shutdown', 'durability_fail_stop', 'actor_lost', 'dispatch_failed']
+WireMobStandingReason = Literal['completed'] | Literal['destroyed'] | Literal['idle_close'] | Literal['last_owner_released'] | Literal['stand_down'] | Literal['shutdown'] | Literal['durability_fail_stop'] | Literal['actor_lost'] | Literal['dispatch_failed'] | str
 
 # One piece of evidence an observation of a quiet mob did not read, so
 # that it answers `unknown` instead of idle. The vocabulary may grow: a
 # reader keeps a cause it does not know.
-WireMobUnknownCause = Literal['no_runtime_adapter', 'members_placed', 'sessions_not_readable', 'peer_delivery_not_traced', 'handoffs_not_tracked', 'observation_timed_out', 'observation_failed']
+WireMobUnknownCause = Literal['no_runtime_adapter'] | Literal['members_placed'] | Literal['sessions_not_readable'] | Literal['peer_delivery_not_traced'] | Literal['handoffs_not_tracked'] | Literal['observation_timed_out'] | Literal['observation_failed'] | str
 
 # Lifecycle status of a flow run on the wire. Mirrors
 # `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than

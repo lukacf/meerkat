@@ -1360,11 +1360,31 @@ pub struct MobRestoreRetryResult {
     pub outcome: WireMobRestoreRetryOutcome,
 }
 
+/// The open form of a growing vocabulary's schema: the words the derived
+/// schema lists, and any other string. A known word matches its own
+/// alternative and the plain string one, so the alternatives are `anyOf`.
+/// A derived schema that lists its words in another way is left as it was
+/// derived: no vocabulary of the macro below has one.
+#[cfg(feature = "schema")]
+fn open_vocabulary_schema(mut known: schemars::Schema) -> schemars::Schema {
+    let object = known.ensure_object();
+    if let Some(serde_json::Value::Array(mut words)) = object.remove("oneOf") {
+        words.push(serde_json::json!({
+            "description": "A word this version does not know, as it was sent.",
+            "type": "string"
+        }));
+        object.insert("anyOf".to_owned(), serde_json::Value::Array(words));
+    }
+    known
+}
+
 /// A vocabulary of the wire that may grow: a closed list of the words this
 /// version knows, and a carrier for any other word. A word this version
 /// does not know decodes as `Unrecognized` with the value as it was sent
 /// and is written back the same, so a reader built on an older version
-/// keeps the answer instead of failing it. The schema lists the known words.
+/// keeps the answer instead of failing it. The schema lists the known words
+/// and accepts any other string, so a reader generated from it keeps such a
+/// word too.
 macro_rules! tolerant_wire_vocabulary {
     (
         $(#[$meta:meta])*
@@ -1411,8 +1431,8 @@ macro_rules! tolerant_wire_vocabulary {
             }
         }
 
-        // The schema of the vocabulary: the words this version knows. A
-        // reader accepts any other string as a word it does not know.
+        // The schema of the vocabulary: the words this version knows, and
+        // any other string, which a reader keeps as a word it does not know.
         #[cfg(feature = "schema")]
         mod $schema_mod {
             $(#[$meta])*
@@ -1431,7 +1451,9 @@ macro_rules! tolerant_wire_vocabulary {
             }
 
             fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-                <$schema_mod::$name as schemars::JsonSchema>::json_schema(generator)
+                open_vocabulary_schema(
+                    <$schema_mod::$name as schemars::JsonSchema>::json_schema(generator),
+                )
             }
         }
     };
@@ -5939,21 +5961,39 @@ mod tests {
         assert!(serde_json::from_value::<WireMobUnknownCause>(serde_json::json!(["x"])).is_err());
     }
 
-    /// The schema of each vocabulary lists exactly the words `as_str` gives
-    /// for the variants this version knows, in their order.
+    /// The schema of each vocabulary is open: it lists exactly the words
+    /// `as_str` gives for the variants this version knows, in their order,
+    /// and then accepts any other string, so a reader generated from it
+    /// keeps a word it does not know. Only these three: the quarantine
+    /// class, a released vocabulary, keeps the closed list it was released
+    /// with.
     #[cfg(feature = "schema")]
     #[test]
     fn the_mob_standing_schemas_list_the_known_words() {
         fn consts(schema: &schemars::Schema) -> Vec<String> {
             let value = serde_json::to_value(schema).expect("schema value");
-            value["oneOf"]
+            assert!(
+                value.get("oneOf").is_none(),
+                "an open vocabulary is not a oneOf of its known words: {value}"
+            );
+            let alternatives = value["anyOf"]
                 .as_array()
-                .expect("a oneOf of the known words")
+                .expect("an anyOf of the known words and any other string");
+            let (open, known) = alternatives
+                .split_last()
+                .expect("at least the plain string alternative");
+            assert_eq!(open["type"], "string", "{open}");
+            assert!(
+                open.get("const").is_none() && open.get("enum").is_none(),
+                "the last alternative is any string: {open}"
+            );
+            known
                 .iter()
                 .map(|word| {
+                    assert_eq!(word["type"], "string", "{word}");
                     word["const"]
                         .as_str()
-                        .expect("each word is a const")
+                        .expect("each known word is a const")
                         .to_string()
                 })
                 .collect()
@@ -6001,6 +6041,21 @@ mod tests {
                 "observation_timed_out",
                 "observation_failed",
             ]
+        );
+
+        // A guard of this change's scope: the released vocabulary beside
+        // them keeps its closed list here. A change that opens it moves this
+        // line with it.
+        let released = serde_json::to_value(schemars::schema_for!(WireMobQuarantineClass))
+            .expect("schema value");
+        assert!(released.get("anyOf").is_none(), "{released}");
+        let classes = released["oneOf"]
+            .as_array()
+            .expect("a oneOf of the known classes");
+        assert_eq!(classes.len(), 3, "{released}");
+        assert!(
+            classes.iter().all(|class| class["const"].is_string()),
+            "{released}"
         );
     }
 

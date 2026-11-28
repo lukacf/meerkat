@@ -77,4 +77,36 @@ async def test_mob_standing_keeps_a_word_this_sdk_does_not_know() -> None:
     }
     client, _sent = _answering_client(later)
 
-    assert await client.mob_standing("quiet") == later
+    answered = await client.mob_standing("quiet")
+    assert answered == later
+    # Each unknown word is kept as it was sent. The SDK has no helper that
+    # classifies a standing: nothing reads the word as idle or as finished,
+    # and the reason and the cause are neither defaulted nor dropped.
+    assert answered["standing"] == "a_word_from_a_later_server"
+    assert answered["standing"] not in ("idle", "finished")
+    assert answered["reason"] == "a_reason_from_a_later_server"
+    assert answered["causes"] == ["a_cause_from_a_later_server"]
+
+
+def test_the_generated_types_admit_a_word_this_sdk_does_not_know() -> None:
+    # The three vocabularies may grow. The generated aliases say so: each is
+    # its known words or any other string, so a type checker accepts an
+    # answer that carries a word this SDK does not list.
+    import typing
+
+    from meerkat.generated import types as generated
+
+    for alias, known in (
+        (generated.WireMobStanding, "unknown"),
+        (generated.WireMobStandingReason, "completed"),
+        (generated.WireMobUnknownCause, "observation_timed_out"),
+    ):
+        alternatives = typing.get_args(alias)
+        assert str in alternatives, alias
+        listed = [
+            word
+            for alternative in alternatives
+            if typing.get_origin(alternative) is typing.Literal
+            for word in typing.get_args(alternative)
+        ]
+        assert known in listed, alias

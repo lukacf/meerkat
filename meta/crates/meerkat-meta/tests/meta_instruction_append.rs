@@ -755,13 +755,42 @@ fn child_root_released(outcome: &meerkat_meta::ChildMobStandDownOutcome) -> bool
 /// The wait a reopen makes (`support/custody_wait.rs`) lasts until nothing
 /// holds the execution custody: a shared lock on the custody file, released
 /// a while later from another thread, keeps the wait until that release. With
-/// no holder the wait returns at once. Where the kernel's lock table cannot
-/// name the file (btrfs subvolumes, overlayfs) nothing can be read, and the
-/// wait returns at once while the lock is held too.
+/// no holder the wait returns at once.
+///
+/// What the row asserts is chosen by what the wait's own readings saw, which
+/// the wait reports, and by nothing else. A wait that read the holder and
+/// then three free readings in a row must have lasted the whole hold, by the
+/// row's own clock against the 400 ms it holds the lock, and must have ended
+/// soon after. That is the proof that the wait lasts until the release, and
+/// it fails when the wait reports a release the row has not made. A wait
+/// that read no holder must have returned at once. That outcome, and a wait
+/// that could not make a reading, prove nothing of the release: where the
+/// kernel's lock table cannot name the file (btrfs subvolumes, overlayfs)
+/// nothing can be read, and one reading can skip a held entry (the kernel
+/// hands the table out a page at a time and resumes by position). Such a run
+/// passes and says so in a printed line.
+///
+/// The three readings made before the wait are printed and decide nothing:
+/// beside a wait that read no holder they tell whether a reading could name
+/// the holder here.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reopen_waits_until_the_execution_custody_is_released() {
+    use custody_wait::CustodyWait;
+
     const HELD_FOR: Duration = Duration::from_millis(400);
+    /// The readings of the lock table printed before the wait, as many as
+    /// the wait asks free in a row.
+    const TABLE_READINGS: usize = 3;
+    /// What one reading said: a failed read is also a custody file whose
+    /// metadata could not be read.
+    fn reading_words(reading: Option<bool>) -> &'static str {
+        match reading {
+            Some(true) => "named a holder",
+            Some(false) => "named none",
+            None => "the read failed",
+        }
+    }
     let temp = tempfile::tempdir().unwrap();
     let mut custody = temp
         .path()
@@ -777,38 +806,177 @@ async fn a_reopen_waits_until_the_execution_custody_is_released() {
         .expect("create the custody file");
     held.lock_shared()
         .expect("hold the custody as a hosted runtime does");
-    let readable = custody_wait::custody_holder_named(Path::new(&custody)) == Some(true);
+    let readings: [Option<bool>; TABLE_READINGS] =
+        std::array::from_fn(|_| custody_wait::custody_holder_named(Path::new(&custody)));
+    let before = readings.map(reading_words).join(", ");
+    eprintln!("the lock table's readings of the held custody before the wait: {before}");
 
     let started = std::time::Instant::now();
     let release = std::thread::spawn(move || {
         std::thread::sleep(HELD_FOR);
         drop(held);
     });
-    custody_wait::predecessor_custody_released(temp.path()).await;
+    let outcome = custody_wait::predecessor_custody_wait(temp.path()).await;
     let waited = started.elapsed();
-    if readable {
-        assert!(
-            waited >= HELD_FOR,
-            "the wait ended after {waited:?}, before the holder released"
-        );
-        assert!(
-            waited < Duration::from_secs(5),
-            "the wait went on for {waited:?} after the holder released"
-        );
-    } else {
-        assert!(
-            waited < HELD_FOR,
-            "a lock the table cannot name was waited on for {waited:?}"
-        );
+    eprintln!(
+        "the wait's own outcome: {outcome:?} ({}) after {waited:?}",
+        outcome_words(outcome)
+    );
+    match outcome {
+        CustodyWait::HeldThenReleased => {
+            assert!(
+                waited >= HELD_FOR,
+                "the wait ended after {waited:?}, before the holder released"
+            );
+            assert!(
+                waited < Duration::from_secs(5),
+                "the wait went on for {waited:?} after the holder released"
+            );
+        }
+        CustodyWait::NeverSeen => {
+            assert!(
+                waited < HELD_FOR,
+                "a wait that read no holder ended {waited:?} after the row's clock started, \
+                 not at once"
+            );
+            eprintln!("{}", release_not_observed_line(outcome, waited, &before));
+        }
+        CustodyWait::Unavailable => {
+            eprintln!("{}", release_not_observed_line(outcome, waited, &before));
+        }
+        CustodyWait::TimedOut => panic!(
+            "the wait still named a holder at its bound, {waited:?} after its start, though \
+             the holder released after {HELD_FOR:?}"
+        ),
     }
     release.join().expect("the holder's thread");
 
     let started = std::time::Instant::now();
-    custody_wait::predecessor_custody_released(temp.path()).await;
+    let outcome = custody_wait::predecessor_custody_wait(temp.path()).await;
     let waited = started.elapsed();
+    assert!(
+        matches!(outcome, CustodyWait::NeverSeen | CustodyWait::Unavailable),
+        "with no holder the wait reported {outcome:?}"
+    );
     assert!(
         waited < Duration::from_secs(1),
         "with no holder the wait took {waited:?}"
+    );
+}
+
+/// What a wait saw, in words (`support/custody_wait.rs`).
+fn outcome_words(outcome: custody_wait::CustodyWait) -> &'static str {
+    match outcome {
+        custody_wait::CustodyWait::HeldThenReleased => {
+            "a reading named a holder, then three readings in a row named none"
+        }
+        custody_wait::CustodyWait::NeverSeen => "no reading named a holder",
+        custody_wait::CustodyWait::Unavailable => "a reading could not be made",
+        custody_wait::CustodyWait::TimedOut => "a holder was still named at the bound",
+    }
+}
+
+/// The line the custody wait row prints when its wait did not observe the
+/// release: what the wait saw instead, what the readings made `before` the
+/// wait said (they show a holder the table named and the wait did not read),
+/// and that the run proves nothing of the release.
+fn release_not_observed_line(
+    outcome: custody_wait::CustodyWait,
+    waited: Duration,
+    before: &str,
+) -> String {
+    format!(
+        "the wait did not observe the release ({}, {} ms after the row's clock started; the \
+         readings made before the wait: {before}); this run is no proof that the wait lasts \
+         until the release",
+        outcome_words(outcome),
+        waited.as_millis()
+    )
+}
+
+/// The control of the wait: on scripted readings, with no lock table and no
+/// file, the wait's loop (`support/custody_wait.rs`) reports what those
+/// readings were and takes exactly as many as it needs. A wait that ignored
+/// a holder it read would report on the first script that it read none,
+/// after three readings, and fail here.
+#[tokio::test]
+async fn a_reopen_wait_reports_what_its_own_readings_saw() {
+    use custody_wait::CustodyWait;
+
+    const HELD: Option<bool> = Some(true);
+    const FREE: Option<bool> = Some(false);
+    const FAILED: Option<bool> = None;
+    /// The wait's loop on `script`: what it reported, and how many readings
+    /// it took. A reading asked past the script's end is one that could not
+    /// be made: it ends a wait that asks for it, and shows in the count.
+    async fn wait_on(bound: Duration, script: &[Option<bool>]) -> (CustodyWait, usize) {
+        let mut taken = 0;
+        let outcome = custody_wait::wait_for_release(bound, || {
+            let reading = script.get(taken).copied().unwrap_or(FAILED);
+            taken += 1;
+            reading
+        })
+        .await;
+        (outcome, taken)
+    }
+    let bound = Duration::from_secs(10);
+
+    assert_eq!(
+        wait_on(bound, &[HELD, HELD, FREE, FREE, FREE]).await,
+        (CustodyWait::HeldThenReleased, 5),
+        "a holder read, then three free readings in a row"
+    );
+    assert_eq!(
+        wait_on(bound, &[FREE, FREE, HELD, FREE, FREE, FREE]).await,
+        (CustodyWait::HeldThenReleased, 6),
+        "a holder read after two free readings is not ignored"
+    );
+    assert_eq!(
+        wait_on(bound, &[HELD, FREE, FREE, HELD, FREE, FREE, FREE]).await,
+        (CustodyWait::HeldThenReleased, 7),
+        "the free readings count again from zero after a holder"
+    );
+    assert_eq!(
+        wait_on(bound, &[FREE, FREE, FREE]).await,
+        (CustodyWait::NeverSeen, 3),
+        "three free readings and no holder"
+    );
+    assert_eq!(
+        wait_on(bound, &[HELD, FAILED]).await,
+        (CustodyWait::Unavailable, 2),
+        "a reading that could not be made ends the wait, a holder read before it or not"
+    );
+    assert_eq!(
+        wait_on(bound, &[FAILED]).await,
+        (CustodyWait::Unavailable, 1),
+        "a first reading that could not be made"
+    );
+    assert_eq!(
+        wait_on(Duration::ZERO, &[HELD]).await,
+        (CustodyWait::TimedOut, 1),
+        "a holder still named at the bound"
+    );
+
+    // The line the row prints for a wait that did not observe the release.
+    assert_eq!(
+        release_not_observed_line(
+            CustodyWait::NeverSeen,
+            Duration::from_millis(2),
+            "named a holder, named none, the read failed"
+        ),
+        "the wait did not observe the release (no reading named a holder, 2 ms after the row's \
+         clock started; the readings made before the wait: named a holder, named none, the \
+         read failed); this run is no proof that the wait lasts until the release"
+    );
+    assert_eq!(
+        release_not_observed_line(
+            CustodyWait::Unavailable,
+            Duration::from_millis(7),
+            "named none, named none, named none"
+        ),
+        "the wait did not observe the release (a reading could not be made, 7 ms after the \
+         row's clock started; the readings made before the wait: named none, named none, \
+         named none); this run is no proof that the wait lasts until the release"
     );
 }
 

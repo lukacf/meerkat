@@ -25,6 +25,15 @@
 //! Core takes its claim without waiting. Where there is no such table, or the
 //! table cannot name the file (btrfs subvolumes, overlayfs), nothing can be
 //! read without taking the lock, and the wait returns at once.
+//!
+//! # What the wait reports
+//!
+//! [`predecessor_custody_wait`] is the same wait and returns what its own
+//! readings saw, a [`CustodyWait`]. Only [`CustodyWait::HeldThenReleased`]
+//! says a release was observed. A caller that checks the wait itself reads
+//! that report; a reading it makes on its own, before or after, can differ
+//! from what the wait read. [`wait_for_release`] is the loop over any source
+//! of readings, for a row that scripts them.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -51,31 +60,67 @@ const FREE_READINGS: usize = 3;
 /// still held at the bound, or one that cannot be read, leaves the answer to
 /// the boot's own probe.
 pub async fn predecessor_custody_released(state_dir: &Path) {
+    predecessor_custody_wait(state_dir).await;
+}
+
+/// What a wait saw of the execution custody, by its own readings and nothing
+/// else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustodyWait {
+    /// A reading named a holder, and later [`FREE_READINGS`] readings in a
+    /// row named none: the wait saw the lock held and then free.
+    HeldThenReleased,
+    /// No reading named a holder: the first [`FREE_READINGS`] readings named
+    /// none. Nothing held the lock, or the table cannot name the file, or
+    /// each of those readings skipped a held entry. No release was observed.
+    NeverSeen,
+    /// A reading could not be made, and the wait ended at once, whatever it
+    /// had read before. No release was observed.
+    Unavailable,
+    /// A holder was still named at the bound.
+    TimedOut,
+}
+
+/// [`predecessor_custody_released`], returning what the wait's own readings
+/// saw.
+pub async fn predecessor_custody_wait(state_dir: &Path) -> CustodyWait {
     let mut custody = state_dir
         .join(meerkat_meta::storage_layout::RUNTIME_DB_FILE_NAME)
         .into_os_string();
     custody.push(EXECUTION_CUSTODY_SUFFIX);
     let custody = Path::new(&custody);
+    wait_for_release(CUSTODY_WAIT, || custody_holder_named(custody)).await
+}
+
+/// The wait itself, for at most `bound`, over `reading`: `Some(true)` when a
+/// holder is named, `Some(false)` when none is, `None` when the reading could
+/// not be made. It ends after [`FREE_READINGS`] readings in a row that name
+/// no holder, pauses [`CUSTODY_POLL`] after each reading that names one, and
+/// ends at once on a reading that could not be made.
+pub async fn wait_for_release(
+    bound: Duration,
+    mut reading: impl FnMut() -> Option<bool>,
+) -> CustodyWait {
     let started = Instant::now();
     let mut seen_held = false;
     let mut free_readings = 0;
     while free_readings < FREE_READINGS {
-        match custody_holder_named(custody) {
+        match reading() {
             Some(false) => free_readings += 1,
             Some(true) => {
                 seen_held = true;
                 free_readings = 0;
-                if started.elapsed() >= CUSTODY_WAIT {
+                if started.elapsed() >= bound {
                     eprintln!(
                         "the predecessor's execution custody was still held after {:?}; the \
                          reopen goes on to the boot's own probe",
                         started.elapsed()
                     );
-                    return;
+                    return CustodyWait::TimedOut;
                 }
                 tokio::time::sleep(CUSTODY_POLL).await;
             }
-            None => return,
+            None => return CustodyWait::Unavailable,
         }
     }
     if seen_held {
@@ -83,6 +128,9 @@ pub async fn predecessor_custody_released(state_dir: &Path) {
             "the reopen waited {:?} for the predecessor's execution custody",
             started.elapsed()
         );
+        CustodyWait::HeldThenReleased
+    } else {
+        CustodyWait::NeverSeen
     }
 }
 

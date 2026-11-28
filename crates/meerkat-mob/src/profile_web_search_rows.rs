@@ -18,11 +18,33 @@ use crate::ids::{AgentIdentity, ProfileName};
 use crate::portable_profile::{project_portable_profile, rehydrate_portable_profile};
 use crate::profile::{Profile, ToolConfig};
 
-/// A one-profile definition whose `worker` tools table is `tools`.
+/// How many definitions this module has made in this process.
+static DEFINITIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// A mob id that no other definition of this module has.
+///
+/// A member's name in the in-process comms registry is its
+/// `mob/profile/member` join, the registry is one per process, and it
+/// refuses a name while another live member holds it. Every row here builds
+/// the `worker` member `worker-1`, and each member a row builds through the
+/// factory is built from a definition of its own, so a mob id per definition
+/// gives each of those members a name of its own. Rows that run side by side
+/// in one process (plain `cargo test`), and two members one row builds, then
+/// never claim the same name.
+fn own_mob_id() -> String {
+    format!(
+        "search-desk-{}",
+        DEFINITIONS.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// A one-profile definition, in a mob of its own, whose `worker` tools table
+/// is `tools`.
 fn parsed(tools: &str) -> ParsedMobDefinition {
     let toml = format!(
-        "[mob]\nid = \"desk\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-5\"\n\n\
-         [profiles.worker.tools]\ncomms = true\n{tools}\n"
+        "[mob]\nid = \"{mob}\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-5\"\n\n\
+         [profiles.worker.tools]\ncomms = true\n{tools}\n",
+        mob = own_mob_id()
     );
     MobDefinition::parse_toml(&toml).expect("the definition parses")
 }
@@ -578,11 +600,12 @@ async fn a_governed_member_of_a_profile_without_the_key_has_no_web_search() {
 #[tokio::test]
 async fn a_profiles_enable_fails_the_build_where_no_web_search_can_be_provided() {
     let temp = tempfile::tempdir().expect("a factory root");
-    let definition = MobDefinition::from_toml(
-        "[mob]\nid = \"desk\"\n\n[models.plain]\nprovider = \"anthropic\"\n\n\
+    let definition = MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"{mob}\"\n\n[models.plain]\nprovider = \"anthropic\"\n\n\
          [profiles.worker]\nmodel = \"plain\"\n\n\
          [profiles.worker.tools]\ncomms = true\nweb_search = true\n",
-    )
+        mob = own_mob_id()
+    ))
     .expect("the definition parses");
     let mut build = build_of(&definition, worker(&definition)).await;
     build.llm_client_override = Some(Arc::new(TestClient::for_provider(

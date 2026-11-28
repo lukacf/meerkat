@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [343bbc36b4a5](https://github.com/lukacf/meerkat/commit/343bbc36b4a5d63d59e25db8144544f1c2cdbf32) on 2026-11-28; Meta version 0.9.19 at that commit.*
+*Mirrored from Meerkat Meta main at [cd7f405f64c1](https://github.com/lukacf/meerkat/commit/cd7f405f64c17afe0907718bf2f3ab4620bc0644) on 2026-11-28; Meta version 0.9.19 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -448,16 +448,23 @@ class MyRoster:
 
 ### DispatchInput convenience constructors
 
+In the released `meerkat-meta` 0.9.19 SDK, use `DispatchInput.connector` for an
+unkeyed connector event. For a keyed event, use the full `DispatchInput`
+constructor: the 0.9.19 helper does not accept `idempotency_key`.
+
 ```python
+from meerkat_meta.identity_first_models import DispatchInput
+
 DispatchInput.system("text")
 DispatchInput.connector("event from slack")
 DispatchInput.scheduler("nightly sync")
 
-# A dispatch that is safe to repeat carries both keys.
-DispatchInput.connector(
-    "event from slack",
+# Keep both keys stable when retrying this delivery.
+keyed_event = DispatchInput(
+    content="event from slack",
+    origin="connector",
     idempotency_key="evt-1",
-    correlation_id="msg-1",
+    correlation_id="550e8400-e29b-41d4-a716-446655440000",
 )
 ```
 
@@ -465,8 +472,11 @@ DispatchInput.connector(
 pair to the same identity starts no second turn in its session, and a
 dispatch that carries one of the two without the other is refused with
 nothing delivered (`invalid delivery identity (... (half-pair))`).
-`DispatchInput.connector` accepts both keys or neither; supplying only one
-raises `ValueError` in the helper. It sends the supplied values as given.
+
+In the **development SDK (not 0.9.19)**, `DispatchInput.connector` accepts
+both keys or neither; supplying only one raises `ValueError` in the helper.
+It sends the supplied values as given.
+
 Different deliveries may use distinct idempotency keys with the same
 correlation ID. The full constructor and `dispatch_text` also accept the
 pair; the gateway refuses their half-pairs. On a dispatch without

@@ -721,7 +721,11 @@ fn nightly_covers_the_deferred_heavy_lanes() {
         "make check-rust-release-packaging",
         // Moved off the PR hot path by the Cargo-only PR CI.
         "make test-unit",
-        "make test-int",
+        // `make test-int` as rows: its one build of every test harness no
+        // longer fits a hosted runner's disk, so the rows job runs the
+        // same selection a few harnesses at a time, each row as this whole
+        // step command (the matrix: scripts/ci-nightly-int-split.mjs).
+        "bash scripts/ci-nightly-int-row.sh",
         "make e2e-fast",
         // The TLC lane's machine-verify part, exactly: the bounded adaptive
         // witness and the `machine-verify --all` sweep, which no per-change

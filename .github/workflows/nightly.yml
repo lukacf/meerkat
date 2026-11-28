@@ -9,7 +9,12 @@ name: Nightly
 # Coverage rationale:
 #   workspace-unit    - `make test-unit`: every workspace unit test (PR CI
 #                       runs only the directly changed packages)
-#   workspace-int     - `make test-int`: every integration-fast test
+#   workspace-int     - every integration-fast test of `make test-int`, as
+#                       rows (its one build no longer fits a runner's
+#                       disk): the planner's closure rows and one row for
+#                       the bin harnesses, then an aggregate that accounts
+#                       for every row; the lib harnesses run in
+#                       workspace-unit
 #   e2e-fast          - deterministic real-binary end-to-end lane
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
 #                       Linux (17-22 minutes; does not fit PR CI)
@@ -63,7 +68,9 @@ name: Nightly
 #        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
 #          machine-verify-deep (3-8, and about 40 for its whole-domain
 #          audit)
-#        feature-matrix (170-267) > workspace-int (134-240)
+#        feature-matrix (170-267) > workspace-int-plan > workspace-int
+#          (the integration-fast rows, at most four at once; not
+#          measured yet) > workspace-int-aggregate
 #        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
 #          e2e-fast (3-34) > sdk-host (3-52)
 #        machine-verify (40-50) > workspace-unit (117-173) > clippy-full
@@ -72,11 +79,14 @@ name: Nightly
 # out of time counted at its limit and a run that lost its runner left
 # out; most jobs swing several-fold from night to night. machine-verify's,
 # workspace-unit's and the whole-domain audit's are estimates for their
-# current settings, and workspace-int's and dense-topology's upper ends are
-# their limits. The longest chain, feature-matrix > workspace-int, takes
-# up to about eight and a half hours, and nightly took 4 h 46 min to
-# 7 h 23 min. A new job joins the shortest chain; a new chain is a new
-# slot.
+# current settings, and dense-topology's upper end is its limit. The
+# longest chain was feature-matrix > workspace-int (then one job of
+# 134-240 minutes, its upper end its limit), at up to about eight and a
+# half hours, and nightly took 4 h 46 min to 7 h 23 min. The
+# integration-fast rows that replaced that job are not measured yet;
+# while they run, their chain holds up to four slots, so nightly holds up
+# to about thirteen. A new job joins the shortest chain; a new chain is a
+# new slot.
 #
 # A red run on main opens or updates the "Nightly failures" issue through
 # nightly-failure-issue.yml, which starts once this workflow's run has
@@ -258,18 +268,91 @@ jobs:
           grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
           cat "${RUNNER_TEMP}/workspace-unit-vmstat.log" || true
 
-  workspace-int:
-    name: Workspace integration-fast tests
+  # The integration-fast tests of `make test-int`, as rows. Its one build of
+  # every test harness of Core's workspace no longer fits a hosted runner's
+  # root disk (a scheduled job that began with about 90 GiB free ended with
+  # "No space left on device").
+  # The planner's closure rows build the same integration harnesses a few at
+  # a time, as on a push to main. This job turns a whole-workspace plan into
+  # the matrix of the rows job below (scripts/ci-nightly-int-split.mjs
+  # matrix): Core's closure rows without the e2e-fast row (the e2e-fast job
+  # runs that binary; `make test-int` never ran it), under the profile and
+  # with the HeadCanonical filter of `make test-int`, plus one row for the
+  # bin harnesses, which `make test-int` ran and no closure row names. The
+  # lib harnesses are in no row: `make test-int` ran them a second time, and
+  # the workspace-unit job runs them from the same package selection (when
+  # the rows were introduced, each of the 51 lib harnesses was the same
+  # build in both jobs, by Cargo's unit graph).
+  workspace-int-plan:
+    name: Workspace integration-fast rows (plan)
     needs: feature-matrix
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
-    # Two Cargo jobs build for up to about twice as long as four. On
-    # 2026-11-07 `make test-int` compiled for 79 minutes and ran its 23968
-    # tests in 81, all passing, then ran out of the former 180 minutes 19
-    # minutes into the HeadCanonical kill window's own build (a feature
-    # graph of its own, meerkat-mob with test-support), which still had
-    # meerkat-runtime and meerkat-mob to compile.
-    timeout-minutes: 240
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      # The rows' contracts (scripts/ci-nightly-int-split-selftest.mjs) run
+      # here, as the nightly example jobs run theirs: no other workflow has
+      # these rows.
+      - name: Contracts of the nightly integration-fast rows
+        run: node scripts/ci-nightly-int-split-selftest.mjs
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Plan the rows
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A push plan without a base is the whole workspace: every closure
+          # row of Core, packed as on a push to main.
+          node scripts/ci-cargo-lanes.mjs --format json --event push --head HEAD >"${RUNNER_TEMP}/nightly-int-planner.json"
+          mkdir -p "${RUNNER_TEMP}/nightly-int-plan"
+          node scripts/ci-nightly-int-split.mjs matrix "${RUNNER_TEMP}/nightly-int-planner.json" \
+            --rows "${RUNNER_TEMP}/nightly-int-plan/nightly-int-rows.json" >"${RUNNER_TEMP}/nightly-int-matrix.json"
+          echo "matrix=$(cat "${RUNNER_TEMP}/nightly-int-matrix.json")" >>"${GITHUB_OUTPUT}"
+
+      # The rows the aggregate must account for. Three days, like the other
+      # diagnostic uploads.
+      - name: Keep the planned rows for the aggregate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nightly-int-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightly-int-plan/nightly-int-rows.json
+          if-no-files-found: error
+          retention-days: 3
+
+  workspace-int:
+    name: Workspace integration-fast tests (${{ matrix.name }})
+    needs: workspace-int-plan
+    if: ${{ !cancelled() && !inputs.graph_only }}
+    runs-on: ${{ matrix.runner }}
+    # A row builds a part of what `make test-int` built and runs a part of
+    # its tests, so a row has that job's limit: 240 minutes (on 2026-11-07
+    # it compiled for 79 minutes and ran its 23968 tests in 81). How long a
+    # row takes here is not measured yet. The runner and the limit are the
+    # row's own (scripts/ci-nightly-int-split.mjs): the bin row, whose rkat
+    # harness links the whole CLI, is sized by constants of its own.
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      # The account's 40 hosted jobs are shared with every pull request and
+      # main push, and nightly is built to hold about ten (the head of this
+      # file): at most four rows run at once.
+      max-parallel: 4
+      # When the plan job left no matrix: one stand-in row that fails with
+      # the reason, so the chain goes on and the aggregate reports it.
+      matrix: ${{ fromJSON(needs.workspace-int-plan.outputs.matrix || '{"include":[{"id":"no-plan","name":"no plan","runner":"ubuntu-24.04","timeout_minutes":5}]}') }}
     env:
       RUSTC_WRAPPER: sccache
       # At four Cargo jobs the 16 GB runner lost this job mid-build (exit 143
@@ -280,6 +363,12 @@ jobs:
       # processes reach 6-7 GiB. Two jobs keep at most two rustc alive.
       CARGO_BUILD_JOBS: "2"
     steps:
+      - name: Stop when the plan job left no rows
+        if: ${{ matrix.id == 'no-plan' }}
+        run: |
+          echo "::error::the plan job produced no rows (see the job Workspace integration-fast rows (plan))"
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -383,13 +472,15 @@ jobs:
           sudo swapon "${swapfile}"
           show_resources
 
-      # Space readings before and after `make test-int`: when the root disk
-      # fills during its build they name the directories that hold the space.
+      # Space readings before and after the row's tests: when the root disk
+      # fills during the build they name the directories that hold the space.
       # They remove nothing, and nothing here fails the job. Each directory
       # total is one `du` of a named directory, ended after 60 seconds.
       - name: Show disk use before the workspace integration-fast tests
         continue-on-error: true
         shell: bash
+        env:
+          ROW_NAME: ${{ matrix.name }}
         run: |
           space_reading() {
             local boundary="$1" path="" size="" status=0
@@ -424,7 +515,7 @@ jobs:
               fi
             done
           }
-          space_reading "before make test-int" || true
+          space_reading "before the row's tests" || true
           # The file the next step uploads: the run's keys and the free and
           # used space of the two file systems, by mount point. Numbers only:
           # no directory total, no listing, nothing else of the environment.
@@ -434,7 +525,8 @@ jobs:
             echo "run id: ${GITHUB_RUN_ID}"
             echo "run attempt: ${GITHUB_RUN_ATTEMPT}"
             echo "sha: ${GITHUB_SHA}"
-            echo "boundary: before make test-int"
+            echo "row: ${ROW_NAME}"
+            echo "boundary: before the row's tests"
             echo "read at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             for label in root workspace; do
               path=/
@@ -447,7 +539,7 @@ jobs:
                   END { if (NR < 2) printf "filesystem of the %s: unavailable\n", label }' || true
             done
           } 2>/dev/null >"${readings}" ||
-            echo "space reading [before make test-int]: the file for the upload could not be written" || true
+            echo "space reading [before the row's tests]: the file for the upload could not be written" || true
 
       # When this job ends without a readable log, the reading above is lost
       # with it (nightly runs 45533040642 and 45742394747: the step had
@@ -461,13 +553,30 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: space-readings-nightly-workspace-int-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: space-readings-nightly-workspace-int-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: ${{ runner.temp }}/space-readings-nightly-workspace-int-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}.txt
           if-no-files-found: ignore
           retention-days: 3
 
+      # One row (scripts/ci-nightly-int-row.sh): build and list its selection,
+      # check that nextest lists exactly its binaries, run it, and write its
+      # report for the aggregate.
       - name: Workspace integration-fast tests
-        run: make test-int
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          TESTS: ${{ matrix.tests }}
+          PROFILE: ${{ matrix.profile }}
+          FILTER: ${{ matrix.filter }}
+          BINARIES: ${{ matrix.binaries }}
+          NO_TESTS: ${{ matrix.no_tests }}
+          MIN_STACK: ${{ matrix.rust_min_stack }}
+          PARTITION: ${{ matrix.partition }}
+          ROW_ID: ${{ matrix.id }}
+          ROW_NAME: ${{ matrix.name }}
+          ROW_KIND: ${{ matrix.kind }}
+          ROW_CHECK: ${{ matrix.check }}
+          REPORT_DIR: ${{ runner.temp }}/nightly-int-row
+        run: bash scripts/ci-nightly-int-row.sh
 
       # After a lost runner no later step runs, not even this one; it prints
       # for a job that ended by itself.
@@ -475,6 +584,8 @@ jobs:
         if: ${{ always() }}
         continue-on-error: true
         shell: bash
+        env:
+          ROW_NAME: ${{ matrix.name }}
         run: |
           free -m
           swapon --show || true
@@ -515,7 +626,80 @@ jobs:
               fi
             done
           }
-          space_reading "after make test-int" || true
+          space_reading "after the row's tests" || true
+          # The file the next step keeps beside the row's report: the same
+          # numbers as the file kept before the tests.
+          readings="${RUNNER_TEMP}/nightly-int-row/space-readings-after.txt"
+          mkdir -p "${RUNNER_TEMP}/nightly-int-row" || true
+          {
+            echo "workflow: ${GITHUB_WORKFLOW}"
+            echo "run id: ${GITHUB_RUN_ID}"
+            echo "run attempt: ${GITHUB_RUN_ATTEMPT}"
+            echo "sha: ${GITHUB_SHA}"
+            echo "row: ${ROW_NAME}"
+            echo "boundary: after the row's tests"
+            echo "read at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            for label in root workspace; do
+              path=/
+              if [[ "${label}" == workspace ]]; then
+                path="${GITHUB_WORKSPACE:-.}"
+              fi
+              timeout 60 df -Pk -- "${path}" 2>/dev/null |
+                awk -v label="${label}" '
+                  NR == 2 { printf "filesystem of the %s, mounted on %s: %d MiB free, %d MiB used, %d MiB total\n", label, $NF, $(NF - 2) / 1024, $(NF - 3) / 1024, $(NF - 4) / 1024 }
+                  END { if (NR < 2) printf "filesystem of the %s: unavailable\n", label }' || true
+            done
+          } 2>/dev/null >"${readings}" ||
+            echo "space reading [after the row's tests]: the file for the upload could not be written" || true
+
+      # The row's report is what the aggregate accounts for: a row without
+      # one is named there as missing. The reading taken after the tests
+      # goes with it. Three days, like the other diagnostic uploads.
+      - name: Keep the row's report and the disk reading taken after its tests
+        if: ${{ always() && matrix.id != 'no-plan' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nightly-int-row-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly-int-row/report.json
+            ${{ runner.temp }}/nightly-int-row/space-readings-after.txt
+          if-no-files-found: warn
+          retention-days: 3
+
+  # Every row reports to this job, and it fails unless each planned row left
+  # a report of a completed, successful run of exactly the tests nextest
+  # selected for it (scripts/ci-nightly-int-split.mjs aggregate). It prints
+  # the tests listed, selected, ignored, run, passed, failed and skipped per
+  # row and in total, where the lib harnesses run, the binaries two rows
+  # name, and the bin row's count. The counts are nextest's for the run;
+  # nothing asserts a number of tests.
+  workspace-int-aggregate:
+    name: Workspace integration-fast rows (aggregate)
+    needs: workspace-int
+    if: ${{ !cancelled() && !inputs.graph_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Every attempt's artifacts of this run: a rerun of failed jobs leaves
+      # the first attempt's reports of the rows it does not rerun.
+      - name: Fetch the planned rows and the rows' reports
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: nightly-int-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/nightly-int-reports
+
+      - name: Account for every row
+        shell: bash
+        env:
+          ROWS_RESULT: ${{ needs.workspace-int.result }}
+        run: |
+          node scripts/ci-nightly-int-split.mjs aggregate \
+            --rows-dir "${RUNNER_TEMP}/nightly-int-reports" --reports-dir "${RUNNER_TEMP}/nightly-int-reports" \
+            --rows-result "${ROWS_RESULT}" --summary "${GITHUB_STEP_SUMMARY}"
 
   e2e-fast:
     name: Deterministic e2e lane

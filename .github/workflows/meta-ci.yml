@@ -457,121 +457,21 @@ jobs:
       # compiled: the package's lib tests, default features, Cargo's test
       # profile. Meta's 16 MiB stack (ci/products.json test_stack) is set
       # here too, as it was for that compile.
-      # While the archive command runs, a background sampler prints one
-      # "resource reading" line every 30 seconds into this step's own log:
-      # memory available, swap used, memory pressure, the root file system's
-      # free space (and the target directory's file system when it is
-      # another one) and resident memory summed under fixed labels. A
-      # process name is only compared with a fixed list and never printed;
-      # no line holds arguments, environment values or paths. At most 200
-      # samples, each command under its own time limit. A build whose runner
-      # is lost while Meta compiles then leaves its last readings in the
-      # log. Readings only: nothing is cleaned, retried or resized, and no
-      # cause is claimed; a gap in the lines is missing evidence, not a
-      # diagnosis. The sampler's failures are ignored and the step's exit
-      # status is the archive command's. The sampler waits in one-second
-      # slices and leaves as soon as its parent is no longer this step's
-      # shell, so it outlives that shell by about a second at most
-      # (scripts/test_ci_workflow.py runs this script).
+      # The archive command runs under scripts/ci-resource-readings.sh, the one
+      # implementation of the readings: while the command runs, the script's
+      # sampler prints one "resource reading" line every 30 seconds into this
+      # step's own log (memory available, swap used, memory pressure, free
+      # disk space and resident memory summed under fixed labels; numbers and
+      # fixed words only, no arguments, environment values or paths). A build
+      # whose runner is lost while Meta compiles leaves its last readings
+      # only where its log is kept. Readings only: the sampler's failures are
+      # ignored and the step's exit status is the archive command's
+      # (scripts/test_ci_workflow.py runs the script and this step).
       - name: Build the lib test archive
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: |
-          set +e
-          (
-            export TZ=UTC
-            trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
-            place="${CARGO_TARGET_DIR}"
-            while [[ "${place}" == */* && ! -e "${place}" ]]; do place="${place%/*}"; done
-            if [[ ! -e "${place}" ]]; then place=/; fi
-            root_device="$(exec timeout 10 stat -c %d /)"
-            target_device="$(exec timeout 10 stat -c %d -- "${place}")"
-            distinct=""
-            if [[ "${root_device}" =~ ^[0-9]+$ && "${target_device}" =~ ^[0-9]+$ && "${root_device}" != "${target_device}" ]]; then
-              distinct=yes
-            fi
-            for ((sample = 1; sample <= 200; sample++)); do
-              total="" available="" swap_total="" swap_free=""
-              while read -r key value _; do
-                case "${key}" in
-                  MemTotal:) total="${value}" ;;
-                  MemAvailable:) available="${value}" ;;
-                  SwapTotal:) swap_total="${value}" ;;
-                  SwapFree:) swap_free="${value}" ;;
-                esac
-              done < /proc/meminfo
-              memory="unavailable"
-              if [[ "${total}" =~ ^[0-9]+$ && "${available}" =~ ^[0-9]+$ ]]; then
-                memory="$((available / 1024)) MiB available of $((total / 1024)) MiB"
-              fi
-              swap="unavailable"
-              if [[ "${swap_total}" =~ ^[0-9]+$ && "${swap_free}" =~ ^[0-9]+$ ]]; then
-                swap="$(((swap_total - swap_free) / 1024)) MiB used of $((swap_total / 1024)) MiB"
-              fi
-              pressure="unavailable"
-              while read -r kind average _; do
-                if [[ "${kind}" == full && "${average}" =~ ^avg10=[0-9.]+$ ]]; then pressure="${average#avg10=}"; fi
-              done < /proc/pressure/memory
-              root="unavailable"
-              if [[ "$(exec timeout 10 stat -f -c '%a %b %S' /)" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
-                root="$((BASH_REMATCH[1] * BASH_REMATCH[3] / 1048576)) MiB free of $((BASH_REMATCH[2] * BASH_REMATCH[3] / 1048576)) MiB"
-              fi
-              target=""
-              if [[ -n "${distinct}" ]]; then
-                target="; target filesystem unavailable"
-                if [[ "$(exec timeout 10 stat -f -c '%a %b %S' -- "${place}")" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
-                  target="; target filesystem $((BASH_REMATCH[1] * BASH_REMATCH[3] / 1048576)) MiB free of $((BASH_REMATCH[2] * BASH_REMATCH[3] / 1048576)) MiB"
-                fi
-              fi
-              compiler=0 linker=0 cache=0 build=0 runner=0 other=0 counted=""
-              for entry in /proc/[0-9]*/status; do
-                name="" resident=""
-                while read -r key value rest; do
-                  case "${key}" in
-                    Name:) name="${value}${rest:+ ${rest}}" ;;
-                    VmRSS:)
-                      resident="${value}"
-                      break
-                      ;;
-                  esac
-                done < "${entry}"
-                if [[ ! "${resident}" =~ ^[0-9]+$ ]]; then continue; fi
-                counted=yes
-                case "${name}" in
-                  rustc) compiler=$((compiler + resident)) ;;
-                  ld | mold | ld.lld | lld | collect2 | cc | gcc) linker=$((linker + resident)) ;;
-                  sccache) cache=$((cache + resident)) ;;
-                  cargo) build=$((build + resident)) ;;
-                  cargo-nextest) runner=$((runner + resident)) ;;
-                  *) other=$((other + resident)) ;;
-                esac
-              done
-              sums="unavailable"
-              if [[ -n "${counted}" ]]; then
-                sums="compiler $((compiler / 1024)) MiB, linker $((linker / 1024)) MiB, compile cache $((cache / 1024)) MiB"
-                sums+=", build tool $((build / 1024)) MiB, test runner $((runner / 1024)) MiB, other $((other / 1024)) MiB"
-              fi
-              printf -v now '%(%H:%M:%SZ)T' -1
-              printf 'resource reading [%s] %d: memory %s; swap %s; memory pressure full avg10 %s; root filesystem %s%s; resident: %s\n' \
-                "${now}" "${sample}" "${memory}" "${swap}" "${pressure}" "${root}" "${target}" "${sums}"
-              for ((slice = 0; slice < 30; slice++)); do
-                parent=""
-                read -r _ _ _ parent _ < "/proc/${BASHPID}/stat"
-                if [[ "${parent:-$$}" != "$$" ]] || ! kill -0 "$$"; then exit 0; fi
-                sleep 1 &
-                nap=$!
-                wait "${nap}" || exit 0
-              done
-            done
-          ) 2>/dev/null &
-          sampler=$!
-          ./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings --archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
-          status=$?
-          kill "${sampler}" 2>/dev/null
-          pkill -P "${sampler}" 2>/dev/null
-          wait "${sampler}" 2>/dev/null
-          exit "${status}"
+        run: ./scripts/ci-resource-readings.sh ./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings --archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -934,7 +834,7 @@ jobs:
       # default profile, as before; a partition that selects no test fails
       # (nextest's documented default, stated). (A block: the lane doctor
       # reads a one-line `run:` that starts with cargo as a wrapper bypass.)
-      # No resource sampler here: a leg compiles nothing, and the "resource
+      # No resource readings here: a leg compiles nothing, and the "resource
       # reading" lines are printed where the harness is compiled, by
       # rust-unit-build's "Build the lib test archive" step.
       - name: Lib tests
@@ -1294,6 +1194,15 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # The runner's size, once, before the compile: processors, memory, disk
+      # and swap, the lines the unit build's swap step prints first
+      # (scripts/ci-resource-readings.sh --size). It adds no swap and changes
+      # nothing, and continue-on-error keeps a failure here from failing the
+      # job.
+      - name: Show the runner's size before the compile
+        continue-on-error: true
+        working-directory: .
+        run: ./scripts/ci-resource-readings.sh --size
       # Measurement only: the compiler cache's counters before the compile,
       # into a file. It prints nothing and cannot fail the job.
       - name: Compile statistics, before
@@ -1301,11 +1210,22 @@ jobs:
         shell: bash
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
-      - name: Extension-state lib tests
+      # The compile, in a step of its own: the lib test harness with the
+      # job's features is built and nothing runs. The job compiled and ran
+      # its tests in one step: a runner lost in such a step leaves one step
+      # record and no word on whether the compile had ended. The command is
+      # the test step's own, with `--no-run` in place of the filters and with
+      # Cargo's `--timings`, on the same stack, so that the test step below
+      # finds the build fresh and compiles nothing again (its own Cargo lines
+      # show whether it did). It runs under scripts/ci-resource-readings.sh,
+      # which prints one "resource reading" line every 30 seconds into this
+      # step's log (numbers and fixed words only; nothing of the environment)
+      # and exits with the build's status.
+      - name: Build the extension-state lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib --timings -- extension_ document_mcp_child_supply
+        run: ./scripts/ci-resource-readings.sh ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib --timings --no-run
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -1549,6 +1469,13 @@ jobs:
               except Exception as error:
                   say(f"unknown (a part of the report failed: {type(error).__name__})")
           PY
+      # The tests, on the build of the step above: the same package, features
+      # and stack, and the job's filters.
+      - name: Extension-state lib tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib -- extension_ document_mcp_child_supply
       # The reports Cargo wrote for the compile (--timings), as evidence
       # beside the lines above. Never a reason to fail the job.
       - name: Retain the Cargo timing reports
@@ -1666,6 +1593,15 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # The runner's size, once, before the compile: processors, memory, disk
+      # and swap, the lines the unit build's swap step prints first
+      # (scripts/ci-resource-readings.sh --size). It adds no swap and changes
+      # nothing, and continue-on-error keeps a failure here from failing the
+      # job.
+      - name: Show the runner's size before the compile
+        continue-on-error: true
+        working-directory: .
+        run: ./scripts/ci-resource-readings.sh --size
       # Measurement only: the compiler cache's counters before the compile,
       # into a file. It prints nothing and cannot fail the job.
       - name: Compile statistics, before
@@ -1673,13 +1609,23 @@ jobs:
         shell: bash
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
-      - name: Voice lib cases
+      # The compile, in a step of its own: the lib test harness with the
+      # openai-live feature is built once, for both commands of the test
+      # step, and nothing runs. The job compiled and ran its tests in one
+      # step: a runner lost in such a step leaves one step record and no word
+      # on whether the compile had ended. The command is the test commands'
+      # own, with `--no-run` in place of the filter and with Cargo's
+      # `--timings`, on the same stack, so that the test step below finds the
+      # build fresh and compiles nothing again (its own Cargo lines show
+      # whether it did). It runs under scripts/ci-resource-readings.sh, which
+      # prints one "resource reading" line every 30 seconds into this step's
+      # log (numbers and fixed words only; nothing of the environment) and
+      # exits with the build's status.
+      - name: Build the voice lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: |
-          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings console_voice
-          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration
+        run: ./scripts/ci-resource-readings.sh ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings --no-run
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -1923,6 +1869,15 @@ jobs:
               except Exception as error:
                   say(f"unknown (a part of the report failed: {type(error).__name__})")
           PY
+      # The tests, on the build of the step above: the same package, feature
+      # and stack, and the job's two filters.
+      - name: Voice lib cases
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: |
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib console_voice
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration
       # The reports Cargo wrote for the compile (--timings), as evidence
       # beside the lines above. Never a reason to fail the job.
       - name: Retain the Cargo timing reports

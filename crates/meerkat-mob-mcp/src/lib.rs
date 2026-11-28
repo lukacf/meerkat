@@ -567,8 +567,18 @@ pub enum HostedMobIdle {
     /// The mob's store is quarantined.
     Quarantined,
     /// The mob is known and not loaded: it has no actor to ask. Whether its
-    /// store owes work is not read here.
+    /// store owes work is not read here. A mob that completed and was then
+    /// unloaded answers this too: the set's record does not keep a
+    /// completion, so finished is told only while the mob is loaded.
     Dormant,
+    /// The mob is known, not loaded, and stopped: the set's record of it
+    /// says so (what the mob answered when its actor closed at an unload,
+    /// or what the set read from its store when it opened it for another
+    /// read). No store is opened for this answer: a record that has not
+    /// read the stop answers [`Self::Dormant`]. As the inventory lists it:
+    /// an id that two stores name reads stopped when either record says
+    /// so.
+    DormantStopped,
     /// The mob's one load is in flight.
     Loading,
     /// The mob that was asked is no longer the one served under the id:
@@ -579,12 +589,315 @@ pub enum HostedMobIdle {
     /// has not finished): whether the id names a mob here is not known. No
     /// census is started for an observation.
     SetIncomplete,
+    /// This state destroyed the mob that was under the id, the set is
+    /// complete, and no live record names the id now (none serves, stores
+    /// or creates a mob under it): the record of the destroy, which this
+    /// state keeps while its process runs, answers. Nothing is loaded. The
+    /// record does not outlive the process: after a restart the id answers
+    /// [`Self::Absent`].
+    Destroyed,
     /// No mob is served or stored here under the id, and the set is
     /// complete. An id no record names answers this, and so does an id
-    /// whose create is in flight, a mob this state destroyed, and a
-    /// declared store that holds no mob yet: a mob may be about to turn up
-    /// under the first of those three.
+    /// whose create is in flight and a declared store that holds no mob
+    /// yet: a mob may be about to turn up under the first of those. A mob
+    /// an earlier process destroyed answers this too.
     Absent,
+}
+
+/// What [`MobMcpState::mob_idle_observation`] found, with the refusal of
+/// the actor that serves the mob kept apart from an answer.
+enum HostedMobIdleAsked {
+    Answered(HostedMobIdle),
+    /// The actor that still serves the mob refused the read or could not
+    /// be asked.
+    ActorRefused(MobError),
+}
+
+/// How long a surface waits for a mob's actor to answer a standing read
+/// before it answers `unknown` with the cause `observation_timed_out`. The
+/// observation is one command on the actor's serialized loop, so it waits
+/// behind the command the actor is running; a watcher gets a typed answer
+/// after this bound instead of silence.
+pub const MOB_STANDING_ANSWER_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A mob's standing in the wire's words, rendered from the typed
+/// observation alone: the one rendering every surface of this crate uses,
+/// so that a tool result and a wire answer say the same. The words are the
+/// wire's ([`wire_mob_standing`]); the sentence is for a reader. No word
+/// says "idle": a quiet running mob reads `unknown` with the evidence that
+/// was not read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct MobStandingView {
+    /// For a served mob: `busy`, `finished`, `closed`, `stopped` or
+    /// `unknown`. For a mob that is not served: `unloading`, `held`,
+    /// `quarantined`, `dormant`, `loading`, `changed`, `set_incomplete` or
+    /// `absent`; or, where the set's own record says so, `stopped` (not
+    /// loaded and stopped) and `finished` (destroyed by this process).
+    pub standing: meerkat_contracts::WireMobStanding,
+    /// For `finished`: `completed` or `destroyed`. For `closed`: why
+    /// admission closed, as one word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<meerkat_contracts::WireMobStandingReason>,
+    /// For `unknown`: each piece of evidence the observation did not read,
+    /// or why the observation has no answer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub causes: Vec<meerkat_contracts::WireMobUnknownCause>,
+    /// The idle close's four counts, diagnostic. Present when the mob's
+    /// actor answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counts: Option<meerkat_contracts::WireMobStandingCounts>,
+    /// The same answer as one sentence.
+    pub sentence: String,
+}
+
+/// The words of one standing, before a mob id is put to them.
+struct MobStandingWords {
+    standing: meerkat_contracts::WireMobStanding,
+    reason: Option<meerkat_contracts::WireMobStandingReason>,
+    causes: Vec<meerkat_contracts::WireMobUnknownCause>,
+    counts: Option<meerkat_contracts::WireMobStandingCounts>,
+}
+
+impl MobStandingWords {
+    fn unserved(standing: meerkat_contracts::WireMobStanding) -> Self {
+        Self {
+            standing,
+            reason: None,
+            causes: Vec::new(),
+            counts: None,
+        }
+    }
+
+    /// The mob's actor gave no observation: `unknown` with why, and no
+    /// counts, since nothing was counted.
+    fn unanswered(cause: meerkat_contracts::WireMobUnknownCause) -> Self {
+        Self {
+            standing: meerkat_contracts::WireMobStanding::Unknown,
+            reason: None,
+            causes: vec![cause],
+            counts: None,
+        }
+    }
+
+    /// The words of a hosted mob, served or not.
+    fn of(observed: &HostedMobIdle) -> Self {
+        use meerkat_contracts::WireMobStanding as Word;
+        match observed {
+            HostedMobIdle::Observed(observation) => Self::of_observation(observation),
+            HostedMobIdle::Unloading => Self::unserved(Word::Unloading),
+            HostedMobIdle::Held => Self::unserved(Word::Held),
+            HostedMobIdle::Quarantined => Self::unserved(Word::Quarantined),
+            HostedMobIdle::Dormant => Self::unserved(Word::Dormant),
+            // What the set's record says of a mob with no actor to ask: the
+            // served mob's own words, with no counts since nothing was
+            // counted.
+            HostedMobIdle::DormantStopped => Self::unserved(Word::Stopped),
+            HostedMobIdle::Destroyed => Self {
+                reason: Some(meerkat_contracts::WireMobStandingReason::Destroyed),
+                ..Self::unserved(Word::Finished)
+            },
+            HostedMobIdle::Loading => Self::unserved(Word::Loading),
+            HostedMobIdle::Changed => Self::unserved(Word::Changed),
+            HostedMobIdle::SetIncomplete => Self::unserved(Word::SetIncomplete),
+            HostedMobIdle::Absent => Self::unserved(Word::Absent),
+        }
+    }
+
+    /// The words of what a mob's actor answered to one bounded ask: its
+    /// observation, or `unknown` with the cause when it refused the read or
+    /// did not answer within the bound (`Elapsed` is the timeout's error,
+    /// whatever its type on this target).
+    fn of_asked<Elapsed>(
+        asked: Result<Result<meerkat_mob::MobIdleObservation, MobError>, Elapsed>,
+    ) -> Self {
+        use meerkat_contracts::WireMobUnknownCause as Cause;
+        match asked {
+            Ok(Ok(observation)) => Self::of_observation(&observation),
+            Ok(Err(_)) => Self::unanswered(Cause::ObservationFailed),
+            Err(_) => Self::unanswered(Cause::ObservationTimedOut),
+        }
+    }
+
+    /// The words of a served mob, from what its actor observed. A standing
+    /// this crate has no word for reads `unknown`, never anything quieter.
+    fn of_observation(observation: &meerkat_mob::MobIdleObservation) -> Self {
+        use meerkat_contracts::{WireMobStanding as Word, WireMobStandingReason as Reason};
+        use meerkat_mob::{MobAdmissionCloseReason, MobFinished, MobStanding};
+        let (standing, reason, causes) = match observation.standing() {
+            MobStanding::Busy => (Word::Busy, None, Vec::new()),
+            MobStanding::Finished(finished) => (
+                Word::Finished,
+                match finished {
+                    MobFinished::Completed => Some(Reason::Completed),
+                    MobFinished::Destroyed => Some(Reason::Destroyed),
+                    _ => None,
+                },
+                Vec::new(),
+            ),
+            MobStanding::Closed(reason) => (
+                Word::Closed,
+                match reason {
+                    MobAdmissionCloseReason::IdleClose => Some(Reason::IdleClose),
+                    MobAdmissionCloseReason::LastOwnerReleased => Some(Reason::LastOwnerReleased),
+                    MobAdmissionCloseReason::StandDown => Some(Reason::StandDown),
+                    MobAdmissionCloseReason::Shutdown => Some(Reason::Shutdown),
+                    MobAdmissionCloseReason::Destroyed => Some(Reason::Destroyed),
+                    MobAdmissionCloseReason::DurabilityFailStop => Some(Reason::DurabilityFailStop),
+                    MobAdmissionCloseReason::ActorLost => Some(Reason::ActorLost),
+                    MobAdmissionCloseReason::DispatchFailed => Some(Reason::DispatchFailed),
+                    _ => None,
+                },
+                Vec::new(),
+            ),
+            MobStanding::Stopped => (Word::Stopped, None, Vec::new()),
+            MobStanding::Unknown(unread) => (
+                Word::Unknown,
+                None,
+                unread.causes().filter_map(wire_mob_unknown_cause).collect(),
+            ),
+            _ => (Word::Unknown, None, Vec::new()),
+        };
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        Self {
+            standing,
+            reason,
+            causes,
+            counts: Some(meerkat_contracts::WireMobStandingCounts {
+                roster_transitions: count(observation.busy.roster_transitions),
+                runs: count(observation.busy.runs),
+                parked_admission: count(observation.busy.parked_admission),
+                foreground_owners: count(observation.busy.foreground_owners),
+            }),
+        }
+    }
+
+    /// The same answer as one sentence.
+    fn sentence(&self) -> String {
+        use meerkat_contracts::{WireMobStanding as Word, WireMobUnknownCause as Cause};
+        let reason = self.reason.as_ref().map_or(
+            "reason not named",
+            meerkat_contracts::WireMobStandingReason::as_str,
+        );
+        match &self.standing {
+            Word::Busy => "Work is in flight or owed in this mob.".to_string(),
+            Word::Finished => {
+                format!("The mob has finished ({reason}): it takes no more work.")
+            }
+            Word::Closed => format!(
+                "The mob's admission is closed ({reason}): this actor takes no more work. It \
+                 is closed, not finished."
+            ),
+            Word::Stopped => "The mob is stopped: paused until it is resumed.".to_string(),
+            Word::Unknown if self.causes.contains(&Cause::ObservationTimedOut) => {
+                "The mob's actor did not answer this read in time (it may be inside a long \
+                 command): where the mob stands is unknown, not idle."
+                    .to_string()
+            }
+            Word::Unknown if self.causes.contains(&Cause::ObservationFailed) => {
+                "The mob's actor refused this read or could not be asked: where the mob stands \
+                 is unknown, not idle."
+                    .to_string()
+            }
+            Word::Unknown if self.causes.is_empty() => {
+                "This read cannot say where the mob stands: treat it as unknown, not as idle."
+                    .to_string()
+            }
+            Word::Unknown => {
+                let causes: Vec<&str> = self.causes.iter().map(|cause| cause.as_str()).collect();
+                format!(
+                    "Nothing was counted in flight, but this read cannot say that the mob is \
+                     idle: it did not read {}.",
+                    causes.join(", ")
+                )
+            }
+            Word::Unloading => "The mob is being unloaded: its actor is being asked whether it \
+                                closes idle and may still answer busy."
+                .to_string(),
+            Word::Held => {
+                "The mob is a child mob held before activation, until its owner resolves."
+                    .to_string()
+            }
+            Word::Quarantined => {
+                "The mob's store did not restore: it is kept quarantined.".to_string()
+            }
+            Word::Dormant => {
+                "The mob is not loaded, and this read loads nothing: that is not idle.".to_string()
+            }
+            Word::Loading => "The mob is being loaded.".to_string(),
+            Word::Changed => "Another actor serves the mob by now: ask again.".to_string(),
+            Word::SetIncomplete => {
+                "The host has not read every mob it holds yet: a mob of this id may exist."
+                    .to_string()
+            }
+            Word::Absent => "The host has no mob of this id.".to_string(),
+            other => format!("The mob stands {}.", other.as_str()),
+        }
+    }
+
+    fn into_view(self) -> MobStandingView {
+        MobStandingView {
+            sentence: self.sentence(),
+            standing: self.standing,
+            reason: self.reason,
+            causes: self.causes,
+            counts: self.counts,
+        }
+    }
+
+    fn into_wire(self, mob_id: &MobId) -> meerkat_contracts::MobStandingResult {
+        meerkat_contracts::MobStandingResult {
+            mob_id: mob_id.to_string(),
+            standing: self.standing,
+            reason: self.reason,
+            causes: self.causes,
+            counts: self.counts,
+        }
+    }
+}
+
+/// One cause of an unknown standing, on the wire. A cause this crate has no
+/// word for is left out: the standing still reads `unknown`.
+fn wire_mob_unknown_cause(
+    cause: meerkat_mob::MobUnknownCause,
+) -> Option<meerkat_contracts::WireMobUnknownCause> {
+    use meerkat_contracts::WireMobUnknownCause as Wire;
+    use meerkat_mob::MobUnknownCause as Cause;
+    match cause {
+        Cause::NoRuntimeAdapter => Some(Wire::NoRuntimeAdapter),
+        Cause::MembersPlaced => Some(Wire::MembersPlaced),
+        Cause::SessionsNotReadable => Some(Wire::SessionsNotReadable),
+        Cause::PeerDeliveryNotTraced => Some(Wire::PeerDeliveryNotTraced),
+        Cause::HandoffsNotTracked => Some(Wire::HandoffsNotTracked),
+        _ => None,
+    }
+}
+
+impl MobStandingView {
+    /// The standing of a hosted mob, served or not.
+    #[must_use]
+    pub fn of(observed: &HostedMobIdle) -> Self {
+        MobStandingWords::of(observed).into_view()
+    }
+
+    /// The standing of a served mob, from what its actor observed.
+    #[must_use]
+    pub fn of_observation(observation: &meerkat_mob::MobIdleObservation) -> Self {
+        MobStandingWords::of_observation(observation).into_view()
+    }
+
+    /// The standing of a served mob, asked of its actor through `handle`
+    /// and waited for no longer than [`MOB_STANDING_ANSWER_BOUND`]. An actor
+    /// that refuses the read or does not answer in time reads `unknown`
+    /// with that cause and no counts; nothing of the error's text is given.
+    /// One command on the mob's actor loop per call: a read for an
+    /// occasion, not for a poll.
+    pub async fn ask(handle: &MobHandle) -> Self {
+        MobStandingWords::of_asked(
+            tokio::time::timeout(MOB_STANDING_ANSWER_BOUND, handle.observe_idle()).await,
+        )
+        .into_view()
+    }
 }
 
 /// Every mob this state hosts, from one read: each mob id is in exactly one
@@ -13570,7 +13883,11 @@ impl MobMcpState {
     ///
     /// Only [`HostedMobIdle::Observed`] can say idle. A mob that is not
     /// loaded has no actor to ask, and whether its store owes work is not
-    /// read here: it answers [`HostedMobIdle::Dormant`], which is not idle.
+    /// read here: it answers [`HostedMobIdle::Dormant`], which is not idle,
+    /// or [`HostedMobIdle::DormantStopped`] when its record says the mob is
+    /// stopped. An id whose mob this state destroyed answers
+    /// [`HostedMobIdle::Destroyed`] from the destroy's kept record while no
+    /// live record names the id. Neither opens a store.
     /// What the observation covers, and what it leaves out, is the actor's
     /// to say ([`meerkat_mob::MobHandle::observe_idle`]); it reaches no mob
     /// the members of this one created.
@@ -13595,18 +13912,51 @@ impl MobMcpState {
     /// each member's session. It is a read for an occasion; a caller that
     /// polls it holds the actor that long each time.
     pub async fn mob_idle_observation(&self, mob_id: &MobId) -> Result<HostedMobIdle, MobError> {
-        // What the set's record says without an actor's answer. `None` for
-        // a mob that is served: its actor is asked.
-        fn of_the_record(found: &hosted_set::Hosted<'_>, complete: bool) -> Option<HostedMobIdle> {
-            match found {
+        match self.mob_idle_observation_asked(mob_id).await? {
+            HostedMobIdleAsked::Answered(observed) => Ok(observed),
+            HostedMobIdleAsked::ActorRefused(refused) => Err(refused),
+        }
+    }
+
+    /// [`Self::mob_idle_observation`], with the refusal of the actor that
+    /// serves the mob kept apart from the read's own refusals. `Err` is the
+    /// read's own: the owner check, or a set that stood down. An actor that
+    /// refused the read or could not be asked, while it still serves the
+    /// mob, is [`HostedMobIdleAsked::ActorRefused`].
+    async fn mob_idle_observation_asked(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<HostedMobIdleAsked, MobError> {
+        // What the set's records say without an actor's answer. `None` for
+        // a mob that is served: its actor is asked. Besides the set the id
+        // is in, two things a record already holds are read: a record's
+        // stop for a mob that is not loaded, and the kept record of a
+        // destroy this state ran, when no live record names the id
+        // ([`MobMcpState::mob_destroyed_here`]'s read). Nothing is opened
+        // or loaded for either, and both are read only by a caller that
+        // passed the owner check below.
+        fn of_the_record(
+            hosted: &hosted_set::HostedStores,
+            mob_id: &MobId,
+            complete: bool,
+        ) -> Option<HostedMobIdle> {
+            match hosted.hosted(mob_id) {
                 hosted_set::Hosted::Managed(_) => None,
                 hosted_set::Hosted::Unloading => Some(HostedMobIdle::Unloading),
                 hosted_set::Hosted::Held(_) => Some(HostedMobIdle::Held),
                 hosted_set::Hosted::Quarantined(_) => Some(HostedMobIdle::Quarantined),
+                hosted_set::Hosted::Dormant if hosted.stopped_unloaded(mob_id) => {
+                    Some(HostedMobIdle::DormantStopped)
+                }
                 hosted_set::Hosted::Dormant => Some(HostedMobIdle::Dormant),
                 hosted_set::Hosted::Loading => Some(HostedMobIdle::Loading),
-                hosted_set::Hosted::Absent if complete => Some(HostedMobIdle::Absent),
-                hosted_set::Hosted::Absent => Some(HostedMobIdle::SetIncomplete),
+                hosted_set::Hosted::Absent if !complete => Some(HostedMobIdle::SetIncomplete),
+                hosted_set::Hosted::Absent
+                    if hosted.destroyed_here(mob_id) && !hosted.knows(mob_id) =>
+                {
+                    Some(HostedMobIdle::Destroyed)
+                }
+                hosted_set::Hosted::Absent => Some(HostedMobIdle::Absent),
             }
         }
         self.require_console_owner(ControlScope::List)?;
@@ -13615,11 +13965,10 @@ impl MobMcpState {
         // guard is not held over the actor's answer.
         let handle = {
             let hosted = self.hosted.read().await;
-            let found = hosted.hosted(mob_id);
-            if let Some(answer) = of_the_record(&found, self.hosted.all_mobs_known()) {
-                return Ok(answer);
+            if let Some(answer) = of_the_record(&hosted, mob_id, self.hosted.all_mobs_known()) {
+                return Ok(HostedMobIdleAsked::Answered(answer));
             }
-            match found {
+            match hosted.hosted(mob_id) {
                 hosted_set::Hosted::Managed(store) => match store.handle() {
                     Some(handle) => {
                         handle
@@ -13630,9 +13979,9 @@ impl MobMcpState {
                     }
                     // Managed with no handle to hand out: its unload was
                     // admitted in this step.
-                    None => return Ok(HostedMobIdle::Unloading),
+                    None => return Ok(HostedMobIdleAsked::Answered(HostedMobIdle::Unloading)),
                 },
-                _ => return Ok(HostedMobIdle::Changed),
+                _ => return Ok(HostedMobIdleAsked::Answered(HostedMobIdle::Changed)),
             }
         };
         let actor = handle.actor_task_watch();
@@ -13655,10 +14004,63 @@ impl MobMcpState {
         // record's answer now is the answer, and never that actor's.
         let hosted = self.hosted.read().await;
         if hosted.serves_actor(mob_id, &actor) {
-            return observed.map(HostedMobIdle::Observed);
+            return Ok(match observed {
+                Ok(observation) => {
+                    HostedMobIdleAsked::Answered(HostedMobIdle::Observed(observation))
+                }
+                Err(refused) => HostedMobIdleAsked::ActorRefused(refused),
+            });
         }
-        let found = hosted.hosted(mob_id);
-        Ok(of_the_record(&found, self.hosted.all_mobs_known()).unwrap_or(HostedMobIdle::Changed))
+        Ok(HostedMobIdleAsked::Answered(
+            of_the_record(&hosted, mob_id, self.hosted.all_mobs_known())
+                .unwrap_or(HostedMobIdle::Changed),
+        ))
+    }
+
+    /// The `mob/standing` answer for `mob_id`: [`Self::mob_idle_observation`]
+    /// in the wire's words, waited for no longer than
+    /// [`MOB_STANDING_ANSWER_BOUND`].
+    ///
+    /// The observation is one command on the mob's actor loop and waits
+    /// behind the command the actor is running. Past the bound the answer
+    /// is `unknown` with the cause `observation_timed_out` and no counts:
+    /// the ask is dropped, the actor answers into nothing, and nothing was
+    /// changed. An actor that refuses the read or cannot be asked, while
+    /// it still serves the mob, answers `unknown` with the cause
+    /// `observation_failed` and no counts, as [`MobStandingView::ask`]
+    /// answers for a handle: nothing of the actor's error is given. Only
+    /// the read's own refusals stay errors: the owner check, and a set
+    /// that stood down, which refuses every read.
+    pub async fn mob_standing(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_contracts::MobStandingResult, MobError> {
+        match tokio::time::timeout(
+            MOB_STANDING_ANSWER_BOUND,
+            self.mob_idle_observation_asked(mob_id),
+        )
+        .await
+        {
+            Ok(Ok(HostedMobIdleAsked::Answered(observed))) => {
+                Ok(wire_mob_standing(mob_id, &observed))
+            }
+            Ok(Ok(HostedMobIdleAsked::ActorRefused(_))) => Ok(MobStandingWords::unanswered(
+                meerkat_contracts::WireMobUnknownCause::ObservationFailed,
+            )
+            .into_wire(mob_id)),
+            Ok(Err(refused)) => Err(refused),
+            Err(_) => {
+                // The owner check is the read's first statement and never
+                // waits, so a caller that reaches the bound has passed it;
+                // it is asked again so that this answer cannot be given to
+                // anyone else.
+                self.require_console_owner(ControlScope::List)?;
+                Ok(MobStandingWords::unanswered(
+                    meerkat_contracts::WireMobUnknownCause::ObservationTimedOut,
+                )
+                .into_wire(mob_id))
+            }
+        }
     }
 
     /// Submit a unit of work to a mob member through the work-lane.
@@ -17873,6 +18275,16 @@ pub fn wire_mob_list_result(inventory: &MobInventory) -> meerkat_contracts::MobL
             .map(wire_quarantined_mob_row)
             .collect(),
     }
+}
+
+/// The `mob/standing` answer from one observation of a hosted mob
+/// ([`MobMcpState::mob_idle_observation`]): the words [`MobStandingView`]
+/// renders, without its sentence.
+pub fn wire_mob_standing(
+    mob_id: &MobId,
+    observed: &HostedMobIdle,
+) -> meerkat_contracts::MobStandingResult {
+    MobStandingWords::of(observed).into_wire(mob_id)
 }
 
 /// How an explicit retry of a quarantined mob's restore ended, on the wire.
@@ -48659,6 +49071,337 @@ mod tests {
             assert!(
                 refused.is_err(),
                 "a set that stood down observes nothing: {refused:?}"
+            );
+        }
+
+        /// The console principal of a state that is not the owner's, over
+        /// `root`: it holds no scope.
+        fn viewer_state(svc: &Arc<MockSessionSvc>, root: &std::path::Path) -> MobMcpState {
+            MobMcpState::new(
+                svc.clone(),
+                MobControlPrincipal::External(
+                    meerkat_core::auth::PrincipalId::new("standing-viewer").expect("principal"),
+                ),
+            )
+            .expect("runtime custody")
+            .with_persistent_storage_root(Some(root.to_path_buf()))
+            .with_mob_restore_policy(MobRestorePolicy::OnDemand)
+        }
+
+        /// Whether `answer` is the refusal every read of the set gives a
+        /// principal without the list scope: the typed denial, which names
+        /// the scope and nothing of the mob.
+        fn is_the_list_denial(answer: &Result<HostedMobIdle, MobError>) -> bool {
+            matches!(
+                answer,
+                Err(MobError::ScopeDenied(denial))
+                    if denial.required == ControlScope::List && denial.presented.is_empty()
+            )
+        }
+
+        /// A mob that is not loaded and whose record says it is stopped
+        /// reads `DormantStopped`, the wire's `stopped` with no counts,
+        /// from the record alone: no store is opened and nothing is loaded.
+        /// The controls: a mob that was not stopped reads `Dormant` beside
+        /// it; a mob stopped in an earlier process reads `Dormant` while
+        /// this state's record has not read its store's stop, the
+        /// observation opens no store to find out, and the mob reads
+        /// `DormantStopped` once a read that opens the store anyway has
+        /// read it; a principal that is not the console owner is refused
+        /// for the stopped mob as for an id nothing names.
+        #[tokio::test]
+        async fn a_mob_that_is_not_loaded_reads_stopped_only_when_its_record_says_so() {
+            let svc = Arc::new(MockSessionSvc::new());
+            let root = tempfile::tempdir().expect("tempdir");
+            let lazy = lazy_state(&svc, root.path());
+            let stopped = lazy
+                .mob_create_definition(explicit_definition("observed-stopped"))
+                .await
+                .expect("create the mob that is stopped");
+            let running = lazy
+                .mob_create_definition(explicit_definition("observed-not-stopped"))
+                .await
+                .expect("create the mob that runs");
+            lazy.mob_stop(&stopped).await.expect("stop the mob");
+            assert_eq!(
+                sorted(lazy.unload_idle_mobs().await),
+                sorted(vec![stopped.clone(), running.clone()]),
+                "both idle mobs unload, the stopped one too"
+            );
+            let opens = lazy.store_opens_for_test();
+
+            assert_eq!(
+                idle_observed(&lazy, &stopped).await,
+                HostedMobIdle::DormantStopped
+            );
+            assert_eq!(idle_observed(&lazy, &running).await, HostedMobIdle::Dormant);
+            let answer = lazy
+                .mob_standing(&stopped)
+                .await
+                .expect("the standing of the stopped mob");
+            let answer = serde_json::to_value(&answer).expect("the answer as json");
+            println!("stopped and not loaded: {answer}");
+            assert_eq!(
+                answer,
+                serde_json::json!({ "mob_id": "observed-stopped", "standing": "stopped" })
+            );
+            assert_eq!(
+                lazy.store_opens_for_test(),
+                opens,
+                "no store was opened for the answers"
+            );
+            assert!(
+                managed_ids(&inventory(&lazy).await).is_empty(),
+                "no observation loaded a mob"
+            );
+
+            let viewer = viewer_state(&svc, root.path());
+            let denied = viewer.mob_idle_observation(&stopped).await;
+            assert!(is_the_list_denial(&denied), "{denied:?}");
+            assert!(is_the_list_denial(
+                &viewer
+                    .mob_idle_observation(&MobId::from("observed-by-nobody"))
+                    .await
+            ));
+
+            // The record of a later process has not read the stop yet.
+            let other_root = tempfile::tempdir().expect("tempdir");
+            let earlier = mobs_of_an_earlier_process_some_stopped(
+                &svc,
+                other_root.path(),
+                &["observed-stopped-earlier"],
+                &["observed-stopped-earlier"],
+            )
+            .await;
+            let later = lazy_state(&svc, other_root.path());
+            inventory(&later).await;
+            assert_eq!(
+                idle_observed(&later, &earlier[0]).await,
+                HostedMobIdle::Dormant,
+                "a record that has not read the stop does not say stopped"
+            );
+            assert_eq!(
+                later.store_opens_for_test(),
+                0,
+                "the observation opens no store to find out"
+            );
+            later
+                .unloaded_mob_creation(&earlier[0])
+                .await
+                .expect("the read of one store's creation record");
+            assert_eq!(
+                idle_observed(&later, &earlier[0]).await,
+                HostedMobIdle::DormantStopped,
+                "the read that opened the store read the stop"
+            );
+        }
+
+        /// The stated limit of the set's record: a mob that completed and
+        /// was then unloaded reads `Dormant`, the wire's `dormant`, not
+        /// finished. Its completion is in its store, which the read does
+        /// not open. The control: while the same mob is loaded its actor
+        /// answers `finished` with `completed`, before the unload and
+        /// again once a lookup has loaded it.
+        #[tokio::test]
+        async fn a_mob_that_completed_and_was_unloaded_reads_dormant_until_it_is_loaded() {
+            let svc = Arc::new(MockSessionSvc::new());
+            let root = tempfile::tempdir().expect("tempdir");
+            let lazy = lazy_state(&svc, root.path());
+            inventory(&lazy).await;
+            let completed = lazy
+                .mob_create_definition(explicit_definition("observed-completed"))
+                .await
+                .expect("create the mob that completes");
+            lazy.mob_complete(&completed)
+                .await
+                .expect("complete the mob");
+            let standing = |state: Arc<MobMcpState>, mob_id: MobId| async move {
+                serde_json::to_value(
+                    state
+                        .mob_standing(&mob_id)
+                        .await
+                        .expect("the standing of the completed mob"),
+                )
+                .expect("the answer as json")
+            };
+            let while_loaded = standing(Arc::clone(&lazy), completed.clone()).await;
+            println!("completed and loaded: {while_loaded}");
+            assert_eq!(while_loaded["standing"], "finished", "{while_loaded}");
+            assert_eq!(while_loaded["reason"], "completed", "{while_loaded}");
+
+            assert_eq!(
+                lazy.unload_idle_mobs().await,
+                vec![completed.clone()],
+                "a completed mob with nothing in flight unloads"
+            );
+            let opens = lazy.store_opens_for_test();
+            assert_eq!(
+                idle_observed(&lazy, &completed).await,
+                HostedMobIdle::Dormant,
+                "the record keeps no completion: not loaded, it reads dormant"
+            );
+            let unloaded = standing(Arc::clone(&lazy), completed.clone()).await;
+            println!("completed and not loaded: {unloaded}");
+            assert_eq!(
+                unloaded,
+                serde_json::json!({ "mob_id": "observed-completed", "standing": "dormant" })
+            );
+            assert_eq!(
+                lazy.store_opens_for_test(),
+                opens,
+                "no store was opened to find the completion"
+            );
+
+            drop(
+                lazy.handle_for(&completed)
+                    .await
+                    .expect("a lookup loads the completed mob"),
+            );
+            let loaded_again = standing(Arc::clone(&lazy), completed.clone()).await;
+            println!("completed and loaded again: {loaded_again}");
+            assert_eq!(loaded_again["standing"], "finished", "{loaded_again}");
+            assert_eq!(loaded_again["reason"], "completed", "{loaded_again}");
+        }
+
+        /// An id whose mob this state destroyed reads `Destroyed`, the
+        /// wire's `finished` with `destroyed` and no counts, from the kept
+        /// record of the destroy: no store is opened and nothing is loaded.
+        /// The controls: an id nothing names reads `Absent` beside it; a
+        /// state that starts over the same storage afterwards (a restart)
+        /// holds no such record and reads `Absent`; and a principal that is
+        /// not the console owner is refused for the destroyed id as for an
+        /// id nothing names.
+        #[tokio::test]
+        async fn a_mob_this_state_destroyed_reads_finished_until_the_state_is_restarted() {
+            let svc = Arc::new(MockSessionSvc::new());
+            let root = tempfile::tempdir().expect("tempdir");
+            let lazy = lazy_state(&svc, root.path());
+            inventory(&lazy).await;
+            let destroyed = lazy
+                .mob_create_definition(explicit_definition("observed-destroyed"))
+                .await
+                .expect("create the mob that is destroyed");
+            let served = idle_observed(&lazy, &destroyed).await;
+            assert!(
+                matches!(served, HostedMobIdle::Observed(_)),
+                "while it is served its actor answers: {served:?}"
+            );
+            lazy.mob_destroy(&destroyed).await.expect("destroy the mob");
+            let opens = lazy.store_opens_for_test();
+
+            assert_eq!(
+                idle_observed(&lazy, &destroyed).await,
+                HostedMobIdle::Destroyed
+            );
+            assert_eq!(
+                idle_observed(&lazy, &MobId::from("observed-never-there")).await,
+                HostedMobIdle::Absent,
+                "an id nothing names is absent, not finished"
+            );
+            let answer = lazy
+                .mob_standing(&destroyed)
+                .await
+                .expect("the standing of the destroyed mob");
+            let answer = serde_json::to_value(&answer).expect("the answer as json");
+            println!("destroyed by this state: {answer}");
+            assert_eq!(
+                answer,
+                serde_json::json!({
+                    "mob_id": "observed-destroyed",
+                    "standing": "finished",
+                    "reason": "destroyed",
+                })
+            );
+            assert_eq!(
+                lazy.store_opens_for_test(),
+                opens,
+                "no store was opened for the answers"
+            );
+            assert!(
+                managed_ids(&inventory(&lazy).await).is_empty(),
+                "no observation loaded a mob"
+            );
+
+            let viewer = viewer_state(&svc, root.path());
+            let denied = viewer.mob_idle_observation(&destroyed).await;
+            assert!(is_the_list_denial(&denied), "{denied:?}");
+
+            // A restart: the record of the destroy is this state's own.
+            drop(lazy);
+            let restarted = lazy_state(&svc, root.path());
+            inventory(&restarted).await;
+            let after = idle_observed(&restarted, &destroyed).await;
+            println!("after a restart: {after:?}");
+            assert_eq!(
+                after,
+                HostedMobIdle::Absent,
+                "after a restart nothing says the mob was destroyed"
+            );
+        }
+
+        /// The observation of a mob that is not loaded restores nothing: it
+        /// answers `Dormant`, once and again, and the set's records and the
+        /// count of stores opened read the same before and after it. The
+        /// control: a load in the observation's place changes each of those
+        /// reads, so each of them is able to fail, and the mob is then
+        /// answered by its actor.
+        #[tokio::test]
+        async fn an_idle_observation_of_a_mob_that_is_not_loaded_restores_nothing() {
+            let svc = Arc::new(MockSessionSvc::new());
+            let root = tempfile::tempdir().expect("tempdir");
+            let mobs =
+                mobs_of_an_earlier_process(&svc, root.path(), &["observed-not-restored"]).await;
+            let lazy = lazy_state(&svc, root.path());
+
+            let before = inventory(&lazy).await;
+            assert!(
+                managed_ids(&before).is_empty(),
+                "nothing is loaded: {before:?}"
+            );
+            assert_eq!(before.dormant, mobs, "the mob is known and not loaded");
+            let opens = lazy.store_opens_for_test();
+
+            assert_eq!(idle_observed(&lazy, &mobs[0]).await, HostedMobIdle::Dormant);
+            assert_eq!(
+                idle_observed(&lazy, &mobs[0]).await,
+                HostedMobIdle::Dormant,
+                "a second observation answers as the first"
+            );
+            let after = inventory(&lazy).await;
+            assert_eq!(
+                managed_ids(&after),
+                managed_ids(&before),
+                "the observation loaded nothing"
+            );
+            assert_eq!(
+                after.dormant, before.dormant,
+                "the mob that is not loaded is still not loaded"
+            );
+            assert_eq!(
+                lazy.store_opens_for_test(),
+                opens,
+                "the observation opened no store"
+            );
+
+            drop(lazy.handle_for(&mobs[0]).await.expect("load the mob"));
+            let loaded = inventory(&lazy).await;
+            assert_eq!(
+                managed_ids(&loaded),
+                mobs,
+                "the load, unlike the observation, loads the mob"
+            );
+            assert!(
+                !loaded.dormant.contains(&mobs[0]),
+                "the loaded mob is no longer listed as not loaded: {loaded:?}"
+            );
+            assert!(
+                lazy.store_opens_for_test() > opens,
+                "the load, unlike the observation, opens the mob's store"
+            );
+            let served = idle_observed(&lazy, &mobs[0]).await;
+            assert!(
+                matches!(served, HostedMobIdle::Observed(_)),
+                "a mob that is loaded is answered by its actor: {served:?}"
             );
         }
 

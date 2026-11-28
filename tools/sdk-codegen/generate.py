@@ -210,6 +210,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "SupervisorRotationReportWire",
     "MobRotateSupervisorResult",
     "MobRestoreRetryResult",
+    "MobStandingResult",
+    "WireMobStandingCounts",
     "MobClaimCallbackRouteParams",
     "MobClaimCallbackRouteResult",
     "MobSubmitWorkParams",
@@ -763,6 +765,10 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     # how a restore retry ended.
     "WireMobQuarantineClass",
     "WireMobRestoreRetryOutcome",
+    # Where a mob stands (`mob/standing`): three vocabularies that may grow.
+    "WireMobStanding",
+    "WireMobStandingReason",
+    "WireMobUnknownCause",
     "WireMobRunStatus",
     # Closed usage-attribution vocabulary on the run-result accounting block.
     # An alias, not a contract type: the object emitter would turn a
@@ -951,6 +957,8 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         # A `mob/list` row's failure: keep it typed instead of widening it to
         # an opaque object map.
         "WireMobLifecycleFailure",
+        # The four counts of a `mob/standing` answer: keep `counts` typed.
+        "WireMobStandingCounts",
         *BRIDGE_NESTED_CONTRACT_TYPES,
         *BRIDGE_NESTED_ALIAS_TYPES,
         *BRIDGE_REJECTION_NESTED_ALIAS_TYPES,

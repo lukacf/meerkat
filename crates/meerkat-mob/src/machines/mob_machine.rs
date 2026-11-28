@@ -2605,6 +2605,47 @@ impl MobMachineState {
         }
     }
 
+    /// The work this state records as held or owed and that the idle
+    /// close's counts do not read, for an idle observation
+    /// ([`crate::MobIdleObservation::machine_held`]). A read of existing
+    /// fields only: each count is one fact of this state, taken as it
+    /// stands, and nothing is written.
+    pub fn held_work_for_idle_observation(&self) -> crate::MobMachineHeld {
+        crate::MobMachineHeld {
+            members_retiring: self
+                .member_state_markers
+                .values()
+                .filter(|marker| **marker == MobMemberState::Retiring)
+                .count(),
+            flow_runs_open: self
+                .run_status
+                .values()
+                .filter(|status| matches!(status, FlowRunStatus::Pending | FlowRunStatus::Running))
+                .count(),
+            boot_work_owed: self.member_boot_obligation_owed.len(),
+            placed_obligations: self
+                .pending_placed_completion_outcomes
+                .len()
+                .saturating_add(self.pending_remote_turn_outcomes.len()),
+            wiring_obligations: self
+                .pending_route_installs
+                .len()
+                .saturating_add(self.pending_recipient_trust.len())
+                .saturating_add(self.owed_edge_repairs.len()),
+            declared_apply_open: self.declared_apply_open,
+            constructions_held: self
+                .identity_entry_constructions_held
+                .len()
+                .saturating_add(self.identity_entry_constructions_activating.len()),
+            adaptive_run_open: self.adaptive_active_run.is_some(),
+            host_binds_requested: self
+                .host_bind_phase
+                .values()
+                .filter(|phase| **phase == HostBindPhase::Requested)
+                .count(),
+        }
+    }
+
     /// Whether a lifecycle operation of `agent_identity`'s member is in
     /// flight: its spawn, a wake, its retirement, its identity entry's
     /// removal or archive, or the identity's held construction (held or

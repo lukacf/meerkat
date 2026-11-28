@@ -233,6 +233,7 @@ from .types import (
     MobSpawnManyResult,
     MobSpawnParams,
     MobSpawnResult,
+    MobStandingResult,
     MobStatusResult,
     MobStopMemberRunParams,
     MobStopMemberRunResult,
@@ -1640,6 +1641,14 @@ class RpcRequest(Protocol):
         params: MobIdParams,
         /,
     ) -> Awaitable[MobRestoreRetryResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/standing"],
+        params: MobIdParams,
+        /,
+    ) -> Awaitable[MobStandingResult]: ...
 
     @overload
     def __call__(

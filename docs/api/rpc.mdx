@@ -245,6 +245,7 @@ of this full catalog.
 | `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
 | `mob/rotate_supervisor` | Mob | `MobIdParams` | `MobRotateSupervisorResult` | Rotate the supervisor bridge for all members of a mob (mob feature) |
 | `mob/restore_retry` | Mob | `MobIdParams` | `MobRestoreRetryResult` | Re-attempt the restore of a quarantined persisted mob, for example after a repair (mob feature) |
+| `mob/standing` | Mob | `MobIdParams` | `MobStandingResult` | Where a mob stands: busy, finished, closed, stopped or unknown, or why it is not served; reads without loading the mob and never answers idle (mob feature) |
 | `mob/claim_callback_route` | Mob | `MobClaimCallbackRouteParams` | `MobClaimCallbackRouteResult` | Bind a mob's member callback route to this connection with the mob's claim token (mob feature) |
 | `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
 | `mob/conclude_objective` | Mob | `MobConcludeObjectiveParams` | `MobConcludeObjectiveResult` | Explicitly conclude a durable kickoff objective (mob feature) |

@@ -1494,6 +1494,303 @@ async fn an_idle_observation_reads_native_accepted_work() {
     );
 }
 
+/// The standing of a quiet running mob is unknown, never idle, and it names
+/// the evidence the observation did not read; the released `is_idle()` of
+/// the same observation keeps its meaning.
+#[tokio::test]
+async fn a_quiet_running_mob_stands_unknown_and_names_what_was_not_read() {
+    use crate::{MobStanding, MobUnknownCause};
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let quiet = handle.observe_idle().await.expect("observe a quiet mob");
+    assert!(quiet.is_idle(), "the released read is unchanged: {quiet:?}");
+    assert_eq!(quiet.phase, MobState::Running, "{quiet:?}");
+    assert!(quiet.machine_held.is_none(), "{quiet:?}");
+
+    let MobStanding::Unknown(unread) = quiet.standing() else {
+        panic!("a quiet running mob stands unknown: {quiet:?}");
+    };
+    assert_eq!(unread, quiet.unread);
+    let causes: Vec<MobUnknownCause> = unread.causes().collect();
+    assert!(
+        causes.contains(&MobUnknownCause::HandoffsNotTracked)
+            && causes.contains(&MobUnknownCause::PeerDeliveryNotTraced),
+        "no observation of this release reads these two: {causes:?}"
+    );
+    assert_eq!(
+        unread.no_runtime_adapter,
+        causes.contains(&MobUnknownCause::NoRuntimeAdapter),
+        "the missing-adapter cause stands exactly when the adapter is missing: {unread:?}"
+    );
+    assert_eq!(quiet.standing().as_str(), "unknown");
+    assert!(
+        handle.admission_closed().borrow().is_none(),
+        "the observation closed nothing"
+    );
+}
+
+/// A mob with a runtime adapter does not carry the missing-adapter cause;
+/// its quiet standing is still unknown, for the evidence no observation of
+/// this release reads.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn a_quiet_mob_with_a_runtime_adapter_stands_unknown_without_that_cause() {
+    use crate::{MobStanding, MobUnknownCause};
+
+    let (handle, _service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    let quiet = observed_idle(&handle).await;
+    let MobStanding::Unknown(unread) = quiet.standing() else {
+        panic!("a quiet running mob stands unknown: {quiet:?}");
+    };
+    assert!(!unread.no_runtime_adapter, "{unread:?}");
+    let causes: Vec<MobUnknownCause> = unread.causes().collect();
+    assert!(
+        !causes.contains(&MobUnknownCause::NoRuntimeAdapter)
+            && causes.contains(&MobUnknownCause::HandoffsNotTracked),
+        "{causes:?}"
+    );
+}
+
+/// A completed mob stands finished. The released `is_idle()` of the same
+/// observation is true, as it was: it reads the counts and the close only.
+#[tokio::test]
+async fn a_completed_mob_stands_finished_where_the_released_read_says_idle() {
+    use crate::{MobFinished, MobStanding};
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.complete().await.expect("complete the mob");
+
+    let completed = handle
+        .observe_idle()
+        .await
+        .expect("observe a completed mob");
+    assert_eq!(completed.phase, MobState::Completed, "{completed:?}");
+    assert!(
+        completed.is_idle(),
+        "the released read keeps its meaning: {completed:?}"
+    );
+    assert_eq!(
+        completed.standing(),
+        MobStanding::Finished(MobFinished::Completed),
+        "{completed:?}"
+    );
+    assert_eq!(completed.standing().as_str(), "finished");
+}
+
+/// A stopped mob stands stopped, and unknown again once it is resumed: a
+/// pause is neither finished nor idle.
+#[tokio::test]
+async fn a_stopped_mob_stands_stopped_until_it_is_resumed() {
+    use crate::MobStanding;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.stop().await.expect("stop");
+    let stopped = observed_idle(&handle).await;
+    assert_eq!(stopped.phase, MobState::Stopped, "{stopped:?}");
+    assert_eq!(stopped.standing(), MobStanding::Stopped, "{stopped:?}");
+
+    handle.resume().await.expect("resume");
+    let resumed = observed_idle(&handle).await;
+    assert!(
+        matches!(resumed.standing(), MobStanding::Unknown(_)),
+        "a resumed quiet mob stands unknown again: {resumed:?}"
+    );
+}
+
+/// A mob whose admission was closed because it was idle stands closed with
+/// that reason: closed, not finished and not idle.
+#[tokio::test]
+async fn a_mob_closed_idle_stands_closed_with_its_reason() {
+    use crate::MobStanding;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    assert_eq!(
+        handle.close_if_idle().await.expect("close if idle"),
+        CloseIfIdleOutcome::Closed
+    );
+    let closed = handle.observe_idle().await.expect("observe a closed mob");
+    assert!(!closed.is_idle(), "{closed:?}");
+    assert_eq!(
+        closed.standing(),
+        MobStanding::Closed(MobAdmissionCloseReason::IdleClose),
+        "{closed:?}"
+    );
+}
+
+/// A spawn in flight stands busy, and the mob stands unknown again once the
+/// spawn has completed.
+#[tokio::test]
+async fn a_spawn_in_flight_stands_busy() {
+    use crate::MobStanding;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (release, mut entered) = hold_spawn_entered("standing-busy");
+    let spawn = enqueue_spawn(&handle, "standing-busy").await;
+    spawn_entered(&mut entered).await;
+
+    let busy = handle.observe_idle().await.expect("observe a busy mob");
+    assert_eq!(busy.standing(), MobStanding::Busy, "{busy:?}");
+    assert_eq!(busy.standing().as_str(), "busy");
+
+    release.add_permits(1);
+    reply(spawn).await.expect("the held spawn completes");
+    let after = observed_idle(&handle).await;
+    assert!(
+        matches!(after.standing(), MobStanding::Unknown(_)),
+        "{after:?}"
+    );
+}
+
+/// The typed standing never contradicts the released `is_idle()`, over
+/// every phase, with and without counted work, machine-held work and a
+/// close: counted or machine-held work is busy; a quiet running mob with
+/// admission open is unknown; an ended lifecycle is finished; nothing is
+/// ever both idle by the released read and busy by the standing.
+#[test]
+fn the_standing_agrees_with_the_released_idle_read() {
+    use crate::MobUnknownCause;
+    use crate::{MobBusy, MobFinished, MobIdleObservation, MobMachineHeld, MobStanding, MobUnread};
+
+    // Each unread fact stands as its own cause, and only as its own.
+    let everything_unread = MobUnread {
+        no_runtime_adapter: true,
+        members_placed: 2,
+        sessions_not_readable: 1,
+        peer_delivery_not_traced: true,
+        handoffs_not_tracked: true,
+    };
+    assert_eq!(
+        everything_unread.causes().collect::<Vec<_>>(),
+        [
+            MobUnknownCause::NoRuntimeAdapter,
+            MobUnknownCause::MembersPlaced,
+            MobUnknownCause::SessionsNotReadable,
+            MobUnknownCause::PeerDeliveryNotTraced,
+            MobUnknownCause::HandoffsNotTracked,
+        ]
+    );
+    let only_the_adapter = MobUnread {
+        no_runtime_adapter: true,
+        members_placed: 0,
+        sessions_not_readable: 0,
+        peer_delivery_not_traced: false,
+        handoffs_not_tracked: false,
+    };
+    assert_eq!(
+        only_the_adapter.causes().collect::<Vec<_>>(),
+        [MobUnknownCause::NoRuntimeAdapter]
+    );
+    assert_eq!(
+        MobUnknownCause::NoRuntimeAdapter.as_str(),
+        "no_runtime_adapter"
+    );
+
+    let unread = MobUnread {
+        no_runtime_adapter: false,
+        members_placed: 0,
+        sessions_not_readable: 0,
+        peer_delivery_not_traced: true,
+        handoffs_not_tracked: true,
+    };
+    let working = MobBusy {
+        runs: 1,
+        ..MobBusy::default()
+    };
+    let owing = MobMachineHeld {
+        boot_work_owed: 1,
+        ..MobMachineHeld::default()
+    };
+    for phase in [
+        MobState::Creating,
+        MobState::Running,
+        MobState::Stopped,
+        MobState::Completed,
+        MobState::Destroyed,
+    ] {
+        for busy in [MobBusy::default(), working] {
+            for machine_held in [MobMachineHeld::default(), owing] {
+                for admission_closed in [None, Some(MobAdmissionCloseReason::StandDown)] {
+                    let observed = MobIdleObservation {
+                        busy,
+                        admission_closed,
+                        phase,
+                        machine_held,
+                        unread,
+                    };
+                    let standing = observed.standing();
+                    let quiet = busy.is_idle() && machine_held.is_none();
+                    let expected = if !quiet || phase == MobState::Creating {
+                        MobStanding::Busy
+                    } else {
+                        match (phase, admission_closed) {
+                            (MobState::Completed, _) => {
+                                MobStanding::Finished(MobFinished::Completed)
+                            }
+                            (MobState::Destroyed, _) => {
+                                MobStanding::Finished(MobFinished::Destroyed)
+                            }
+                            (_, Some(reason)) => MobStanding::Closed(reason),
+                            (MobState::Stopped, None) => MobStanding::Stopped,
+                            _ => MobStanding::Unknown(unread),
+                        }
+                    };
+                    assert_eq!(standing, expected, "{observed:?}");
+                    if !busy.is_idle() {
+                        assert!(!observed.is_idle(), "{observed:?}");
+                        assert_eq!(standing, MobStanding::Busy, "{observed:?}");
+                    }
+                    if observed.is_idle() {
+                        assert!(
+                            !matches!(standing, MobStanding::Closed(_)),
+                            "an observation the released read calls idle has admission open: \
+                             {observed:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The public member read keeps a finished member, a seated one and an
+/// identity the mob has no record of apart, from the mob machine alone.
+#[tokio::test]
+async fn a_member_reads_completed_active_or_unknown_from_the_machine() {
+    use crate::MobMemberStatus;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let stranger = handle
+        .member_status(&AgentIdentity::from("standing-nobody"))
+        .await
+        .expect("the read of an identity the mob has no record of");
+    assert_eq!(stranger.status, MobMemberStatus::Unknown);
+    assert!(stranger.is_final);
+
+    handle
+        .spawn_spec(worker_spec("standing-member"))
+        .await
+        .expect("seat a member");
+    let member = AgentIdentity::from("standing-member");
+    let seated = handle
+        .member_status(&member)
+        .await
+        .expect("a seated member");
+    assert_eq!(seated.status, MobMemberStatus::Active);
+    assert!(!seated.is_final);
+
+    handle
+        .retire(member.clone())
+        .await
+        .expect("retire the member");
+    let retired = handle
+        .member_status(&member)
+        .await
+        .expect("a retired member");
+    assert_eq!(retired.status, MobMemberStatus::Completed);
+    assert!(retired.is_final);
+}
+
 #[test]
 fn live_control_is_classified_by_verb() {
     use super::super::bridge_protocol::BridgeLiveControlVerb;

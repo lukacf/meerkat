@@ -179,6 +179,7 @@ from .generated.types import (
     MobRevokeScopesParams,
     MobRestoreRetryResult,
     MobRotateSupervisorResult,
+    MobStandingResult,
     MobRouteInstallsResult,
     MobRunParams,
     MobRunResult,
@@ -3724,6 +3725,29 @@ class MeerkatClient:
         :meth:`list_quarantined_mobs` with its attempts counted.
         """
         return await self._request("mob/restore_retry", {"mob_id": mob_id})
+
+    async def mob_standing(self, mob_id: str) -> MobStandingResult:
+        """Where a mob stands.
+
+        Wraps the ``mob/standing`` RPC. Answers ``{mob_id, standing,
+        reason?, causes?, counts?}``. For a served mob ``standing`` is
+        ``"busy"``, ``"finished"`` (``reason`` ``"completed"`` or
+        ``"destroyed"``), ``"closed"`` (``reason`` says why admission
+        closed; closed is not finished), ``"stopped"`` or ``"unknown"``.
+        No word says idle: a quiet running mob answers ``"unknown"``, and
+        ``causes`` names the evidence the read did not have. ``counts`` are
+        the idle close's four counts, as diagnostics: all four at zero is
+        not idle. A mob that is not served answers why (``"dormant"``,
+        ``"loading"``, ``"unloading"``, ``"held"``, ``"quarantined"``,
+        ``"changed"``, ``"set_incomplete"``, ``"absent"``) without counts;
+        the read loads nothing. A mob whose actor does not answer within
+        the server's bound answers ``"unknown"`` with the cause
+        ``"observation_timed_out"``. The three vocabularies may grow: a
+        word this SDK does not know is returned as sent; treat it as
+        unknown, never as idle. Needs the console owner, as ``mob/list``
+        does.
+        """
+        return await self._request("mob/standing", {"mob_id": mob_id})
 
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
         result = await self._request("mob/status", {"mob_id": mob_id})

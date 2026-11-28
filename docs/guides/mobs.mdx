@@ -1808,6 +1808,7 @@ longer counted (read from the 0.9.14 source, not run on that release).
 | Task | Methods |
 |------|---------|
 | List and inspect mobs | `mob/list`, `mob/status`, `mob/snapshot` |
+| Read where a mob stands (busy, finished, closed, stopped or unknown; never idle) | `mob/standing` (see [Shutdown, destroy and admission](#shutdown-destroy-and-admission-rust-hosts)) |
 | Retry a quarantined mob's restore | `mob/restore_retry` (see [Quarantined mobs and degraded members](#quarantined-mobs-and-degraded-members)) |
 | Inspect roster | `mob/members`, `mob/member_status`, `mob/list_members_matching` |
 | Watch events | `mob/events`, SDK event subscriptions |
@@ -2791,6 +2792,53 @@ The observation does not cover due schedules, deliveries held by another
 owner, or mobs that members created. A peer message is not guaranteed to
 be counted between the actor handing it off and the member accepting it as
 input.
+
+From 0.9.20, `standing()` on the observation says where the mob stands as one
+value, so that a finished mob is not read as a quiet one:
+
+| `MobStanding` | Meaning |
+|---------------|---------|
+| `Busy` | Work is in flight or owed: one of the idle close's four counts, or a fact the mob's machine holds (`machine_held`: a member retiring, a flow run open, boot work owed and others), or the mob is still being created |
+| `Finished(Completed)` / `Finished(Destroyed)` | The mob has finished and takes no more work |
+| `Closed(reason)` | Admission is closed and this actor takes no more work. Closed is not finished |
+| `Stopped` | The mob is stopped: paused until it is resumed |
+| `Unknown(unread)` | Nothing was counted in flight, but the observation cannot say that the mob is idle |
+
+No value says idle. `is_idle()` is unchanged and is also true for a stopped
+mob and for a completed mob with nothing in flight; use `standing()` to tell
+them apart. For `Unknown`, `unread.causes()` names each piece of evidence the
+observation did not read: `no_runtime_adapter`, `members_placed`,
+`sessions_not_readable`, `peer_delivery_not_traced` and
+`handoffs_not_tracked`. The last two are named on every such answer: the
+observation does not follow a peer delivery from its hand-off to its
+admission, and does not count work the actor has handed to a task of its own.
+
+The same answer is on the wire as `mob/standing` (`mob_standing` in the Python
+SDK, `mobStanding` in the TypeScript SDK), which needs the console owner and
+reads without loading the mob: a mob that is not served answers why
+(`dormant`, `loading`, `unloading`, `held`, `quarantined`, `changed`,
+`set_incomplete` or `absent`). Two of a served mob's answers are also given,
+without counts, from the host's own record of a mob that has no actor to ask:
+`stopped` for a mob that is not loaded and that the record says is stopped,
+and `finished` with `destroyed` for a mob this host process destroyed. The
+record reaches no further, which is a limit of this read: a mob that
+completed and was then unloaded reads `dormant`; finished is told only while
+it is loaded or, for a destroy, until this process restarts (after a restart
+a destroyed mob reads `absent`). A stopped mob reads `dormant` until the host
+has read its store's stop; an id that two stores name reads `stopped` when
+either store's record says so, as the inventory lists it. The observation is
+one command on the mob's
+actor loop: if the actor does not answer within five seconds the answer is
+`unknown` with the cause `observation_timed_out`, a typed answer and not an
+error. An actor that refuses the read or cannot be asked reads `unknown`
+with the cause `observation_failed`, on `mob/standing` and in the `standing`
+of `mob_list_members` alike. `mob/standing` answers an error only for the
+read's own refusals: a caller without the list scope, or a host that is
+standing down. The three vocabularies of the answer (`standing`, `reason`, `causes`)
+may grow: keep a word you do not know and treat it as unknown, never as
+idle. An agent with manage scope over a mob reads the same answer as
+`standing` in the result of `mob_list_members` when it passes
+`include_standing: true`; the list does not observe the mob otherwise.
 
 When a mob start's durable recovery fails before the actor admits a command
 (`DurabilityFailStop`), `MobHandle::status` and `MobHandle::resume` return the

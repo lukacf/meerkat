@@ -2167,9 +2167,11 @@ pub enum MobMemberStatus {
     Retiring,
     /// Member failed to restore durable session state and needs repair.
     Broken,
-    /// Member has completed (session archived or not found).
+    /// This incarnation's retirement is recorded: the member has ended and
+    /// takes no more work. The status does not say whether its session was
+    /// archived or was already absent when it retired.
     Completed,
-    /// Member is not in the roster.
+    /// The mob has no record of this identity.
     Unknown,
 }
 
@@ -6871,6 +6873,16 @@ impl MobHandle {
     /// none in a build without the runtime adapter. The step between the
     /// actor's delivery of a peer message and the member's accepted input
     /// is not traced for it.
+    ///
+    /// The answer also carries the mob's lifecycle phase, the work the mob
+    /// machine records as held or owed, and what the observation did not
+    /// read, and [`MobIdleObservation::standing`](super::MobIdleObservation::standing)
+    /// puts them together as one typed answer: busy, finished, closed,
+    /// stopped, or unknown with each piece of evidence it did not read.
+    /// That answer is never "idle" in this release: `is_idle()` keeps its
+    /// meaning (what an idle close would have closed), which is true of a
+    /// Stopped mob and of a Completed one, and does not know what was not
+    /// read.
     ///
     /// It costs what an idle close costs: it runs on the actor's loop and,
     /// when the actor's own counts are idle, asks the runtime of each

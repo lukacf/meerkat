@@ -1132,6 +1132,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobRestoreRetryResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/standing",
+                "Where a mob stands: busy, finished, closed, stopped or unknown, or why it is not served; reads without loading the mob and never answers idle",
+                "MobIdParams",
+                "MobStandingResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/claim_callback_route",
                 "Bind a mob's member callback route to this connection with the mob's claim token",
                 "MobClaimCallbackRouteParams",
@@ -2250,6 +2256,11 @@ mod tests {
                 "mob/restore_retry",
                 Some("MobIdParams"),
                 Some("MobRestoreRetryResult"),
+            ),
+            (
+                "mob/standing",
+                Some("MobIdParams"),
+                Some("MobStandingResult"),
             ),
             (
                 "mob/claim_callback_route",

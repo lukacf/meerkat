@@ -1549,6 +1549,7 @@ async fn initialize_methods_list_complete() {
             "mob/destroy",
             "mob/rotate_supervisor",
             "mob/restore_retry",
+            "mob/standing",
             "mob/claim_callback_route",
             "mob/submit_work",
             "mob/cancel_work",

@@ -148,6 +148,7 @@ import {
   type MonitorsStartResult,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
   type MobRestoreRetryResult,
+  type MobStandingResult,
   type MobRotateSupervisorResult,
   type MobClaimCallbackRouteResult,
   type MobConcludeObjectiveParams,
@@ -3161,6 +3162,28 @@ export class MeerkatClient {
   async mobRestoreRetry(mobId: string): Promise<MobRestoreRetryResult> {
     const result = await this.request("mob/restore_retry", { mob_id: mobId });
     return result as unknown as MobRestoreRetryResult;
+  }
+
+  /**
+   * Where a mob stands. Wraps the `mob/standing` RPC: answers
+   * `{mob_id, standing, reason?, causes?, counts?}`. For a served mob
+   * `standing` is `"busy"`, `"finished"` (`reason` `"completed"` or
+   * `"destroyed"`), `"closed"` (`reason` says why admission closed; closed
+   * is not finished), `"stopped"` or `"unknown"`. No word says idle: a quiet
+   * running mob answers `"unknown"`, and `causes` names the evidence the
+   * read did not have. `counts` are the idle close's four counts, as
+   * diagnostics: all four at zero is not idle. A mob that is not served
+   * answers why (`"dormant"`, `"loading"`, `"unloading"`, `"held"`,
+   * `"quarantined"`, `"changed"`, `"set_incomplete"`, `"absent"`) without
+   * counts; the read loads nothing. A mob whose actor does not answer within
+   * the server's bound answers `"unknown"` with the cause
+   * `"observation_timed_out"`. The three vocabularies may grow: a word this
+   * SDK does not know is returned as sent; treat it as unknown, never as
+   * idle. Needs the console owner, as `mob/list` does.
+   */
+  async mobStanding(mobId: string): Promise<MobStandingResult> {
+    const result = await this.request("mob/standing", { mob_id: mobId });
+    return result as unknown as MobStandingResult;
   }
 
   async mobStatus(mobId: string): Promise<{ mobId: string; status: string }> {

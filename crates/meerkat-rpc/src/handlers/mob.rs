@@ -2332,6 +2332,35 @@ pub async fn handle_restore_retry(
 }
 
 // ---------------------------------------------------------------------------
+// mob/standing
+// ---------------------------------------------------------------------------
+
+/// Where a mob stands: `busy`, `finished`, `closed`, `stopped` or `unknown`
+/// for a served mob, from one observation by its actor, or the word for why
+/// it is not served. The read loads nothing and changes nothing; it never
+/// answers idle. Like `mob/list` it needs the console owner. An actor that
+/// does not answer within the surface's bound reads `unknown` with the
+/// cause `observation_timed_out`.
+pub async fn handle_standing(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_standing(&mob_id).await {
+        Ok(standing) => RpcResponse::success(id, standing),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mob/claim_callback_route
 // ---------------------------------------------------------------------------
 

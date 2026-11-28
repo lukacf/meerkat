@@ -6460,22 +6460,16 @@ class MeerkatClient:
         config-only by design — re-seeding the transcript on every refresh
         would compound the provider conversation by N+1 every call.
 
-        **Identity changes require close + reopen.** Refresh validates that
-        ``model_id`` and ``provider_id`` match the channel's currently-open
-        identity and rejects swaps with a typed adapter-level error — the
-        OpenAI Realtime API does not accept a mutable ``model`` on
-        ``session.update``.
+        Close and reopen to change model or provider identity or replay rewritten
+        history. Refresh does not make those changes in place.
 
-        R4-5 (P3): the result is a typed
-        :class:`meerkat.generated.types.LiveRefreshResult` carrying the
-        generated-authority ``status`` discriminator (today: ``"queued"``).
-        This SDK build accepts the generated status set it was built with and
-        rejects missing or unknown status values until regenerated for a newer
-        contract. Refresh completion is asynchronous (the adapter pump applies
-        the ``session.update`` after the host accepts the queued command); the
-        realtime stream is the source of truth for the actual outcome (failures
-        surface as
-        :class:`meerkat.types.WireLiveAdapterObservation` ``error``).
+        A ``status`` of ``"queued"`` means the host accepted the command. This SDK
+        rejects a missing or unknown status.
+        Queue acceptance does not confirm that the provider applied the update.
+        Neither the WebSocket nor the WebRTC data channel sends a refresh success
+        receipt. A scoped ``command_rejected`` can arrive without closing the channel.
+        A terminal adapter error closes the channel without forwarding that error
+        observation. A disconnect alone does not identify the cause.
         """
         raw = await self._request(
             "live/refresh",

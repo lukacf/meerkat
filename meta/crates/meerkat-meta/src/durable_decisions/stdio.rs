@@ -300,17 +300,26 @@ impl StdioDecisionConnection {
     /// once its row is stored. Each decision is read again right before
     /// its notice and skipped unless it is still open: one that was
     /// decided, withdrawn or passed its deadline since it was read or
-    /// opened is not noticed. For a decision of the reading that read is
-    /// the owner's narrowed one, which records nothing: this task wrote no
-    /// row for a decision it did not see opened, and an expiry it sees
-    /// there is recorded by the decision's executor or by the next read
-    /// that records. Those reads, one for each decision of the reading and
-    /// no list, are all this task calls the store for until its runtime
-    /// opens a decision. A decision the owner opens is read as every read
-    /// of a decision is: it records an expiry it observes, and of an open
-    /// decision it writes nothing. A subscription that fell behind lists
-    /// the open decisions again and reads each. Each decision is pushed at
-    /// most once. What was pushed is this task's own and grows with the
+    /// opened is not noticed. A read the store refuses is made again a few
+    /// times; a decision that still cannot be read is not noticed here,
+    /// and waits for the host's list.
+    ///
+    /// Which of those reads records. For a decision this task did not see
+    /// opened (one of the reading, and one a rescan lists) the read is the
+    /// owner's narrowed one, which records nothing: an expiry it sees is
+    /// left to the decision's executor, where one runs (a launch with a
+    /// roster), and to the next read that records. The one exception is a
+    /// decision the task was told its own runtime opened: that is read
+    /// through the runtime's owner, which records an expiry it observes
+    /// and writes nothing of an open decision.
+    ///
+    /// What it calls the store for: one read for each decision of the
+    /// reading and no list, then one read for each decision its runtime
+    /// opens. A subscription that fell behind lists the open decisions
+    /// again and reads each that was not pushed: that list is of the
+    /// store, so it can name a decision another owner opened, which is
+    /// then noticed like the others. Each decision is pushed at most
+    /// once. What was pushed is this task's own and grows with the
     /// connection's life, as what its lists noticed does: it takes no lock
     /// of the connection, so a slow pipe holds up no list and no decide.
     /// The host's list does not count a push and writes its own notice.
@@ -345,7 +354,8 @@ impl StdioDecisionConnection {
                         missed,
                         "the stdio connection fell behind the decisions its runtime opened; it reads the open decisions again"
                     );
-                    self.push_open_decisions(&owner, &mut pushed).await
+                    // The decisions of a rescan: listed, not seen opened.
+                    self.push_open_decisions(&reads_only, &mut pushed).await
                 }
                 // An opening of a kind this version does not know.
                 _ => true,
@@ -409,8 +419,10 @@ impl StdioDecisionConnection {
     /// decision is read again from the store through `owner`, and only one
     /// that is still open is noticed. An owner narrowed to reads
     /// (`for_candidate_launch`) records nothing by that read; the runtime's
-    /// own owner records an expiry the read observes. Answers `false` once
-    /// the connection can write nothing more.
+    /// own owner records an expiry the read observes. A read the store
+    /// refuses is made again a few times, and a decision that still cannot
+    /// be read is skipped. Answers `false` once the connection can write
+    /// nothing more.
     async fn push_held(
         &self,
         owner: &DurableDecisionService,

@@ -1092,7 +1092,9 @@ actions in the digest-pinned `MEERKAT_BUILDBUDDY_CI_IMAGE` and the next run is
 warm. Every change of `MEERKAT_BUILDBUDDY_CI_IMAGE` starts that cache cold
 again: the image digest is part of the platform's action keys. The full
 nightly set is:
-`workspace-unit` (`make test-unit`), `workspace-int` (`make test-int`),
+`workspace-unit` (`make test-unit`), `workspace-int` (the integration-fast
+tests of `make test-int` as rows, planned by `workspace-int-plan` and
+accounted for by `workspace-int-aggregate`),
 `e2e-fast`, `dense-topology` (`mob-dense-topology.yml`),
 `machine-verify` (bounded TLC, including every non-skipped composition
 witness with its completion proof), `machine-verify-deep` (`make

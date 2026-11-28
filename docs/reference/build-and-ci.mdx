@@ -598,8 +598,9 @@ gh api "repos/OWNER/REPO/check-suites/SUITE_ID/check-runs?per_page=100" \
 Everything pull-request CI deliberately does not run executes daily and on
 demand (`.github/workflows/nightly.yml`) on GitHub-hosted runners:
 
-- the full workspace unit lane (`make test-unit`) and integration-fast lane
-  (`make test-int`), covering every crate rather than the changed packages
+- the full workspace unit lane (`make test-unit`) and the integration-fast
+  tests of `make test-int`, run as rows with an aggregate that accounts for
+  every row, covering every crate rather than the changed packages
 - the deterministic `e2e-fast` lane
 - the 300-member/150-peer dense Mob topology stress
   (`mob-dense-topology.yml`)

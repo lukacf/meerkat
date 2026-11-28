@@ -217,9 +217,9 @@ pub use decisions::{
 };
 pub use durable_decisions::{
     DecisionAttestationRequest, DecisionIngressDeclaration, DecisionIngressDeclarations,
-    DecisionIngressError, DecisionNoticeSink, MetaDecisionDecideParams, MetaDecisionListResult,
-    MetaDecisionNotice, MetaDecisionNoticeEvent, MetaDecisionStatus, MetaDecisionView,
-    RuntimeDecisions, StdioDecisionConnection,
+    DecisionIngressError, DecisionNoticeSink, DecisionOpeningsAtStart, MetaDecisionDecideParams,
+    MetaDecisionListResult, MetaDecisionNotice, MetaDecisionNoticeEvent, MetaDecisionStatus,
+    MetaDecisionView, RuntimeDecisions, StdioDecisionConnection,
 };
 #[allow(deprecated)]
 pub use governance::validate_phase0_governance_contracts;

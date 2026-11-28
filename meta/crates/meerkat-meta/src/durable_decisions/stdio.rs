@@ -5,10 +5,18 @@
 //! host reads, presents and withdraws decisions. It is told of each open
 //! decision at most twice per connection, with the one exception named
 //! below. Once without asking
-//! ([`StdioDecisionConnection::notice_openings`]): the connection writes the
-//! `held` notice of a decision when the runtime's owner opens it, after the
-//! row is stored, and of each decision already open when the connection
-//! starts to serve. And once when it lists it: before a
+//! ([`StdioDecisionConnection::notice_openings_from`]): the connection writes
+//! the `held` notice of a decision when the runtime's owner opens it, after
+//! the row is stored, and of each decision that was open in the store when
+//! the gateway read it at its start ([`DecisionOpeningsAtStart::read`], made
+//! before the gateway reports that it is ready: once the connection serves
+//! it calls the store of its own accord only to read a decision again
+//! right before its notice, and to list the open decisions again when its
+//! subscription fell behind the runtime's openings). A decision that is no
+//! longer open when its notice is due is not noticed. A decision another
+//! process opens in the store after that reading is not noticed without a
+//! list.
+//! And once when it lists it: before a
 //! `meta/decisions/list` answers, the connection writes one
 //! `meta/decisions/notice` for each open decision of the page that no list
 //! of the connection noticed yet, whether or not it was pushed. At a list, a
@@ -58,8 +66,8 @@ use meerkat_runtime::decision::wire::{
     wire_decision_phase, wire_unreadable_decision,
 };
 use meerkat_runtime::decision::{
-    DecisionClock, DecisionError, DecisionListing, DecisionOpening, DecisionWithdrawer,
-    DecisionWriteMode, DurableDecisionService, SystemDecisionClock,
+    DecisionClock, DecisionError, DecisionListing, DecisionOpening, DecisionOpenings,
+    DecisionWithdrawer, DecisionWriteMode, DurableDecisionService, SystemDecisionClock,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -128,7 +136,7 @@ struct StdioOperator {
 
 /// What this connection told its host in its lists. What it pushed without
 /// being asked is kept by the task that pushes
-/// ([`StdioDecisionConnection::notice_openings`]).
+/// ([`StdioDecisionConnection::notice_openings_from`]).
 #[derive(Default)]
 struct ConnectionDecisions {
     /// The decisions a list of it noticed, held or presented.
@@ -145,6 +153,98 @@ enum Presented {
     Skipped,
     /// The connection cannot show anything more; the pass ends.
     Stopped,
+}
+
+/// What a stdio connection tells its host of without being asked, as read
+/// when the gateway starts ([`Self::read`]): the subscription to the
+/// decisions the runtime's owner opens from then on, and the decisions that
+/// were open in the store at that reading.
+///
+/// A gateway reads it BEFORE it reports that it is ready, and hands it to
+/// [`StdioDecisionConnection::notice_openings_from`] once the connection
+/// serves. The store is so listed while nothing waits on the gateway yet,
+/// and the connection that serves lists it at its start no more. That
+/// matters to another owner of the same store (another process on the state
+/// directory) that writes as soon as the gateway is ready: every connection
+/// to the store file, a read's too, opens it for writing and settles its
+/// journal mode and schema, and a write that meets one answers at once that
+/// the store is held, without a wait. A list that found the file while such
+/// a first write was still creating it could make that write fail. The
+/// reading itself is that kind of connection too, made before Ready: on a
+/// store file that exists it is not without effect on the file, and it
+/// opens nothing when the file does not exist.
+pub struct DecisionOpeningsAtStart {
+    owner: DurableDecisionService,
+    openings: DecisionOpenings,
+    /// The decisions that were open at the reading.
+    open: Vec<DecisionId>,
+}
+
+impl std::fmt::Debug for DecisionOpeningsAtStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecisionOpeningsAtStart")
+            .field("open", &self.open.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DecisionOpeningsAtStart {
+    /// Subscribe to the decisions `owner` opens from now on, then read the
+    /// decisions that are open in its store, page by page: a decision is
+    /// open in that reading or announced after it. The reading lists and
+    /// records nothing: a decision past its deadline reads as expired, is
+    /// left out, and its expiry is left to whoever records it. A page that
+    /// cannot be read (tried again a few times while another call writes
+    /// the store) ends the reading with what was read: the notices of the
+    /// rest wait for the host's list.
+    ///
+    /// A launch that keeps no durable decisions has none to tell of, and a
+    /// candidate launch acts nowhere: for an owner of either this reads
+    /// nothing and answers `None`.
+    pub async fn read(owner: DurableDecisionService) -> Option<Self> {
+        if !owner.is_available() || matches!(owner.write_mode(), DecisionWriteMode::CandidateLaunch)
+        {
+            return None;
+        }
+        let openings = owner.subscribe_openings();
+        let open_now = DecisionListFilter::default().with_phase(DecisionPhase::Open);
+        let mut open = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = match store_read(|| {
+                owner.list(&open_now, after.as_deref(), DEFAULT_LIST_PAGE)
+            })
+            .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the open decisions could not be listed at the start; their notices wait for the host's list"
+                    );
+                    break;
+                }
+            };
+            let next = page
+                .next_after
+                .filter(|next| after.as_deref() != Some(next.as_str()));
+            open.extend(
+                page.decisions
+                    .into_iter()
+                    .filter(|row| row.state.phase == DecisionPhase::Open)
+                    .map(|row| row.decision_id),
+            );
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        Some(Self {
+            owner,
+            openings,
+            open,
+        })
+    }
 }
 
 /// One stdio connection's decision verbs; see the module documentation.
@@ -194,39 +294,56 @@ impl StdioDecisionConnection {
     }
 
     /// Tell the host of open decisions without waiting for its list: write
-    /// the `held` notice of each decision `owner` opens from now on, once
-    /// its row is stored, and of each decision that is open already (one
-    /// held before a restart, or by another owner on the store). The
-    /// connection subscribes first and then reads the open decisions, so a
-    /// decision is open in that reading or announced after it; a
-    /// subscription that fell behind reads the open decisions again. Each
-    /// decision is read again before its notice and skipped unless it is
-    /// still open, and is pushed at most once. Reading it again records an
-    /// expiry the read observes, as every read of a decision does; of an
-    /// open decision it writes nothing. What was pushed is this task's own
-    /// and grows with the connection's life, as what its lists noticed
-    /// does: it takes no lock of the connection, so a slow pipe holds up no
-    /// list and no decide. The host's list does not count a push and writes
-    /// its own notice. Nothing is presented to the operator here.
+    /// the `held` notice of each decision that was open when `start` was
+    /// read (one held before a restart, or by another owner on the store),
+    /// and of each decision the runtime's owner opens after that reading,
+    /// once its row is stored. Each decision is read again right before
+    /// its notice and skipped unless it is still open: one that was
+    /// decided, withdrawn or passed its deadline since it was read or
+    /// opened is not noticed. A read the store refuses is made again a few
+    /// times; a decision that still cannot be read is not noticed here,
+    /// and waits for the host's list.
     ///
-    /// A launch that keeps no durable decisions has none to tell of, and a
-    /// candidate launch acts nowhere: for an owner of either, this follows
-    /// nothing and ends at once.
+    /// Which of those reads records. For a decision this task did not see
+    /// opened (one of the reading, and one a rescan lists) the read is the
+    /// owner's narrowed one, which records nothing: an expiry it sees is
+    /// left to the decision's executor, where one runs (a launch with a
+    /// roster), and to the next read that records. The one exception is a
+    /// decision the task was told its own runtime opened: that is read
+    /// through the runtime's owner, which records an expiry it observes
+    /// and writes nothing of an open decision.
+    ///
+    /// What it calls the store for: one read for each decision of the
+    /// reading and no list, then one read for each decision its runtime
+    /// opens. A subscription that fell behind lists the open decisions
+    /// again and reads each that was not pushed: that list is of the
+    /// store, so it can name a decision another owner opened, which is
+    /// then noticed like the others. Each decision is pushed at most
+    /// once. What was pushed is this task's own and grows with the
+    /// connection's life, as what its lists noticed does: it takes no lock
+    /// of the connection, so a slow pipe holds up no list and no decide.
+    /// The host's list does not count a push and writes its own notice.
+    /// Nothing is presented to the operator here.
     ///
     /// It writes nothing more once the connection is closed, and ends at
     /// the first notice that does not reach the pipe. It holds a clone of
     /// the owner, so the subscription does not end on its own: whoever
     /// starts the task aborts it when the connection ends.
-    pub async fn notice_openings(self: Arc<Self>, owner: DurableDecisionService) {
-        if !owner.is_available() || matches!(owner.write_mode(), DecisionWriteMode::CandidateLaunch)
-        {
-            return;
-        }
-        let mut openings = owner.subscribe_openings();
+    pub async fn notice_openings_from(self: Arc<Self>, start: DecisionOpeningsAtStart) {
+        let DecisionOpeningsAtStart {
+            owner,
+            mut openings,
+            open,
+        } = start;
         let mut pushed = HashSet::new();
-        if !self.push_open_decisions(&owner, &mut pushed).await {
-            return;
+        // The decisions of the reading: seen, never written by this task.
+        let reads_only = owner.for_candidate_launch();
+        for decision_id in &open {
+            if !self.push_held(&reads_only, decision_id, &mut pushed).await {
+                return;
+            }
         }
+        drop(open);
         while let Some(opening) = openings.next().await {
             let goes_on = match opening {
                 DecisionOpening::Opened(row) => {
@@ -237,7 +354,8 @@ impl StdioDecisionConnection {
                         missed,
                         "the stdio connection fell behind the decisions its runtime opened; it reads the open decisions again"
                     );
-                    self.push_open_decisions(&owner, &mut pushed).await
+                    // The decisions of a rescan: listed, not seen opened.
+                    self.push_open_decisions(&reads_only, &mut pushed).await
                 }
                 // An opening of a kind this version does not know.
                 _ => true,
@@ -245,6 +363,17 @@ impl StdioDecisionConnection {
             if !goes_on {
                 return;
             }
+        }
+    }
+
+    /// [`DecisionOpeningsAtStart::read`] and then
+    /// [`Self::notice_openings_from`], in one call: for a connection that
+    /// has no moment before it serves. For an owner that keeps no durable
+    /// decisions, and for a candidate launch, it follows nothing and ends
+    /// at once.
+    pub async fn notice_openings(self: Arc<Self>, owner: DurableDecisionService) {
+        if let Some(start) = DecisionOpeningsAtStart::read(owner).await {
+            self.notice_openings_from(start).await;
         }
     }
 
@@ -287,8 +416,12 @@ impl StdioDecisionConnection {
     }
 
     /// Push the `held` notice of `decision_id` unless it was pushed: the
-    /// decision is read again from the store, and only one that is still
-    /// open is noticed. Answers `false` once the connection can write
+    /// decision is read again from the store through `owner`, and only one
+    /// that is still open is noticed. An owner narrowed to reads
+    /// (`for_candidate_launch`) records nothing by that read; the runtime's
+    /// own owner records an expiry the read observes. A read the store
+    /// refuses is made again a few times, and a decision that still cannot
+    /// be read is skipped. Answers `false` once the connection can write
     /// nothing more.
     async fn push_held(
         &self,

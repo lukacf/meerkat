@@ -22483,6 +22483,21 @@ external_addressable = true
         init_result["broken_members"] =
             crate::unified_runtime::http::broken_members_json(&broken_members);
     }
+    // The decisions the connection tells its host of without a list are
+    // read here, before Ready is published: the list of the open decisions
+    // is so not made right after Ready, when another owner of the store may
+    // write its first decision. (A connection that serves still reads each
+    // decision once before its notice, and lists again only when it fell
+    // behind.) It is init's last await before the publication and stands
+    // before the last shutdown check below: nothing waits between that check
+    // and the publication, so a shutdown handshake that arrives during this
+    // reading stops init at that check, as one during any earlier phase
+    // does. On a launch that keeps no durable decisions, and on a candidate
+    // launch, there is nothing to read.
+    let decision_openings = crate::durable_decisions::DecisionOpeningsAtStart::read(
+        runtime.durable_decisions().owner().clone(),
+    )
+    .await;
     if shutdown_requested.load(Ordering::Acquire) {
         let (request, report) = abort_init_for_shutdown(
             Some(runtime.as_ref()),
@@ -22576,14 +22591,13 @@ external_addressable = true
         }),
     ));
     // The connection tells its host of each open decision without waiting
-    // for a list: of those the runtime opens from here on, and once of those
-    // already open (Ready is on the pipe before any of these notices). On a
-    // launch that keeps no durable decisions, and on a candidate launch, it
-    // follows nothing and the task ends at once.
-    let decision_notices = tokio::spawn(
-        Arc::clone(&decision_connection)
-            .notice_openings(runtime.durable_decisions().owner().clone()),
-    );
+    // for a list: of those the runtime opens after the reading above, and
+    // once of those that reading found open (Ready is on the pipe before
+    // any of these notices). On a launch that keeps no durable decisions,
+    // and on a candidate launch, there is no reading and no task.
+    let decision_notices = decision_openings.map(|openings| {
+        tokio::spawn(Arc::clone(&decision_connection).notice_openings_from(openings))
+    });
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -22665,7 +22679,9 @@ external_addressable = true
         // more, one in flight included when it commits, and it tells its
         // host of no further decision.
         decision_connection.close();
-        decision_notices.abort();
+        if let Some(decision_notices) = &decision_notices {
+            decision_notices.abort();
+        }
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`
@@ -27688,6 +27704,16 @@ mod in_flight_drain_tests {
         let last_init_abort = body
             .rfind("resources.init_aborted_for_shutdown = true;")
             .expect("an init-abort return");
+        // The connection's reading of the open decisions is init's last
+        // await before the publication. It stands before that return's
+        // check, so nothing waits between the last check and Ready: a
+        // handshake that arrives during the reading stops init there, as
+        // one during any earlier phase does.
+        let reading = at("DecisionOpeningsAtStart::read(");
+        assert!(
+            reading < last_init_abort,
+            "the reading of the open decisions precedes the last init-abort return"
+        );
         let ready = at("publish_native_bootstrap_ready(");
         let hold = at("if in_flight_drain.is_some() {\n        \
                        shutdown_waits_for_drain.store(true, Ordering::Release);\n    }");

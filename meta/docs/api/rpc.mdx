@@ -3532,8 +3532,10 @@ of what the caller may see may follow.
 The gateway tells the stdio host of each open decision with a
 `meta/decisions/notice` notification, without being asked: when a decision
 its own runtime opens is held (after the hold is stored), and, once the
-connection serves, for each decision that is already open then (one held
-before a restart, or by another process on the same store). A question set a
+connection serves, for each decision that was open when the gateway read
+its decision store at its start, before it answered `meta/init` (one held
+before a restart, or by another process on the same store before then). A
+question set a
 member asked is such a decision (`kind` `ask_user.questions`), so a host
 hears of it with no list call. Before a `meta/decisions/list` answers, the
 gateway also writes one notice for each open decision of the page that no
@@ -3546,6 +3548,36 @@ listed `held` while it waited for its review, and presented to the stdio
 operator at a later list.) A
 host that reads the pipe itself receives these notifications whether or not
 it lists decisions; a notification needs no answer.
+
+What these notices do not cover. The gateway learns of no write another
+process makes to the same store. An unsolicited notice of a decision
+another process opens after the gateway's reading at its start (the moments
+between that reading and the answer to `meta/init` included) is not
+supported: a host that needs such decisions asks with
+`meta/decisions/list`. One case can still notice one: when the gateway fell
+behind its own runtime's openings it lists the open decisions of the store
+again, and that list holds what another process opened too.
+
+The reading at the start is an ordinary connection to the store: on a store
+file that exists it opens the file for writing and settles its journal
+mode and schema, and it opens nothing when the file does not exist. After
+that reading a gateway reads the store for a notice once for each decision,
+right before its notice, and lists the open decisions again only when it
+fell behind. Each of those reads is such a connection too: a moment at
+which another process that writes to the store can be answered that the
+store is held.
+
+A decision that is no longer open when its notice is due (decided, withdrawn
+or past its deadline since the gateway read or opened it) is not noticed,
+and neither is one whose read the store still refuses after a few tries;
+the host's list shows both as they are. The read before a notice records
+nothing, with one exception: a decision the gateway is told its own runtime
+opened is read with the read that records an expiry it observes. A decision
+the gateway comes to by its list after it fell behind is read without
+recording, whoever opened it. Any other expiry the notices pass over is
+recorded by the decision's executor at its next pass (on a launch with a
+roster; no executor runs without one) or by the next request that reads
+the decision.
 
 A notice of `kind` `ask_user.questions` says that a question set is open in
 the store. Whether the host can read and answer it depends on the launch: a

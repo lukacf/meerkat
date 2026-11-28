@@ -953,10 +953,11 @@ pub struct WireLiveProviderInputLatency {
 
 /// Status of a `live/refresh` request relative to the adapter pump.
 ///
-/// R4-5 (P3): the refresh path is asynchronous — host queue acceptance happens
-/// before the adapter pump has applied the resulting `session.update`. The
-/// realtime stream is the source of truth for the actual refresh outcome
-/// (failures surface as `LiveAdapterObservation::Error`).
+/// Queue acceptance does not confirm that the provider applied the update.
+/// Neither the WebSocket nor the WebRTC data channel sends a refresh success
+/// receipt. A scoped `command_rejected` can arrive without closing the channel.
+/// A terminal adapter error closes the channel without forwarding that error
+/// observation. A disconnect alone does not identify the cause.
 ///
 /// Today generated runtime authority emits only `Queued`. The enum is
 /// `#[non_exhaustive]` so a future generated contract can add a typed status
@@ -971,9 +972,7 @@ pub struct WireLiveProviderInputLatency {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveRefreshStatus {
-    /// The host has accepted the refresh command onto the adapter queue. The
-    /// adapter pump applies the `session.update` asynchronously; callers that
-    /// need the actual outcome must observe the adapter's realtime stream.
+    /// The host accepted the refresh command onto the adapter queue.
     Queued,
 }
 

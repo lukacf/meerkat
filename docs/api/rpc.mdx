@@ -3998,7 +3998,14 @@ transport details.
 | `live/interrupt` | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Truncate assistant output at a client-tracked playback cursor |
 | `live/playback_complete` | Report completed client playback for one generated assistant output |
-| `live/refresh` | Apply mutable session config (instructions/tools/audio) to an open channel; config-only, does not replay history; identity swaps and canonical transcript/user-content rewrites return typed reopen-required errors |
+| `live/refresh` | Queue a mutable config update for an open channel. Refresh does not replay history; close and reopen to change model or provider identity or to replay changes to canonical history or its user-content registry. |
+
+A `live/refresh` result of `{"status":"queued"}` means the host accepted the command.
+Queue acceptance does not confirm that the provider applied the update.
+Neither the WebSocket nor the WebRTC data channel sends a refresh success
+receipt. A scoped `command_rejected` can arrive without closing the channel.
+A terminal adapter error closes the channel without forwarding that error
+observation. A disconnect alone does not identify the cause.
 
 Public Live WebRTC channels also send the notification
 `live/assistant_playback_hint { channel_id, hint: "duck" | "restore" }`: duck

@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [a395ca591ab4](https://github.com/lukacf/meerkat/commit/a395ca591ab4cbdc1e32b2607682300c8b6c8d88) on 2026-11-28; Meta version 0.9.19 at that commit.*
+*Mirrored from Meerkat Meta main at [343bbc36b4a5](https://github.com/lukacf/meerkat/commit/343bbc36b4a5d63d59e25db8144544f1c2cdbf32) on 2026-11-28; Meta version 0.9.19 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -454,10 +454,10 @@ DispatchInput.connector("event from slack")
 DispatchInput.scheduler("nightly sync")
 
 # A dispatch that is safe to repeat carries both keys.
-DispatchInput(
-    content="event from slack", origin="connector",
+DispatchInput.connector(
+    "event from slack",
     idempotency_key="evt-1",
-    correlation_id="7c2d9a4b-3e18-4b7a-8f55-1a9e0c6b2d10",
+    correlation_id="msg-1",
 )
 ```
 
@@ -465,10 +465,16 @@ DispatchInput(
 pair to the same identity starts no second turn in its session, and a
 dispatch that carries one of the two without the other is refused with
 nothing delivered (`invalid delivery identity (... (half-pair))`).
-`DispatchInput.connector(text, correlation_id=...)` sets a correlation id
-and no key, so an input built that way is refused: build a keyed input with
-the full constructor, or pass both to `dispatch_text`. Give the correlation
-id as a canonical UUID.
+`DispatchInput.connector` accepts both keys or neither; supplying only one
+raises `ValueError` in the helper. It sends the supplied values as given.
+Different deliveries may use distinct idempotency keys with the same
+correlation ID. The full constructor and `dispatch_text` also accept the
+pair; the gateway refuses their half-pairs. On a dispatch without
+`expected_scope`, with the connector or system origin a correlation id
+that is not a canonical UUID is turned into one deterministically, and the
+gateway carries that UUID, not the source string; with another origin give
+a canonical UUID. With `expected_scope` the pair is used as supplied and
+nothing is turned into a UUID: give a canonical UUID whatever the origin.
 
 ### Scope-bound dispatch
 

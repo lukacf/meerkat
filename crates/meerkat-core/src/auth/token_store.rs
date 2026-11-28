@@ -591,7 +591,8 @@ pub enum PersistedAuthMode {
     ExternalAuthorizer,
     Command,
     /// The host-registered OAuth client of one MCP credential slot (client
-    /// configuration with its secret, not a sign-in credential), stored
+    /// configuration with its secret, none for a public client; not a
+    /// sign-in credential), stored
     /// under [`TokenKey::mcp_oauth_client`]. No provider resolver accepts it
     /// and it has no AuthMachine lifecycle.
     McpOauthClient,

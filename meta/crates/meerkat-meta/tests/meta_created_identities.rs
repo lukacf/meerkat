@@ -48,7 +48,9 @@ use meerkat_mob::{EntryStanding, IdentityEntryRead, MobDefinition, ProfileName};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-// This file uses the helper's check of a shutdown report only, not its wait.
+// This file uses the helper's check of a shutdown report, not its wait. One
+// reading of the lock table is taken only after the offline reset row's probe
+// has been refused, never before a probe.
 #[allow(dead_code)]
 #[path = "support/custody_wait.rs"]
 mod custody_wait;
@@ -1320,6 +1322,125 @@ async fn a_member_core_wakes_registers_its_identity_created_at_runtime_from_its_
     rig.shutdown().await;
 }
 
+/// One reading of the kernel's lock table for the execution custody of the
+/// runtime store in `state` (`support/custody_wait.rs`): `Some(true)` when
+/// the table names a holder, `Some(false)` when it names none, `None` when
+/// it could not be read.
+fn custody_snapshot(state: &Path) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut custody = state
+            .join(meerkat_meta::storage_layout::RUNTIME_DB_FILE_NAME)
+            .into_os_string();
+        custody.push(".execution-custody");
+        custody_wait::custody_holder_named(Path::new(&custody))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        None
+    }
+}
+
+/// A [`custody_snapshot`] in words. "Unavailable" is kept apart from "no
+/// holder observed". Neither says there was no holder: one reading can miss
+/// a held entry, and a table that cannot name the file reads as no holder.
+fn snapshot_words(snapshot: Option<bool>) -> &'static str {
+    match snapshot {
+        Some(true) => "a holder of the execution custody was named",
+        Some(false) => "no holder of the execution custody was observed",
+        None => "unavailable: the lock table could not be read",
+    }
+}
+
+/// The environment variable by which a hosted job names its summary file.
+const JOB_SUMMARY: &str = "GITHUB_STEP_SUMMARY";
+
+/// The line a refused offline reset leaves in a job summary: the row, that
+/// its reset made at once was refused, and the one snapshot of the lock
+/// table with the time from the drop of the runtime to it.
+fn refused_reset_line(row: &str, taken: Duration, snapshot: Option<bool>) -> String {
+    format!(
+        "- reopen diagnostic: `{row}`: the offline reset, made at once after the runtime was \
+         dropped, was refused; one snapshot of the lock table, taken {} ms after the drop: {}\n",
+        taken.as_millis(),
+        snapshot_words(snapshot)
+    )
+}
+
+fn append_line(file: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(file)?
+        .write_all(line.as_bytes())
+}
+
+/// What the offline reset row does when its reset, made at once, is refused:
+/// it takes one snapshot, and the row then fails with the text it always
+/// had, followed by it.
+///
+/// The snapshot is one reading of the kernel's lock table: whether it names
+/// a holder of the runtime's execution custody, without the holder's
+/// identity and without any line of the table. It is best effort: nothing
+/// waits, nothing is read a second time, and the reset is not tried again.
+/// Where the environment names a job summary file ([`JOB_SUMMARY`]) the
+/// line of [`refused_reset_line`] is appended to it; a line that cannot be
+/// written is said on stderr, and the row fails either way. Nothing here can
+/// make the row pass.
+///
+/// The snapshot says what the table showed at one moment after the refusal,
+/// and when that moment was. It does not say how long the custody was held,
+/// who held it, or why.
+fn observe_refused_reset(row: &str, state: &Path, dropped: std::time::Instant) -> String {
+    let snapshot = custody_snapshot(state);
+    let taken = dropped.elapsed();
+    if let Some(summary) = std::env::var_os(JOB_SUMMARY).filter(|path| !path.is_empty()) {
+        let line = refused_reset_line(row, taken, snapshot);
+        if let Err(error) = append_line(Path::new(&summary), &line) {
+            eprintln!("reopen diagnostic: the job summary did not take the line ({error}): {line}");
+        }
+    }
+    format!(
+        "\nreopen diagnostic: the offline reset, made at once, was refused; one snapshot of the \
+         kernel's lock table, taken {taken:?} after the runtime was dropped: {}",
+        snapshot_words(snapshot)
+    )
+}
+
+/// The line a refused offline reset leaves in a job summary
+/// ([`observe_refused_reset`]) is one line appended to the file: what the
+/// file holds already stays, and the line names the row, the refusal, the
+/// snapshot and the time from the drop to it. An unreadable table and a
+/// table that names no holder read differently.
+#[test]
+fn a_refused_offline_reset_appends_one_line_to_a_job_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let summary = dir.path().join("summary.md");
+    std::fs::write(&summary, "an earlier line\n").unwrap();
+    for snapshot in [Some(true), Some(false), None] {
+        append_line(
+            &summary,
+            &refused_reset_line("a_reset_row", Duration::from_millis(37), snapshot),
+        )
+        .unwrap();
+    }
+    let start = "- reopen diagnostic: `a_reset_row`: the offline reset, made at once after the \
+                 runtime was dropped, was refused; one snapshot of the lock table, taken 37 ms \
+                 after the drop: ";
+    assert_eq!(
+        std::fs::read_to_string(&summary).unwrap(),
+        format!(
+            "an earlier line\n\
+             {start}a holder of the execution custody was named\n\
+             {start}no holder of the execution custody was observed\n\
+             {start}unavailable: the lock table could not be read\n"
+        )
+    );
+}
+
 /// The offline identity reset (`meta_gateway identity-reset`) resets a
 /// store-owned identity as any identity: it leaves its row in the first-boot
 /// manifest, and the next start's roster pass carries it out. After that
@@ -1344,17 +1465,32 @@ async fn an_offline_identity_reset_gives_a_store_owned_identity_a_fresh_life_at_
     // member, dropping the runtime releases it at once. So the shutdown's
     // report is read first: a teardown that did not settle fails the row
     // there, before any probe.
+    //
+    // The probe stays at once: between the drop and the reset there is one
+    // clock reading and nothing else. Only when the reset is refused does the
+    // row take one snapshot of the lock table ([`observe_refused_reset`]); it
+    // then fails with the text below as before, followed by the snapshot.
     rig.shutdown_settled_for_reopen().await;
+    let dropped = std::time::Instant::now();
 
     let report = meerkat_meta::storage_migrate_native::reset_identity(
         &meerkat_meta::storage_migrate_native::IdentityResetRequest::new(temp.path(), CREATED)
             .with_apply(),
     )
     .await;
+    let observed = if report.refusal.is_some() {
+        observe_refused_reset(
+            "an_offline_identity_reset_gives_a_store_owned_identity_a_fresh_life_at_the_next_start",
+            temp.path(),
+            dropped,
+        )
+    } else {
+        String::new()
+    };
     assert!(
         report.refusal.is_none() && report.written,
         "the teardown reported settled and the runtime is dropped: the offline reset takes the \
-         store-owned identity and writes its row: {report:?}"
+         store-owned identity and writes its row: {report:?}{observed}"
     );
     let manifest = temp.path().join("storage-migrate-native.first-boot.json");
     assert!(manifest.exists(), "the first-boot manifest holds the row");

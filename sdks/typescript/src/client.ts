@@ -5805,20 +5805,16 @@ export class MeerkatClient {
    * config fields. History seeding is owned by `live/open`; refresh is
    * config-only by design.
    *
-   * **Identity/history changes require close + reopen.** Refresh validates
-   * that `model_id`, `provider_id`, the canonical transcript rewrite
-   * generation, and the user-content identity/tombstone registry still match
-   * the open channel. Identity swaps and history rewrites reject with typed
-   * adapter-level errors instead of mutating provider history in place.
+   * Close and reopen to change model or provider identity or replay rewritten
+   * history. Refresh does not make those changes in place.
    *
-   * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying the
-   * generated-authority `status` discriminator (today: `"queued"`). This SDK
-   * build accepts the generated status set it was built with and rejects
-   * missing or unknown status values until regenerated for a newer contract.
-   * The host queue acceptance happens before this result is projected; the
-   * adapter pump applies the `session.update` asynchronously, and the
-   * realtime stream is the source of truth for the actual outcome (failures
-   * surface as `WireLiveAdapterObservation::Error`).
+   * A `status` of `"queued"` means the host accepted the command. This SDK
+   * rejects a missing or unknown status.
+   * Queue acceptance does not confirm that the provider applied the update.
+   * Neither the WebSocket nor the WebRTC data channel sends a refresh success
+   * receipt. A scoped `command_rejected` can arrive without closing the channel.
+   * A terminal adapter error closes the channel without forwarding that error
+   * observation. A disconnect alone does not identify the cause.
    */
   async liveRefresh(params: LiveChannelParams): Promise<LiveRefreshResult> {
     const result = await this.request(

@@ -455,10 +455,15 @@ pub fn ownership_baseline_status(root: &Path) -> Result<OwnershipBaselineStatus>
     })
 }
 
-pub fn ownership_doc_is_in_sync(root: &Path) -> Result<bool> {
+/// Whether the generated ownership ledger document is the one the typed
+/// registry and `findings` render. The findings are the caller's
+/// (`collect_current_findings`): collecting them parses the sources of every
+/// workspace member, so a caller that already holds them hands them over
+/// instead of having this check collect them a second time. The check itself
+/// reads one file, the document.
+pub fn ownership_doc_is_in_sync(root: &Path, findings: &[OwnershipFinding]) -> Result<bool> {
     let registry = ownership_registry();
-    let findings = collect_ownership_findings(root, &registry)?;
-    let report = build_report(&registry, findings);
+    let report = build_report(&registry, findings.to_vec());
     let expected = render_markdown(&report);
     let current = fs::read_to_string(root.join(DOC_PATH))
         .with_context(|| format!("read {}", root.join(DOC_PATH).display()))?;
@@ -4413,5 +4418,47 @@ mod tests {
             }),
             "stale Closed owner_shell must be flagged: {findings:#?}"
         );
+    }
+
+    /// The document check answers from the findings it is given and reads
+    /// one file, the document. The root here holds that file and nothing
+    /// else (no manifest, no source), so a check that collected the findings
+    /// itself would fail on the first source it looked for. The strict audit
+    /// relies on this: it collects the findings once and hands them over.
+    #[test]
+    fn doc_sync_check_answers_from_the_given_findings_and_the_document_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let doc = root.path().join(DOC_PATH);
+        fs::create_dir_all(doc.parent().expect("the document has a parent directory"))
+            .expect("create the document's directory");
+        let registry = ownership_registry();
+        let none: Vec<OwnershipFinding> = Vec::new();
+        let one = vec![error_finding(
+            "OwnershipMissingOperationEntry",
+            "crates/example/src/lib.rs",
+            "Example::operation",
+            "a finding only this test holds",
+        )];
+        let rendered = render_markdown(&build_report(&registry, none.clone()));
+        let rendered_with_one = render_markdown(&build_report(&registry, one.clone()));
+        assert_ne!(rendered, rendered_with_one);
+
+        // No document: an error that names it, not an answer.
+        let missing = ownership_doc_is_in_sync(root.path(), &none).expect_err("no document");
+        assert!(format!("{missing:#}").contains(DOC_PATH), "{missing:#}");
+
+        fs::write(&doc, &rendered).expect("write the document");
+        assert!(ownership_doc_is_in_sync(root.path(), &none).expect("in sync"));
+        // The findings are part of the document: the same file is stale for
+        // another set of findings.
+        assert!(!ownership_doc_is_in_sync(root.path(), &one).expect("other findings"));
+
+        fs::write(&doc, &rendered_with_one).expect("write the document");
+        assert!(ownership_doc_is_in_sync(root.path(), &one).expect("in sync with the finding"));
+        assert!(!ownership_doc_is_in_sync(root.path(), &none).expect("stale without it"));
+
+        // One more byte is a stale document.
+        fs::write(&doc, format!("{rendered_with_one}\n")).expect("write the document");
+        assert!(!ownership_doc_is_in_sync(root.path(), &one).expect("stale"));
     }
 }

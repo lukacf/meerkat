@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `StdioDecisionConnection::notice_openings(owner)` (Rust): the task a stdio gateway starts so that its connection tells the host of open decisions without a list.
+
 ### Changed
 
 - The decision verbs (`meta/decisions/list`, `get`, `rendering`, `present`,
@@ -66,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   approval." Only the text changed: the kind, its token, `key` and which
   label it names, `retryable` and the rules that decide the refusal are as
   they were.
+
+- The stdio gateway now tells its host of an open durable decision without being asked: it writes the `meta/decisions/notice` (`event` `held`) of a decision the gateway's own runtime opens when it opens, and of each decision already open once when the connection starts. A member's question set (`kind` `ask_user.questions`) so reaches a host that never lists decisions. `on_decision_notice` / `onDecisionNotice` receive these notices; a `held` notice that arrives before a handler is registered is kept (the newest 1024 decisions) and handed over at registration. A host's own `meta/decisions/list` writes its notices as before, also for a decision it was already told of, so a host with a handler that also lists sees `held` twice for one decision. A gateway serves its agents' questions only on a launch with a roster: on a launch without one a question set already in the store is still noticed and still listed by `meta/decisions/list`, but `meta/gating/questions` returns no set and `meta/gating/decide` refuses its id, so such a notice is not a readable question. The start warning of a gateway whose Console admits nobody now names the roster and this case; nothing but its text changed.
 
 ### Fixed
 
@@ -130,6 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   form. The HTTP gateway (`meta_gateway`) uses the wrapped builder directly
   and already answered. This was found by reading the source; no gateway
   was run to reproduce it.
+
+### Upgrade notes
+
+- A host that speaks JSON-RPC to the stdio gateway itself, never calls `meta/decisions/list`, and treats a notification it does not expect as an error now receives a `meta/decisions/notice` for each durable decision the runtime opens and for each one already open when it connects: ignore the notification, or read it. The sentence "a host that never lists decisions receives no notices" no longer holds. Hosts on the SDKs see no change unless they registered a notice handler.
 
 ## [0.9.19] - 2026-11-26
 

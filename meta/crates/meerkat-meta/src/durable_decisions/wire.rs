@@ -131,8 +131,12 @@ pub enum MetaDecisionNoticeEvent {
     Unknown,
 }
 
-/// `meta/decisions/notice`: one open decision, noticed once per stdio
-/// connection. `rendering_ref` is the subject digest of the held rendering;
+/// `meta/decisions/notice`: one open decision, noticed at most twice per
+/// stdio connection: once when it opens (or when the connection starts, for
+/// one already open) and once at the host's first list of it. One more
+/// follows for a decision listed `held` during its review that a later list
+/// presents to the stdio operator.
+/// `rendering_ref` is the subject digest of the held rendering;
 /// only a `presented` notice carries the rendering itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaDecisionNotice {

@@ -547,8 +547,10 @@ ask its user.
   `_entered` forms; `mcp_client_profile` reads it back without the secret).
   An `McpOAuthClientProfile` names the authorization server's issuer, the
   client id, the client's exact registered redirect and its token endpoint
-  authentication, `client_secret_basic` or `client_secret_post`, with the
-  client secret. The redirect is the host's registered base itself (the
+  authentication: for a confidential client (`McpOAuthClientProfile::new`)
+  `client_secret_basic` or `client_secret_post`, with the client secret;
+  for a public client (`McpOAuthClientProfile::public`, below) `none`, with
+  no secret. The redirect is the host's registered base itself (the
   central callback, below), the server's own registered `https` callback
   (the base followed by the slot's binding segment), or an `http` loopback
   redirect on `127.0.0.1` or `localhost` with an explicit port. A registered
@@ -593,12 +595,13 @@ ask its user.
   registration endpoint. The server's protected resource metadata must name
   the profile's issuer (and its resource), or the start is refused
   (`configuration_invalid`) before any attempt exists. Under an `https`
-  issuer, the token endpoint its metadata names, where the secret is sent,
-  must use `https` as well, loopback included, or discovery refuses it
-  (`upstream_failure`) and nothing is sent there; only an `http` loopback
-  issuer, a local authorization server, keeps loopback endpoints. A refresh
-  checks its stored token endpoint the same way and never sends the secret
-  to one that does not fit: the credential is closed for a new login
+  issuer, the token endpoint its metadata names, where the secret (or a
+  public client's code and refresh token) is sent, must use `https` as
+  well, loopback included, or discovery refuses it (`upstream_failure`) and
+  nothing is sent there; only an `http` loopback issuer, a local
+  authorization server, keeps loopback endpoints. A refresh checks its
+  stored token endpoint the same way and sends nothing to one that does
+  not fit: the credential is closed for a new login
   (`reauth_required`). The authorization request carries the profile's
   client id and redirect, with PKCE S256. A start on any other redirect is
   refused (`invalid_target`); a loopback login through
@@ -607,6 +610,29 @@ ask its user.
   method, and a refresh token the server rotates is stored and presented by
   the next refresh. Without a profile nothing changes: dynamic registration
   as before.
+
+  Public clients: a terminal or other native host whose client is
+  registered as public (token endpoint authentication `none`, no secret)
+  installs it with `McpOAuthClientProfile::public(issuer, client_id,
+  redirect_uri)`; `with_scopes` and `with_resource` apply as above. Its
+  redirect must be an `http` loopback redirect on `127.0.0.1` or
+  `localhost` with an explicit port (the same loopback rule as above; IPv4
+  loopback names only: `[::1]` is not accepted, for public or confidential
+  profiles); a registered `https` redirect, the central callback included,
+  stays a confidential client's and is refused (`configuration_invalid`),
+  and so is a profile whose method is `none` and that carries a secret, or
+  a confidential method without one. The login is the same, PKCE S256
+  included, and the code exchange and every refresh send the `client_id` in
+  the request body with no client authentication (no `Authorization`
+  header, no `client_secret`), as a dynamically registered client's do. The
+  `https` token endpoint rule above holds for it too. The server's
+  `token_endpoint_auth_methods_supported` is not read, for public or
+  confidential profiles alike: the profile states how its client was
+  registered (some servers that accept public clients do not list `none`).
+  The method is one of the profile's facts: replacing a public profile with
+  a confidential one of the same client id and redirect, or the other way
+  round, is a replace with other facts (below), and the credential minted
+  under the old one ends at its next refresh.
 
   The attempt and the credential are bound to the profile's facts, not to
   its secret. Replacing the profile with the same facts and a new secret
@@ -626,7 +652,9 @@ ask its user.
   server that reports errors with HTTP 200 keeps the credential, every use
   retries the refresh and fails with a typed error, and `mcp_status` can keep
   reporting `Authorized`, as with Core's other OAuth refreshes. Nothing is
-  ever refreshed as a public client or through dynamic registration instead.
+  ever refreshed by another method instead (a confidential profile's
+  credential as a public client, or a public profile's with a secret), nor
+  through dynamic registration.
   A credential minted before the profile was installed keeps refreshing as
   the client it was registered as; a new login over it needs a logout first.
 
@@ -637,8 +665,8 @@ ask its user.
   the host's credential store, beside the server's credentials; it is never
   written to configuration and never appears in errors, events, logs or
   `Debug` output. Keep the profile in step with the client's registration at
-  the authorization server: its exact redirect, its authentication method and
-  its secret. Profiles are a Rust host API: no RPC, REST or SDK method
+  the authorization server: its exact redirect, its authentication method and,
+  for a confidential client, its secret. Profiles are a Rust host API: no RPC, REST or SDK method
   installs one.
 
   Attribution: an entry can state the administrator it admitted on its

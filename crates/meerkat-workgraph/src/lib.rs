@@ -20,6 +20,11 @@ mod execution_machine;
 mod generated;
 mod machine;
 pub(crate) mod machines;
+// Work order types. Crate-private and exported nowhere until the order
+// service exists, so that no release publishes a surface without behaviour.
+// Until then only the module's own tests use its items, hence the allow.
+#[allow(dead_code)]
+mod order;
 mod read_page;
 mod rest_contract;
 mod service;

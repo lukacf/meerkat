@@ -282,10 +282,39 @@ the exact-tree attestation; nightly and the release tag carry the rest):
 | `published-floor` per product (`ci/products.json`): the product's crates built against the crates.io releases of their dependencies (`scripts/published_crates_standalone.py floor`) | advisory, when the product's packages or the root manifest, lock or toolchain changed | advisory, same | - | required on `release/<product>-*` and in the product's release workflow |
 | `connect-checks`: Connect's build receipt, packaging, library release, candidate and installed-acceptance script tests, product and starter preparation tests, immutable preparation and product readback tests, hosted MCP callback tests, docs check and TypeScript SDK suite (with the Console panel test) | on a change under `connect/` | same | - | - |
 | `sdk-host`: Python + TypeScript SDK suites | deferred | yes | yes, plus Web SDK | Bazel SDK suites |
+| `example-035` and `example-035-tests`: standalone `mdm-tux` Clippy, then Rust tests and Python fixtures, with an explicit manifest path | tests and Python only for own non-Markdown paths or a conservative registration fallback; Clippy is deferred | serial Clippy then tests, also when its dependency closure or workspace is selected; no release projection | - | - |
 | `example-web`: build the `sdks/web` wasm runtime once (wasm-pack 0.13.1, no wasm-opt), then run examples 031, 032 and 033 in Playwright Chromium | when `sdks/web/`, `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples change; when the change also reaches a crate the runtime builds on (or plans the workspace), only the Web SDK's `npm test`, and the wasm build and browser suites run on the push | yes | - | - |
 | the standalone example workspaces 034 and 035 (`make -C examples standalone`, then 035's script fixtures) and Meta example pack 006's keyless script (Python and TypeScript, twice each): measured into the job summary (build, test and install seconds apart; each build cold or warm from the compiler cache's own counters; queue seconds are not printed there: a first night's evaluation reads them from the job record, created to started) and read by no gate, so a pull request that changes them gets no result of these tests before it merges. A failure is one line in the "Nightly failures" issue; an infrastructure fault stays with the CI owner, who reports a content failure (a failing test of these examples) to the maintainers with the run, the job, the revision and the failing command or assertion, to be routed to the Examples owner. Not run: any lint of 034 and 035 (035's own all-target check included), any feature set but the default, 035's container suites, every other Meta example pack | - | - | yes | - |
 | dense Mob topology, feature matrices, minimal builds, audit, `e2e-system`, release packaging | - | - | yes | BuildBuddy `full-fresh` graph |
 | `gate` (`CI gate`): fail-closed aggregate; on pull requests a 1080-second lane execution budget and a 1200-second push-to-terminal runaway ceiling, both excluding runner queue, which is reported as a warning; it prints what the pull request left to the push and refuses a push plan that left anything; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
+
+The registered example 035 is a standalone workspace. Its own Rust paths
+do not seed root-workspace packages on a pull request; existing shared
+readers and example SDK suites still run. The xtask integration suite also
+runs its live runtime-bypass and effect-authority audits for this directory,
+even when the workspace plan has no Rust package seeds. A push keeps the original
+unmapped-Rust workspace fallback. Unknown examples keep that fallback on
+both events. The planner exports `example_035`, `example_035_lint`, its reasons,
+manifest, event-specific commands and the Clippy deferral.
+
+An example-only pull request does not lint the example. Hosted lint runs after
+merge on the ordinary main push (also on an eligible release-branch push).
+Before merging, the local target is `make -C examples/035-mdm-tux-rs lint`;
+`affected-tests` retains this full push-coverage command before the test command.
+A lint failure on main is a failed Core row that every product requires. Its fix
+also reaches hosted lint only after merging. Push tests wait for lint to end,
+even if lint fails, so the finding does not hide their results. Workflow
+cancellation starts no new job.
+
+Both jobs keep 40 minute limits and two Cargo build workers, with only one
+example compiler job active at a time. Their serial execution is counted together
+by the existing budget logic. Neither the 1080 second PR execution budget nor
+the 1200 second queue-excluded ceiling changes. A completed job must show each
+Rust binary's counts and the Python count; a timeout is not accepted as test
+evidence.
+
+The ordinary main push supplies the deferred-lint evidence; a push to a PR
+branch supplies only PR evidence.
 
 Reader rows. Some tests read files that belong to no crate: the rkat
 doc-example test walks `docs/`, the machine-authority docs alignment test

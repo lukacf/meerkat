@@ -372,6 +372,7 @@ rust-lane-doctor:
 
 ci-lanes-selftest:
 	@echo "$(GREEN)Self-testing the CI lane classifier (fail-closed contracts)...$(NC)"
+	@node scripts/ci-standalone-example-selftest.mjs
 	@node scripts/ci-cargo-lanes-selftest.mjs
 	@echo "$(GREEN)Checking that the exact-profile lanes' inputs cover every case they select...$(NC)"
 	@node scripts/ci-guard-lane-inputs-selftest.mjs

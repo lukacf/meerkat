@@ -2420,12 +2420,22 @@ async function runChatPaneTurnRailProof() {
       `turn rail buttons should stay visually compact: ${JSON.stringify(initialLayout)}`,
     );
 
+    // DIAGNOSTIC ONLY, not a fix. The rail*AtMs values exist to print how
+    // long after the scroll call the read was made. Three of them are taken
+    // BEFORE the measurement, because a time since the scroll call needs a
+    // clock value from before it: each is one synchronous clock read in this
+    // test process. None of them calls the page, awaits or waits, and the
+    // scroll, the 120 ms wait and the read are the same calls in the same
+    // order as before.
+    const railScrollCallAtMs = performance.now();
     await body.evaluate((node) => {
       node.scrollTo({ top: Math.round(node.scrollHeight * 0.55), behavior: "instant" });
       node.dispatchEvent(new Event("scroll"));
     });
+    const railScrollReturnedAtMs = performance.now();
     await page.waitForTimeout(120);
-    const afterMiddleScroll = await pane.evaluate((node) => {
+    const railReadCallAtMs = performance.now();
+    const { readState: railReadState, ...afterMiddleScroll } = await pane.evaluate((node) => {
       const body = node.querySelector(".conv__body");
       const bodyRect = body?.getBoundingClientRect();
       const canvas = document.createElement("canvas");
@@ -2470,14 +2480,112 @@ async function runChatPaneTurnRailProof() {
             width: Math.round(tick?.getBoundingClientRect().width ?? 0),
           };
         });
+      // DIAGNOSTIC ONLY, not a fix. Everything from here to the return runs
+      // AFTER the tickData loop above has finished the measurement the
+      // assertions compare (every tick's computed background, its distance
+      // from the body color and its width), in this same page evaluation.
+      // Nothing here runs before that measurement, so nothing here can move
+      // a style or layout flush earlier than it was, add a wait, or change
+      // a value the assertions read. It only reads; it changes no attribute,
+      // style or scroll position. A throw in it is caught and printed, so
+      // it cannot fail the scenario.
+      let readState;
+      try {
+        // Read first, right after the measurement, so the clocks are as
+        // close to the measurement as a later read can be.
+        const clock = {
+          pageNowMs: performance.now(),
+          pageTimeOriginMs: performance.timeOrigin,
+          timelineMs: document.timeline ? document.timeline.currentTime : null,
+        };
+        // After the measurement: the state each tick is in right after its
+        // background was read. aria-current, the is-active class, hover and
+        // focus-visible are what the stylesheet's tick background rules
+        // select on; getAnimations() lists the transitions running on the
+        // tick, with how far along each is and what it runs between.
+        const ticks = [...node.querySelectorAll('[data-testid^="chat-turn-rail:person-worker-alpha:"]')]
+          .map((rail, index) => {
+            const tick = rail.querySelector(".conv-turn-rail__tick");
+            const animations = tick && typeof tick.getAnimations === "function" ? tick.getAnimations() : [];
+            return {
+              index,
+              ariaCurrent: rail.getAttribute("aria-current"),
+              isActiveClass: rail.classList.contains("is-active"),
+              hovered: rail.matches(":hover"),
+              focusVisible: rail.matches(":focus-visible"),
+              animations: animations.map((animation) => {
+                const effect = animation.effect;
+                const timing = effect && typeof effect.getComputedTiming === "function" ? effect.getComputedTiming() : null;
+                const keyframes = effect && typeof effect.getKeyframes === "function" ? effect.getKeyframes() : [];
+                return {
+                  kind: animation.constructor ? animation.constructor.name : "",
+                  property: animation.transitionProperty ?? null,
+                  playState: animation.playState,
+                  pending: animation.pending,
+                  startTimeMs: animation.startTime,
+                  currentTimeMs: animation.currentTime,
+                  progress: timing ? timing.progress : null,
+                  durationMs: timing ? timing.duration : null,
+                  delayMs: timing ? timing.delay : null,
+                  easing: timing ? timing.easing : null,
+                  keyframes: keyframes.map((keyframe) => {
+                    const { offset, computedOffset, easing, composite, ...values } = keyframe;
+                    return { offset: computedOffset, ...values };
+                  }),
+                };
+              }),
+            };
+          });
+        // After the measurement: the page settings a transition depends on.
+        const settings = {
+          reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+          darkScheme: matchMedia("(prefers-color-scheme: dark)").matches,
+          devicePixelRatio: window.devicePixelRatio,
+          visibilityState: document.visibilityState,
+        };
+        // Keep plain JSON data only; a value that is not fails here, inside
+        // the catch, and not when the evaluation returns its result.
+        readState = JSON.parse(JSON.stringify({ clock, ticks, settings }));
+      } catch (error) {
+        readState = { error: String(error) };
+      }
       return {
         activeIndexes,
         tickWidths: tickData.map((tick) => tick.width),
         visibleIndexes,
         activeTickStyles: tickData.filter((tick) => tick.active),
         inactiveTickStyles: tickData.filter((tick) => !tick.active),
+        readState,
       };
     });
+    const railReadReturnedAtMs = performance.now();
+    // DIAGNOSTIC ONLY, not a fix. One line with a stable prefix, written on
+    // a pass and on a failure alike: it is written here, after the read and
+    // before the three assertions on that read, so a failing run prints it
+    // too. "ticks" is the object the assertions below format into their
+    // messages, from the same read (the page is not read a second time);
+    // "beforeScroll" is what the scenario read before the scroll;
+    // "readInPage" compares this process's clock with the page's, so it is
+    // an estimate. The assertions, their messages, the threshold and every
+    // wait are unchanged.
+    const railMs = (value) => Math.round(value * 1000) / 1000;
+    const railPageReadAtMs = railReadState?.clock?.pageTimeOriginMs + railReadState?.clock?.pageNowMs;
+    process.stdout.write(`browser chat pane turn rail mid-scroll read: ${JSON.stringify({
+      ticks: afterMiddleScroll,
+      beforeScroll: {
+        activeIndexes: initialRail.activeIndexes,
+        visibleIndexes: initialRail.visibleIndexes,
+      },
+      sinceScrollCallMs: {
+        scrollReturned: railMs(railScrollReturnedAtMs - railScrollCallAtMs),
+        readCalled: railMs(railReadCallAtMs - railScrollCallAtMs),
+        readInPage: Number.isFinite(railPageReadAtMs)
+          ? railMs(railPageReadAtMs - (performance.timeOrigin + railScrollCallAtMs))
+          : null,
+        readReturned: railMs(railReadReturnedAtMs - railScrollCallAtMs),
+      },
+      readState: railReadState,
+    })}\n`);
     assert.deepEqual(
       afterMiddleScroll.activeIndexes,
       afterMiddleScroll.visibleIndexes,

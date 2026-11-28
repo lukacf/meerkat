@@ -53,7 +53,7 @@ pub use ingress::{
 pub(crate) use owner::DecisionEventBinding;
 pub(crate) use owner::EntryTimeClock;
 pub use owner::RuntimeDecisions;
-pub use stdio::{DecisionNoticeSink, StdioDecisionConnection};
+pub use stdio::{DecisionNoticeSink, DecisionOpeningsAtStart, StdioDecisionConnection};
 pub(crate) use wire::decision_error;
 pub use wire::{
     DECISION_NOTICE_METHOD, DECISIONS_METHOD_PREFIX, DecisionAttestationRequest,

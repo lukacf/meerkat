@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `StdioDecisionConnection::notice_openings(owner)` (Rust): the task a stdio gateway starts so that its connection tells the host of open decisions without a list.
+- `StdioDecisionConnection::notice_openings(owner)` (Rust): the task by which a stdio connection tells its host of open decisions without a list. A stdio gateway runs it in two steps: `DecisionOpeningsAtStart::read(owner)` before it reports that it is ready, and `StdioDecisionConnection::notice_openings_from(start)` once the connection serves. The connection that serves so reads the decision store of its own accord no more, and a second process on the state directory that writes its first decision as soon as the gateway is ready is not refused because of a read of the gateway's.
 
 ### Changed
 

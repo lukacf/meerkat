@@ -3532,8 +3532,11 @@ of what the caller may see may follow.
 The gateway tells the stdio host of each open decision with a
 `meta/decisions/notice` notification, without being asked: when a decision
 its own runtime opens is held (after the hold is stored), and, once the
-connection serves, for each decision that is already open then (one held
-before a restart, or by another process on the same store). A question set a
+connection serves, for each decision that was open when the gateway read
+its decision store at its start, before it answered `meta/init` (one held
+before a restart, or by another process on the same store before then). A
+gateway that serves reads the store for such a notice no more, so its start
+is the one moment it looks. A question set a
 member asked is such a decision (`kind` `ask_user.questions`), so a host
 hears of it with no list call. Before a `meta/decisions/list` answers, the
 gateway also writes one notice for each open decision of the page that no

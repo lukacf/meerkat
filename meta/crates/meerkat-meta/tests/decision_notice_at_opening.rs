@@ -11,6 +11,13 @@
 //! connection; the host's own list is what it was, so it writes its `held`
 //! once more for a decision the connection only pushed. Nothing is presented
 //! to the stdio operator by a push: that stays with the host's list.
+//!
+//! The decisions already open are read at the connection's start
+//! (`DecisionOpeningsAtStart::read`, which a gateway makes before it reports
+//! that it is ready) and noticed from that reading
+//! (`StdioDecisionConnection::notice_openings_from`): a connection that
+//! serves calls the store of its own accord only for a decision its own
+//! runtime opened. The last two rows count the store's calls to pin that.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,16 +27,18 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use meerkat_client::TestClient;
+use meerkat_core::approval::ApprovalStoreError;
 use meerkat_core::approval::decision::{
-    ApproverId, DECISION_PAGE_MAX, DecisionHoldRequest, DecisionKind, DecisionListFilter,
-    DecisionOperationId, DecisionPhase, DecisionPrincipalKey, DecisionRenderer, DecisionRendering,
-    DecisionRequestBody, DecisionSubjectKey, Sha256Digest, StoredDecision,
+    ApproverId, DECISION_PAGE_MAX, DecisionHoldRequest, DecisionId, DecisionKind,
+    DecisionListFilter, DecisionOperationId, DecisionPage, DecisionPhase, DecisionPrincipalKey,
+    DecisionRenderer, DecisionRendering, DecisionRequestBody, DecisionRow, DecisionStore,
+    DecisionSubjectKey, InMemoryDecisionStore, Sha256Digest, StoredDecision,
 };
 use meerkat_core::ask_user::AskUserQuestionSet;
 use meerkat_core::{PrincipalKind, PrincipalRef, RunId, TrustDomainId};
 use meerkat_meta::{
-    AccessControlConfig, AccessController, DecisionNoticeSink, StdioDecisionConnection,
-    UnifiedRuntime,
+    AccessControlConfig, AccessController, DecisionNoticeSink, DecisionOpeningsAtStart,
+    StdioDecisionConnection, UnifiedRuntime,
 };
 use meerkat_mob::MobDefinition;
 use meerkat_runtime::ask_user::{ASK_USER_QUESTIONS_KIND, AskUserHold, hold_ask_user};
@@ -690,6 +699,197 @@ model = "gpt-5.5"
 
     following.abort();
     runtime.shutdown().await;
+}
+
+/// A decision store that counts the calls made of it, over rows kept in
+/// memory.
+#[derive(Default)]
+struct CountingStore {
+    rows: InMemoryDecisionStore,
+    calls: AtomicUsize,
+}
+
+impl CountingStore {
+    /// How many calls the store has answered.
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn called(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl DecisionStore for CountingStore {
+    fn get(&self, decision_id: &DecisionId) -> Result<Option<DecisionRow>, ApprovalStoreError> {
+        self.called();
+        self.rows.get(decision_id)
+    }
+
+    fn insert_if_absent(&self, row: &StoredDecision) -> Result<(), ApprovalStoreError> {
+        self.called();
+        self.rows.insert_if_absent(row)
+    }
+
+    fn replace_if_revision(
+        &self,
+        expected_revision: u64,
+        row: &StoredDecision,
+    ) -> Result<(), ApprovalStoreError> {
+        self.called();
+        self.rows.replace_if_revision(expected_revision, row)
+    }
+
+    fn list(
+        &self,
+        filter: &DecisionListFilter,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<DecisionPage, ApprovalStoreError> {
+        self.called();
+        self.rows.list(filter, after, limit)
+    }
+
+    fn owed(&self, after: Option<&str>, limit: usize) -> Result<DecisionPage, ApprovalStoreError> {
+        self.called();
+        self.rows.owed(after, limit)
+    }
+
+    fn due(
+        &self,
+        now_ms: u64,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<DecisionPage, ApprovalStoreError> {
+        self.called();
+        self.rows.due(now_ms, after, limit)
+    }
+
+    fn count(&self, filter: &DecisionListFilter) -> Result<u64, ApprovalStoreError> {
+        self.called();
+        self.rows.count(filter)
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.rows.is_persistent()
+    }
+}
+
+/// A decision owner over a counting store, a connection that writes to
+/// `Notices`, and both.
+fn counted() -> (
+    Arc<CountingStore>,
+    DurableDecisionService,
+    Arc<StdioDecisionConnection>,
+    Arc<Notices>,
+) {
+    let store = Arc::new(CountingStore::default());
+    let backing: Arc<dyn DecisionStore> = store.clone();
+    let notices = Arc::new(Notices::new(None));
+    let sink: Arc<dyn DecisionNoticeSink> = notices.clone();
+    (
+        store,
+        DurableDecisionService::new(backing),
+        Arc::new(StdioDecisionConnection::new(None, sink)),
+        notices,
+    )
+}
+
+/// Let the other tasks of the row run until each of them waits. A row's
+/// runtime has one thread, so a task runs when the row yields and goes on
+/// until it waits for something; nothing here waits for time.
+async fn let_the_tasks_run() {
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// A connection that serves calls the decision store of its own accord
+/// only for a decision its own runtime opened. The decisions already open
+/// are read at its start (`DecisionOpeningsAtStart::read`: a gateway makes
+/// that reading before it reports that it is ready), and their notices are
+/// written from the reading. Another owner of the same store that writes as
+/// soon as the gateway is ready so meets no read of the gateway's: every
+/// connection to the store file, a read's too, opens it for writing, and a
+/// write that meets one answers at once that the store is held.
+///
+/// The store here counts its calls. Between the reading and the runtime's
+/// first opening there is none, though the connection notices the decision
+/// the reading found; the runtime's own opening is read again, as before.
+#[tokio::test]
+async fn a_serving_connection_calls_the_store_only_for_a_decision_its_runtime_opens() {
+    let (store, owner, connection, notices) = counted();
+    let before = hold(&owner, "operation-before-the-start");
+
+    // The reading at the start lists the open decisions.
+    let before_the_reading = store.calls();
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+    assert!(
+        store.calls() > before_the_reading,
+        "the reading at the start calls the store"
+    );
+    let after_the_reading = store.calls();
+
+    // The connection serves: the decision of the reading is noticed, and
+    // the store was not called for it.
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&before), ["held"]);
+    assert_eq!(notices.all().len(), 1);
+    assert_eq!(
+        store.calls(),
+        after_the_reading,
+        "a serving connection called the store before its runtime opened a decision"
+    );
+
+    // The runtime opens a decision: the connection reads it again and
+    // notices it; the earlier one is not noticed again.
+    let later = hold(&owner, "operation-after-the-start");
+    let after_the_hold = store.calls();
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&later), ["held"]);
+    assert_eq!(notices.events_of(&before), ["held"]);
+    assert!(
+        store.calls() > after_the_hold,
+        "a decision the runtime opens is read again before its notice"
+    );
+
+    following.abort();
+}
+
+/// Over a store that holds no decision the reading at the start is the
+/// only call: the connection that serves writes nothing and calls the store
+/// for nothing. This is the launch of another owner's first write: the
+/// gateway's store is still empty when it is ready.
+#[tokio::test]
+async fn a_serving_connection_over_an_empty_store_calls_it_for_nothing() {
+    let (store, owner, connection, notices) = counted();
+
+    let start = DecisionOpeningsAtStart::read(owner)
+        .await
+        .expect("an owner that keeps decisions is read");
+    let after_the_reading = store.calls();
+    assert!(
+        after_the_reading > 0,
+        "the reading at the start calls the store"
+    );
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert!(
+        notices.all().is_empty(),
+        "nothing is open: nothing is noticed"
+    );
+    assert_eq!(
+        store.calls(),
+        after_the_reading,
+        "a serving connection called a store that holds no decision"
+    );
+    assert!(!following.is_finished(), "the connection goes on following");
+
+    following.abort();
 }
 
 /// What the seed step appends to the name of the directory it seeded to name

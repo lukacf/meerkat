@@ -22529,6 +22529,16 @@ external_addressable = true
         serde_json::to_string(&init_response)
             .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
     );
+    // The decisions the connection tells its host of without a list are
+    // read here, BEFORE Ready is published: once the gateway is ready it
+    // reads the decision store of its own accord no more, so another owner
+    // of the store that writes as soon as it sees Ready meets no read of
+    // this process. On a launch that keeps no durable decisions, and on a
+    // candidate launch, there is nothing to read.
+    let decision_openings = crate::durable_decisions::DecisionOpeningsAtStart::read(
+        runtime.durable_decisions().owner().clone(),
+    )
+    .await;
     match host {
         Some(host) => {
             publish_native_bootstrap_ready(
@@ -22576,14 +22586,13 @@ external_addressable = true
         }),
     ));
     // The connection tells its host of each open decision without waiting
-    // for a list: of those the runtime opens from here on, and once of those
-    // already open (Ready is on the pipe before any of these notices). On a
-    // launch that keeps no durable decisions, and on a candidate launch, it
-    // follows nothing and the task ends at once.
-    let decision_notices = tokio::spawn(
-        Arc::clone(&decision_connection)
-            .notice_openings(runtime.durable_decisions().owner().clone()),
-    );
+    // for a list: of those the runtime opens after the reading above, and
+    // once of those that reading found open (Ready is on the pipe before
+    // any of these notices). On a launch that keeps no durable decisions,
+    // and on a candidate launch, there is no reading and no task.
+    let decision_notices = decision_openings.map(|openings| {
+        tokio::spawn(Arc::clone(&decision_connection).notice_openings_from(openings))
+    });
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -22665,7 +22674,9 @@ external_addressable = true
         // more, one in flight included when it commits, and it tells its
         // host of no further decision.
         decision_connection.close();
-        decision_notices.abort();
+        if let Some(decision_notices) = &decision_notices {
+            decision_notices.abort();
+        }
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`

@@ -203,6 +203,28 @@ sets are read with [`meta/gating/questions`](/api/rpc#meta%2Fgating%2Fquestions)
   a set is answered as an id that is not pending; a set of a member private
   to someone else is not listed to anyone else. Over the SDK transport the
   embedding host names `approver_id`, as for every `meta/gating/decide`.
+- **How an embedding host hears of a set.** The stdio gateway writes a
+  `meta/decisions/notice` with `event` `held` and `kind`
+  `ask_user.questions` when a set is held, and once for each set still open
+  when the gateway starts again, with no list call. A host registers a
+  handler (`on_decision_notice` in Python, `onDecisionNotice` in
+  TypeScript), reads the set with `meta/gating/questions` and answers it
+  with `meta/gating/decide`. See
+  [Notices on the stdio gateway](/api/rpc#notices-on-the-stdio-gateway).
+- **A launch needs a roster to serve questions.** A gateway serves its
+  agents' questions (it holds what they ask, lists the sets with
+  `meta/gating/questions` and takes their answers with
+  `meta/gating/decide`) only on a launch with a roster. On a launch
+  without one an `ask_user` call answers `no_human_surface` and holds
+  nothing. A question set that is already in such a launch's store (held
+  by an earlier launch with a roster over the same state directory, or by
+  another process on the store) is still noticed, with a genuine
+  `meta/decisions/notice`, and still listed by `meta/decisions/list`; but
+  `meta/gating/questions` returns no set and `meta/gating/decide` refuses
+  its id as one that is not pending. A host must not treat such a notice
+  as a readable question: the notice says that the decision is open in
+  the store, and the questions read says whether this launch can read and
+  answer it.
 - **Answering.** `meta/gating/decide` with the set's `pending_id`, the
   `presented_digest` the set was shown with and `decision` `approve` plus
   `answers` answers it; `reject` dismisses it; `escalate` is refused. A
@@ -227,15 +249,17 @@ sets are read with [`meta/gating/questions`](/api/rpc#meta%2Fgating%2Fquestions)
   Console can identify no person (it requires no sign-in and has no access
   control with a trusted token issuer) or takes no changes (a read-only
   Console); when the gateway keeps no durable decisions (a launch without a
-  persistent state directory); on a candidate launch; and when no answer
-  can be routed back to the asker, as for a member of a mob other than the
-  runtime's own (a sub-mob an agent created, for one).
+  persistent state directory); on a launch without a roster; on a
+  candidate launch; and when no answer can be routed back to the asker, as
+  for a member of a mob other than the runtime's own (a sub-mob an agent
+  created, for one).
 - **When the Console admits nobody.** A Console that requires sign-in and
   trusts no signing key refuses every caller. That is what a launch gets
   with neither `auth_config` nor `console_require_app_auth = false`, the
   SDKs' default. No person can answer a set in such a Console. Where a set
   is held at all (the cases above still answer `no_human_surface`, a launch
-  without a persistent state directory among them), the call still answers
+  without a persistent state directory or without a roster among them),
+  the call still answers
   `asked` and the set is held, because the embedding host can read and
   answer it over the SDK transport (`meta/gating/questions`,
   `meta/gating/decide`). The result's `note`, which the asking agent's model

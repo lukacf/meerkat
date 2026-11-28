@@ -37,6 +37,12 @@ use meerkat_meta::identity_first::{
 use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
 use meerkat_mob::{MobDefinition, ProfileName};
 
+// The restart row uses the shared support's lock reading and bounded wait
+// only when its second open is refused; it prints the shutdown's report
+// and does not assert on it, so the support's report checks are unused here.
+#[allow(dead_code)]
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -244,6 +250,14 @@ impl meerkat_client::LlmClient for ForkerScript {
     }
 }
 
+/// What a boot returns: the runtime, its session bridge and the forker's
+/// runtime id.
+type Booted = (
+    meerkat_meta::UnifiedRuntime,
+    Arc<dyn SessionBridge>,
+    meerkat_meta::identity_first::AgentRuntimeId,
+);
+
 async fn boot(
     state_path: &std::path::Path,
     script: &ForkerScript,
@@ -253,6 +267,18 @@ async fn boot(
     Arc<dyn SessionBridge>,
     meerkat_meta::identity_first::AgentRuntimeId,
 ) {
+    boot_checked(state_path, script, runtime_options)
+        .await
+        .expect("persistent spec")
+}
+
+/// The boot of [`boot`], answering a refused persistent spec (the open of the
+/// state directory) to its caller: the restart row measures on that answer.
+async fn boot_checked(
+    state_path: &std::path::Path,
+    script: &ForkerScript,
+    runtime_options: meerkat_meta::RuntimeOptions,
+) -> Result<Booted, meerkat_meta::StorageResolutionError> {
     // The gateway's persistent composition: persistent mob storage (the
     // library builder keeps mob state in memory), so raw members such as a
     // fork child survive a restart.
@@ -268,8 +294,7 @@ async fn boot(
         state_path.to_path_buf(),
         16,
     )
-    .await
-    .expect("persistent spec")
+    .await?
     // Creates no agent child mob (a fork child is a member of this mob). The
     // restart test boots twice in this process, which the durable child-mob
     // default refuses as a duplicate owner of the child root; explicit
@@ -345,7 +370,126 @@ async fn boot(
         }
         other => panic!("calendar was not created: {other:?}"),
     };
-    (unified, bridge, runtime_id)
+    Ok((unified, bridge, runtime_id))
+}
+
+/// What the kernel's lock table says of the execution custody of the runtime
+/// store in `state` (`support/custody_wait.rs`): whether it names a holder,
+/// `None` where it cannot be read.
+fn custody_holder(state: &std::path::Path) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut custody = state
+            .join(meerkat_meta::storage_layout::RUNTIME_DB_FILE_NAME)
+            .into_os_string();
+        custody.push(".execution-custody");
+        custody_wait::custody_holder_named(std::path::Path::new(&custody))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        None
+    }
+}
+
+/// [`custody_holder`], read up to three times. One reading of the kernel's
+/// table can miss a held entry (`support/custody_wait.rs`), so the first
+/// reading that does not say "no holder" decides, and "no holder" takes
+/// three readings in a row.
+fn custody_holder_repeated(state: &std::path::Path) -> Option<bool> {
+    (0..3)
+        .map(|_| custody_holder(state))
+        .find(|reading| *reading != Some(false))
+        .unwrap_or(Some(false))
+}
+
+/// The environment variable by which a hosted job names its summary file.
+const JOB_SUMMARY: &str = "GITHUB_STEP_SUMMARY";
+
+/// A reading of [`custody_holder`] in the words of a job summary line.
+fn holder_named(reading: Option<bool>) -> &'static str {
+    match reading {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "not readable",
+    }
+}
+
+/// The line a refused second open leaves in a job summary: the row, that its
+/// open made at once was refused, and whether the lock table named a holder
+/// of the execution custody right after the refusal and when the bounded
+/// wait had ended, with the time from the drop of the first lifetime to the
+/// end of that wait.
+fn refused_reopen_line(
+    row: &str,
+    after_refusal: Option<bool>,
+    waited: Duration,
+    after_wait: Option<bool>,
+) -> String {
+    format!(
+        "- reopen diagnostic: `{row}`: the second open, made at once after the first lifetime \
+         was dropped, was refused; a holder of the execution custody was named right after \
+         the refusal: {}, and {} ms after the drop, when the bounded wait had ended: {}\n",
+        holder_named(after_refusal),
+        waited.as_millis(),
+        holder_named(after_wait)
+    )
+}
+
+fn append_line(file: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(file)?
+        .write_all(line.as_bytes())
+}
+
+/// What the restart row does when its second open, made at once, is refused:
+/// it makes its observations, and the caller then fails the row with the
+/// refusal itself.
+///
+/// It reads the lock table right after the refusal, runs the shared bounded
+/// wait for the first lifetime's execution custody (`support/custody_wait.rs`:
+/// a poll with pauses of 10 ms, for at most 10 s), reads the table again, and
+/// returns one sentence with both readings and the times since the first
+/// lifetime's handles were dropped. Where the environment names a job summary
+/// file ([`JOB_SUMMARY`]) it appends [`refused_reopen_line`] to it; a line
+/// that cannot be written is said on stderr, and the row fails either way.
+///
+/// These are observations after the refusal, not a measurement of the
+/// release. The time to the end of the wait includes the refused open and
+/// the readings. It bounds the release from above only when a holder was
+/// named right after the refusal and none when the wait had ended; when a
+/// holder is still named then, it says that one was still named that long
+/// after the drop; when none was named right after the refusal, it says
+/// nothing of the custody. The readings say whether a holder is named, not
+/// who it is. `answered` is the time from the drop to the refusal, the one
+/// figure the row also prints.
+async fn measure_refused_reopen(
+    row: &str,
+    state_path: &std::path::Path,
+    dropped: std::time::Instant,
+    answered: Duration,
+) -> String {
+    let after_refusal = custody_holder_repeated(state_path);
+    custody_wait::predecessor_custody_released(state_path).await;
+    let waited = dropped.elapsed();
+    let after_wait = custody_holder_repeated(state_path);
+    if let Some(summary) = std::env::var_os(JOB_SUMMARY).filter(|path| !path.is_empty()) {
+        let line = refused_reopen_line(row, after_refusal, waited, after_wait);
+        if let Err(error) = append_line(std::path::Path::new(&summary), &line) {
+            eprintln!("reopen diagnostic: the job summary did not take the line ({error}): {line}");
+        }
+    }
+    format!(
+        "reopen diagnostic: the second open, made at once, was refused {answered:?} after \
+         the first lifetime's handles were dropped; whether the kernel's lock table named a \
+         holder of the execution custody (None: it could not be read): right after the \
+         refusal {after_refusal:?}, and when the bounded wait ended, {waited:?} after the \
+         drop, {after_wait:?}"
+    )
 }
 
 async fn deliver(
@@ -427,19 +571,75 @@ async fn a_forker_checks_and_retires_its_idle_fork_child_after_a_restart() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    unified.shutdown().await;
+    // The restart, as it always was: shutdown, the two drops, and the second
+    // open AT ONCE. Nothing is added between the shutdown's return and that
+    // open but two clock readings: no wait, no reading of the lock table (one
+    // takes milliseconds, which is a wait), no print. So on an open that
+    // succeeds the row holds no reading from after the drop: taking one
+    // would delay the open.
+    //
+    // What the row now observes: the shutdown's whole report and its
+    // duration (printed, not asserted); whether the kernel's lock table names
+    // a holder of the state directory's execution custody while the first
+    // lifetime is live (printed, not asserted; it shows that the table can
+    // name the file on this host); how long after the drop the second open
+    // answered; and, only when that open is refused, what the lock table said
+    // right after the refusal and when a bounded wait had ended, with the
+    // times since the drop ([`measure_refused_reopen`]).
+    //
+    // What it still assumes, and so still tests: that the second open
+    // succeeds at once. The guide says a shutdown's report does not prove
+    // that dropping the runtime frees the state directory at once for another
+    // runtime in the same process, so a refusal here is not a broken promise
+    // of the public text; the row fails on it as before, and now reports
+    // those observations.
+    let while_live = custody_holder(&state_path);
+    let asked = std::time::Instant::now();
+    // The report stays alive across the second open, for the print (main
+    // dropped it here). As far as read it holds the shutdown's outcome
+    // values and no handle of the runtime; a member whose retirement is
+    // stuck carries a shared error value, not traced further.
+    let report = unified.shutdown().await;
+    let shutdown_took = asked.elapsed();
     drop(unified);
     drop(bridge);
+    let dropped = std::time::Instant::now();
 
     script
         .phase
         .store(PHASE_CHECK_AND_RETIRE, std::sync::atomic::Ordering::SeqCst);
-    let (unified, bridge, runtime_id) = boot(
+    let second = boot_checked(
         &state_path,
         &script,
         meerkat_meta::RuntimeOptions::default(),
     )
     .await;
+    let answered = dropped.elapsed();
+    eprintln!(
+        "reopen diagnostic: the first lifetime's shutdown returned after {shutdown_took:?} \
+         with: {report:?}"
+    );
+    eprintln!(
+        "reopen diagnostic: the second open, made at once, answered {answered:?} after the \
+         first lifetime's handles were dropped: {} (when it opened, that is the time of \
+         the whole boot, not of the open alone); the kernel's lock table named a holder \
+         of the execution custody while the first lifetime was live: {while_live:?} (None: \
+         it could not be read)",
+        if second.is_ok() { "opened" } else { "REFUSED" }
+    );
+    let (unified, bridge, runtime_id) = match second {
+        Ok(booted) => booted,
+        Err(refused) => {
+            let measured = measure_refused_reopen(
+                "a_forker_checks_and_retires_its_idle_fork_child_after_a_restart",
+                &state_path,
+                dropped,
+                answered,
+            )
+            .await;
+            panic!("persistent spec: {refused:?}\n{measured}");
+        }
+    };
     let restored = unified
         .mob_handle()
         .get_member(&child)
@@ -556,4 +756,32 @@ async fn an_idle_retired_fork_child_reads_as_typed_member_retired() {
         );
     }
     unified.shutdown().await;
+}
+
+/// The line a refused second open leaves in a job summary
+/// ([`measure_refused_reopen`]) is one line appended to the file: what the
+/// file holds already stays, and the line names the row, the refusal, both
+/// readings and the time from the drop to the end of the bounded wait.
+#[test]
+fn a_refused_reopen_appends_one_line_to_a_job_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let summary = dir.path().join("summary.md");
+    std::fs::write(&summary, "an earlier line\n").unwrap();
+    append_line(
+        &summary,
+        &refused_reopen_line(
+            "a_reopen_row",
+            Some(true),
+            Duration::from_millis(37),
+            Some(false),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&summary).unwrap(),
+        "an earlier line\n- reopen diagnostic: `a_reopen_row`: the second open, made at once \
+         after the first lifetime was dropped, was refused; a holder of the execution custody \
+         was named right after the refusal: yes, and 37 ms after the drop, when the bounded \
+         wait had ended: no\n"
+    );
 }

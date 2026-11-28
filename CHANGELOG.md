@@ -35,6 +35,10 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-tools`: `skill_list_resources` no longer reports a skill the skill listing shows as not found. For such a skill, when no source returned a resource listing, the call failed with `skill not found: <source_uuid>/<skill_name>`, the answer for a key no source holds. Now, when the resource listing answers not found, the tool reads whether the skill listing shows the key (the listing `browse_skills` shows, for the key's source), and if it does the call fails with `The skill <source_uuid>/<skill_name> is listed, but no source returned a resource listing for it. This is not an empty listing. If load_skill is available, call it with this key to use the skill.` Unchanged: a key the skill listing does not show still answers `skill not found: <source_uuid>/<skill_name>`, whether no source holds it or the listing hides it from the caller (a skill whose required capability is unavailable, for one), so the new answer reveals no hidden skill; a successful resource listing, empty or not, is returned as before; the order in which sources are asked is unchanged; the tool error keeps its code (`execution_failed`). No public type, wire format, schema or SDK changes.
+
 ## [0.9.19] - 2026-11-26
 
 ### Breaking

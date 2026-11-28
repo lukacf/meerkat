@@ -61,15 +61,18 @@ name: Meta CI
 #                              cases (a pull request also runs the gateway
 #                              binaries' voice cases)
 #   rust-voice-lib           - pull requests: that feature's lib voice cases
-#   console-backends         - the five acceptance backends, built once for
-#                              the console and console-browser jobs
+#   console-backends         - the five acceptance backends and the incident
+#                              pack's two binaries, built once for the
+#                              console, console-browser and
+#                              console-acceptance jobs
 #   console                  - console contracts and the API, voice, memory
 #                              and workgraph suites
 #   console-browser (x7)     - the browser scenarios, --shard=i/6, and the
 #                              native MCP Apps checks in a leg of their own
 #   console-fixtures         - the customization fixtures and the acceptance
 #                              fixture's own tests
-#   console-acceptance       - the stock incident topology acceptance
+#   console-acceptance       - the stock incident topology acceptance, on
+#                              the two binaries console-backends built
 #   console-perf             - composer typing in a real browser (no Rust)
 #   flow-editor-contracts    - the flow editor's source, projection and
 #                              visual contracts (no Rust)
@@ -454,121 +457,21 @@ jobs:
       # compiled: the package's lib tests, default features, Cargo's test
       # profile. Meta's 16 MiB stack (ci/products.json test_stack) is set
       # here too, as it was for that compile.
-      # While the archive command runs, a background sampler prints one
-      # "resource reading" line every 30 seconds into this step's own log:
-      # memory available, swap used, memory pressure, the root file system's
-      # free space (and the target directory's file system when it is
-      # another one) and resident memory summed under fixed labels. A
-      # process name is only compared with a fixed list and never printed;
-      # no line holds arguments, environment values or paths. At most 200
-      # samples, each command under its own time limit. A build whose runner
-      # is lost while Meta compiles then leaves its last readings in the
-      # log. Readings only: nothing is cleaned, retried or resized, and no
-      # cause is claimed; a gap in the lines is missing evidence, not a
-      # diagnosis. The sampler's failures are ignored and the step's exit
-      # status is the archive command's. The sampler waits in one-second
-      # slices and leaves as soon as its parent is no longer this step's
-      # shell, so it outlives that shell by about a second at most
-      # (scripts/test_ci_workflow.py runs this script).
+      # The archive command runs under scripts/ci-resource-readings.sh, the one
+      # implementation of the readings: while the command runs, the script's
+      # sampler prints one "resource reading" line every 30 seconds into this
+      # step's own log (memory available, swap used, memory pressure, free
+      # disk space and resident memory summed under fixed labels; numbers and
+      # fixed words only, no arguments, environment values or paths). A build
+      # whose runner is lost while Meta compiles leaves its last readings
+      # only where its log is kept. Readings only: the sampler's failures are
+      # ignored and the step's exit status is the archive command's
+      # (scripts/test_ci_workflow.py runs the script and this step).
       - name: Build the lib test archive
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: |
-          set +e
-          (
-            export TZ=UTC
-            trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
-            place="${CARGO_TARGET_DIR}"
-            while [[ "${place}" == */* && ! -e "${place}" ]]; do place="${place%/*}"; done
-            if [[ ! -e "${place}" ]]; then place=/; fi
-            root_device="$(exec timeout 10 stat -c %d /)"
-            target_device="$(exec timeout 10 stat -c %d -- "${place}")"
-            distinct=""
-            if [[ "${root_device}" =~ ^[0-9]+$ && "${target_device}" =~ ^[0-9]+$ && "${root_device}" != "${target_device}" ]]; then
-              distinct=yes
-            fi
-            for ((sample = 1; sample <= 200; sample++)); do
-              total="" available="" swap_total="" swap_free=""
-              while read -r key value _; do
-                case "${key}" in
-                  MemTotal:) total="${value}" ;;
-                  MemAvailable:) available="${value}" ;;
-                  SwapTotal:) swap_total="${value}" ;;
-                  SwapFree:) swap_free="${value}" ;;
-                esac
-              done < /proc/meminfo
-              memory="unavailable"
-              if [[ "${total}" =~ ^[0-9]+$ && "${available}" =~ ^[0-9]+$ ]]; then
-                memory="$((available / 1024)) MiB available of $((total / 1024)) MiB"
-              fi
-              swap="unavailable"
-              if [[ "${swap_total}" =~ ^[0-9]+$ && "${swap_free}" =~ ^[0-9]+$ ]]; then
-                swap="$(((swap_total - swap_free) / 1024)) MiB used of $((swap_total / 1024)) MiB"
-              fi
-              pressure="unavailable"
-              while read -r kind average _; do
-                if [[ "${kind}" == full && "${average}" =~ ^avg10=[0-9.]+$ ]]; then pressure="${average#avg10=}"; fi
-              done < /proc/pressure/memory
-              root="unavailable"
-              if [[ "$(exec timeout 10 stat -f -c '%a %b %S' /)" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
-                root="$((BASH_REMATCH[1] * BASH_REMATCH[3] / 1048576)) MiB free of $((BASH_REMATCH[2] * BASH_REMATCH[3] / 1048576)) MiB"
-              fi
-              target=""
-              if [[ -n "${distinct}" ]]; then
-                target="; target filesystem unavailable"
-                if [[ "$(exec timeout 10 stat -f -c '%a %b %S' -- "${place}")" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
-                  target="; target filesystem $((BASH_REMATCH[1] * BASH_REMATCH[3] / 1048576)) MiB free of $((BASH_REMATCH[2] * BASH_REMATCH[3] / 1048576)) MiB"
-                fi
-              fi
-              compiler=0 linker=0 cache=0 build=0 runner=0 other=0 counted=""
-              for entry in /proc/[0-9]*/status; do
-                name="" resident=""
-                while read -r key value rest; do
-                  case "${key}" in
-                    Name:) name="${value}${rest:+ ${rest}}" ;;
-                    VmRSS:)
-                      resident="${value}"
-                      break
-                      ;;
-                  esac
-                done < "${entry}"
-                if [[ ! "${resident}" =~ ^[0-9]+$ ]]; then continue; fi
-                counted=yes
-                case "${name}" in
-                  rustc) compiler=$((compiler + resident)) ;;
-                  ld | mold | ld.lld | lld | collect2 | cc | gcc) linker=$((linker + resident)) ;;
-                  sccache) cache=$((cache + resident)) ;;
-                  cargo) build=$((build + resident)) ;;
-                  cargo-nextest) runner=$((runner + resident)) ;;
-                  *) other=$((other + resident)) ;;
-                esac
-              done
-              sums="unavailable"
-              if [[ -n "${counted}" ]]; then
-                sums="compiler $((compiler / 1024)) MiB, linker $((linker / 1024)) MiB, compile cache $((cache / 1024)) MiB"
-                sums+=", build tool $((build / 1024)) MiB, test runner $((runner / 1024)) MiB, other $((other / 1024)) MiB"
-              fi
-              printf -v now '%(%H:%M:%SZ)T' -1
-              printf 'resource reading [%s] %d: memory %s; swap %s; memory pressure full avg10 %s; root filesystem %s%s; resident: %s\n' \
-                "${now}" "${sample}" "${memory}" "${swap}" "${pressure}" "${root}" "${target}" "${sums}"
-              for ((slice = 0; slice < 30; slice++)); do
-                parent=""
-                read -r _ _ _ parent _ < "/proc/${BASHPID}/stat"
-                if [[ "${parent:-$$}" != "$$" ]] || ! kill -0 "$$"; then exit 0; fi
-                sleep 1 &
-                nap=$!
-                wait "${nap}" || exit 0
-              done
-            done
-          ) 2>/dev/null &
-          sampler=$!
-          ./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings --archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
-          status=$?
-          kill "${sampler}" 2>/dev/null
-          pkill -P "${sampler}" 2>/dev/null
-          wait "${sampler}" 2>/dev/null
-          exit "${status}"
+        run: ./scripts/ci-resource-readings.sh ./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings --archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -931,7 +834,7 @@ jobs:
       # default profile, as before; a partition that selects no test fails
       # (nextest's documented default, stated). (A block: the lane doctor
       # reads a one-line `run:` that starts with cargo as a wrapper bypass.)
-      # No resource sampler here: a leg compiles nothing, and the "resource
+      # No resource readings here: a leg compiles nothing, and the "resource
       # reading" lines are printed where the harness is compiled, by
       # rust-unit-build's "Build the lib test archive" step.
       - name: Lib tests
@@ -1291,6 +1194,15 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # The runner's size, once, before the compile: processors, memory, disk
+      # and swap, the lines the unit build's swap step prints first
+      # (scripts/ci-resource-readings.sh --size). It adds no swap and changes
+      # nothing, and continue-on-error keeps a failure here from failing the
+      # job.
+      - name: Show the runner's size before the compile
+        continue-on-error: true
+        working-directory: .
+        run: ./scripts/ci-resource-readings.sh --size
       # Measurement only: the compiler cache's counters before the compile,
       # into a file. It prints nothing and cannot fail the job.
       - name: Compile statistics, before
@@ -1298,11 +1210,22 @@ jobs:
         shell: bash
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
-      - name: Extension-state lib tests
+      # The compile, in a step of its own: the lib test harness with the
+      # job's features is built and nothing runs. The job compiled and ran
+      # its tests in one step: a runner lost in such a step leaves one step
+      # record and no word on whether the compile had ended. The command is
+      # the test step's own, with `--no-run` in place of the filters and with
+      # Cargo's `--timings`, on the same stack, so that the test step below
+      # finds the build fresh and compiles nothing again (its own Cargo lines
+      # show whether it did). It runs under scripts/ci-resource-readings.sh,
+      # which prints one "resource reading" line every 30 seconds into this
+      # step's log (numbers and fixed words only; nothing of the environment)
+      # and exits with the build's status.
+      - name: Build the extension-state lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib --timings -- extension_ document_mcp_child_supply
+        run: ./scripts/ci-resource-readings.sh ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib --timings --no-run
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -1546,6 +1469,13 @@ jobs:
               except Exception as error:
                   say(f"unknown (a part of the report failed: {type(error).__name__})")
           PY
+      # The tests, on the build of the step above: the same package, features
+      # and stack, and the job's filters.
+      - name: Extension-state lib tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib -- extension_ document_mcp_child_supply
       # The reports Cargo wrote for the compile (--timings), as evidence
       # beside the lines above. Never a reason to fail the job.
       - name: Retain the Cargo timing reports
@@ -1663,6 +1593,15 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # The runner's size, once, before the compile: processors, memory, disk
+      # and swap, the lines the unit build's swap step prints first
+      # (scripts/ci-resource-readings.sh --size). It adds no swap and changes
+      # nothing, and continue-on-error keeps a failure here from failing the
+      # job.
+      - name: Show the runner's size before the compile
+        continue-on-error: true
+        working-directory: .
+        run: ./scripts/ci-resource-readings.sh --size
       # Measurement only: the compiler cache's counters before the compile,
       # into a file. It prints nothing and cannot fail the job.
       - name: Compile statistics, before
@@ -1670,13 +1609,23 @@ jobs:
         shell: bash
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
-      - name: Voice lib cases
+      # The compile, in a step of its own: the lib test harness with the
+      # openai-live feature is built once, for both commands of the test
+      # step, and nothing runs. The job compiled and ran its tests in one
+      # step: a runner lost in such a step leaves one step record and no word
+      # on whether the compile had ended. The command is the test commands'
+      # own, with `--no-run` in place of the filter and with Cargo's
+      # `--timings`, on the same stack, so that the test step below finds the
+      # build fresh and compiles nothing again (its own Cargo lines show
+      # whether it did). It runs under scripts/ci-resource-readings.sh, which
+      # prints one "resource reading" line every 30 seconds into this step's
+      # log (numbers and fixed words only; nothing of the environment) and
+      # exits with the build's status.
+      - name: Build the voice lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: |
-          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings console_voice
-          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration
+        run: ./scripts/ci-resource-readings.sh ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings --no-run
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -1920,6 +1869,15 @@ jobs:
               except Exception as error:
                   say(f"unknown (a part of the report failed: {type(error).__name__})")
           PY
+      # The tests, on the build of the step above: the same package, feature
+      # and stack, and the job's two filters.
+      - name: Voice lib cases
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: |
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib console_voice
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration
       # The reports Cargo wrote for the compile (--timings), as evidence
       # beside the lines above. Never a reason to fail the job.
       - name: Retain the Cargo timing reports
@@ -1938,6 +1896,12 @@ jobs:
   # as one archive (example-backend.cjs runs META_EXAMPLE_BIN_DIR's binaries
   # and never falls back to cargo). Each browser leg built them itself
   # before: 393 s of a 14.3-minute leg (run 38776842877).
+  # The same one compile also builds the incident pack's two binaries (the
+  # example incident_command_center and the bin mcp_fixture: the same
+  # package, profile and features) for console-acceptance, which compiled the
+  # same library a second time. That job checks the two files it unpacks
+  # against the digests this job publishes as outputs, so it runs the bytes
+  # this run built.
   console-backends:
     name: console-backends
     needs: changes
@@ -1949,6 +1913,9 @@ jobs:
       id-token: write
     env:
       RUSTC_WRAPPER: sccache
+    outputs:
+      incident_command_center_sha256: ${{ steps.incident_digests.outputs.incident_command_center }}
+      mcp_fixture_sha256: ${{ steps.incident_digests.outputs.mcp_fixture }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -1987,7 +1954,7 @@ jobs:
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
       - name: Build console acceptance backends
         working-directory: .
-        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture --timings
+        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture --example incident_command_center --bin mcp_fixture --timings
       # Measurement only: the difference of the compiler cache's counters
       # across the compile, and the timing report Cargo wrote. Every figure
       # is one the tool states; what cannot be read is printed as "unknown".
@@ -1999,7 +1966,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
-          INSTR_SELECTION: "meerkat-meta examples library_mode_reference, console_acceptance_fixture, memory_console_reference, workgraph_console_reference, mcp_apps_gateway_fixture, default features"
+          INSTR_SELECTION: "meerkat-meta examples library_mode_reference, console_acceptance_fixture, memory_console_reference, workgraph_console_reference, mcp_apps_gateway_fixture, incident_command_center, bin mcp_fixture, default features"
           INSTR_PACKAGE: meerkat-meta
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
@@ -2232,9 +2199,20 @@ jobs:
                   say(f"unknown (a part of the report failed: {type(error).__name__})")
           PY
       # The artifact keeps no file mode; the archive keeps the binaries
-      # executable.
+      # executable. The bin sits beside the examples' directory, not in it.
       - name: Pack the backends
-        run: tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" library_mode_reference console_acceptance_fixture memory_console_reference workgraph_console_reference mcp_apps_gateway_fixture
+        run: tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" library_mode_reference console_acceptance_fixture memory_console_reference workgraph_console_reference mcp_apps_gateway_fixture incident_command_center -C "${CARGO_TARGET_DIR}/debug" mcp_fixture
+      # What console-acceptance checks its two files against: the digests of
+      # the files as built, published as this job's outputs (not through the
+      # archive they describe).
+      - name: Record the incident pack binaries' digests
+        id: incident_digests
+        run: |
+          for name in examples/incident_command_center mcp_fixture; do
+            digest="$(sha256sum "${CARGO_TARGET_DIR}/debug/${name}" | cut -d' ' -f1)"
+            echo "console-backends built ${name##*/} sha256 ${digest}"
+            echo "${name##*/}=${digest}" >> "${GITHUB_OUTPUT}"
+          done
       - name: Retain the backends
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -2464,28 +2442,25 @@ jobs:
         run: npm --prefix console run fixtures:console-customization --silent
 
   # Needs Playwright (it captures screenshots) and its own two binaries,
-  # built here through the root wrapper; the pack's script runs them from
-  # META_EXAMPLE_BIN_DIR. The bundles are built first, as the script did
-  # before its own build, so the example embeds fresh ones.
+  # which console-backends builds with the acceptance backends; the pack's
+  # script runs them from META_EXAMPLE_BIN_DIR and compiles nothing here.
+  # They embed the bundles console-backends built before its compile. This
+  # job still builds the bundles first, as it did before its own compile.
   console-acceptance:
     name: console-acceptance
-    needs: changes
+    needs: [changes, console-backends]
     if: needs.changes.outputs.console == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      # The incident example and its fixture build against all of Core next
-      # to Playwright's Chromium, and the runner's root disk is the limit
-      # (rust-integration ran out of it on PR #2011's runs). No step here
-      # uses these preinstalled toolchains.
+      # Written for the compile this job no longer runs, next to Playwright's
+      # Chromium on the runner's root disk. It stays: the job now holds the
+      # backends' archive there instead, and no run of it has yet shown the
+      # headroom without this step. No step here uses these preinstalled
+      # toolchains.
       - name: Free runner disk
         run: |
           df -h /
@@ -2496,35 +2471,46 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: meta/console/package-lock.json
-      - name: Setup Rust
-        uses: ./.github/actions/setup-rust-ci
-      - name: Setup sccache
-        uses: ./.github/actions/setup-sccache-ci
+      - name: Fetch the console acceptance backends
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
-          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
-          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
-          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
-      - name: Setup mold linker
-        uses: ./.github/actions/setup-mold-ci
-      - name: Restore the cargo registry
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: false
-          shared-key: ci-registry
-          cache-targets: "false"
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends
+      # Only the pack's two binaries are unpacked. Each must be the file
+      # console-backends built in this run: its digest is compared with the
+      # one that job published, both are printed, and a difference or a
+      # missing digest fails the job here, before the acceptance runs.
+      # The script runs the server from META_EXAMPLE_BIN_DIR. The server
+      # looks for mcp_fixture by itself: CARGO_BIN_EXE_mcp_fixture first,
+      # then Cargo's target directory, and it builds the bin when it finds
+      # neither. The variable names the checked file, so the server runs
+      # that file, and refuses a missing one, in a job that compiles nothing.
+      - name: Unpack and verify the incident pack's binaries
+        env:
+          BUILT_INCIDENT_COMMAND_CENTER_SHA256: ${{ needs.console-backends.outputs.incident_command_center_sha256 }}
+          BUILT_MCP_FIXTURE_SHA256: ${{ needs.console-backends.outputs.mcp_fixture_sha256 }}
+        run: |
+          bin_dir="${RUNNER_TEMP}/console-backends/bin"
+          mkdir -p "${bin_dir}"
+          tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar" incident_command_center mcp_fixture
+          status=0
+          for name in incident_command_center mcp_fixture; do
+            built_variable="BUILT_${name^^}_SHA256"
+            built="${!built_variable}"
+            unpacked="$(sha256sum "${bin_dir}/${name}" | cut -d' ' -f1)"
+            echo "console-backends built ${name} sha256 ${built:-missing}"
+            echo "console-acceptance unpacked ${name} sha256 ${unpacked}"
+            if [[ ! "${built}" =~ ^[0-9a-f]{64}$ || "${built}" != "${unpacked}" ]]; then
+              echo "::error::${name} is not the file console-backends built in this run"
+              status=1
+            fi
+          done
+          if [[ "${status}" != 0 ]]; then exit 1; fi
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+          echo "CARGO_BIN_EXE_mcp_fixture=${bin_dir}/mcp_fixture" >> "${GITHUB_ENV}"
       - run: npm --prefix console ci --silent --no-fund --no-audit
       - run: npm --prefix console exec -- playwright install --with-deps chromium
       - run: npm --prefix console run build --silent
-      - name: Build the incident pack's binaries
-        working-directory: .
-        run: |
-          ./scripts/repo-cargo build -p meerkat-meta --example incident_command_center --bin mcp_fixture
-          bin_dir="${RUNNER_TEMP}/incident-bins"
-          mkdir -p "${bin_dir}"
-          ln -s "${CARGO_TARGET_DIR}/debug/examples/incident_command_center" "${CARGO_TARGET_DIR}/debug/mcp_fixture" "${bin_dir}/"
-          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
       - name: Stock incident topology acceptance
         run: examples/001-incident-command-center-pack/topology_examples.sh
       - name: Upload incident topology screenshots
@@ -2789,7 +2775,7 @@ jobs:
           GUARD_LANE_REASONS: "{}"
           GUARD_LANE_JOBS: ""
           # The jobs that wait for another job besides the classification.
-          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends;rust-unit*=rust-unit-build
+          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends;console-acceptance=console-backends;rust-unit*=rust-unit-build
           # Seconds to wait before each retry of a GitHub API request that
           # answered with a server error (5xx).
           API_RETRY_DELAYS: 5 10 20

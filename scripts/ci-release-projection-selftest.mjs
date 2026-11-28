@@ -919,7 +919,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
   assert.equal(metaEnv.GATE_JOB_NAME, "Meta gate");
   assert.equal(
     metaEnv.LANE_UPSTREAMS,
-    "console=console-backends;console-browser*=console-backends;rust-unit*=rust-unit-build",
+    "console=console-backends;console-browser*=console-backends;console-acceptance=console-backends;rust-unit*=rust-unit-build",
   );
   // The backends waited 100 s for a runner and ran 500 s; the console job
   // ran 400 s after them, a browser leg 300 s after a 63 s queue.

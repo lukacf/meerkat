@@ -1030,15 +1030,21 @@ fn minimal_decision_state() -> RuntimeDecisionState {
 /// the questions a member asks with `ask_user`: the console cannot answer
 /// them, and where the gateway holds them the program that embeds it still
 /// can. The warning is logged on the sign-in posture alone, and a gateway
-/// holds a question set only on a launch with a persistent state directory,
-/// so the text says where the second half applies.
+/// holds a question set only on a launch with a persistent state directory
+/// and a roster, so the text says where the second half applies. It also
+/// says what a launch without a roster does: its gateway serves no
+/// questions, and still notices and lists a question set its store already
+/// holds, which the two question methods neither return nor take there.
 const CONSOLE_CLOSED_TO_EVERY_CALLER_WARNING: &str = "console requires app auth but trusts no signing key: every console request will be \
      refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
      runtime_options.console_require_app_auth = false for an explicitly open local console. \
      Until then no person can answer a member's `ask_user` questions in the console; where \
-     this gateway holds them (a launch with a persistent state directory), the program that \
-     embeds this gateway can still answer them over its own connection \
-     (meta/gating/questions, meta/gating/decide)";
+     this gateway holds them (a launch with a persistent state directory and a roster), the \
+     program that embeds this gateway can still answer them over its own connection \
+     (meta/gating/questions, meta/gating/decide). On a launch without a roster this gateway \
+     serves no questions: an `ask_user` call holds nothing, and a question set already in its \
+     store is still noticed (meta/decisions/notice) and listed (meta/decisions/list), but \
+     meta/gating/questions returns none and meta/gating/decide does not take its id";
 
 /// The HTTP listener exposure gate, run before any bootstrap work. The
 /// decision state it consults is the one the console will serve with:
@@ -6027,7 +6033,9 @@ ingress_subjects = [{ ingress = "chat", subject = "U123" }]
     /// that means for the questions a member asks: no person can answer
     /// them in the console, and where the gateway holds them the program
     /// that embeds it still can. It never says that nobody can answer, and
-    /// it never promises an answer on a launch that holds no questions.
+    /// it never promises an answer on a launch that holds no questions: it
+    /// names the roster such a launch needs, and says that a launch without
+    /// one still notices and lists a set it can neither return nor take.
     #[test]
     fn the_closed_console_warning_names_what_it_means_for_questions() {
         let warning = CONSOLE_CLOSED_TO_EVERY_CALLER_WARNING;
@@ -6042,8 +6050,19 @@ ingress_subjects = [{ ingress = "chat", subject = "U123" }]
         assert!(warning.contains("no person can answer"), "{warning}");
         assert!(
             warning.contains(
-                "where this gateway holds them (a launch with a persistent state directory), \
-                 the program that embeds this gateway can still answer"
+                "where this gateway holds them (a launch with a persistent state directory and \
+                 a roster), the program that embeds this gateway can still answer"
+            ),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("On a launch without a roster this gateway serves no questions"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains(
+                "is still noticed (meta/decisions/notice) and listed (meta/decisions/list), but \
+                 meta/gating/questions returns none and meta/gating/decide does not take its id"
             ),
             "{warning}"
         );
@@ -22556,6 +22575,15 @@ external_addressable = true
             stdout_tx: stdout_tx.clone(),
         }),
     ));
+    // The connection tells its host of each open decision without waiting
+    // for a list: of those the runtime opens from here on, and once of those
+    // already open (Ready is on the pipe before any of these notices). On a
+    // launch that keeps no durable decisions, and on a candidate launch, it
+    // follows nothing and the task ends at once.
+    let decision_notices = tokio::spawn(
+        Arc::clone(&decision_connection)
+            .notice_openings(runtime.durable_decisions().owner().clone()),
+    );
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -22634,8 +22662,10 @@ external_addressable = true
             while inflight.try_join_next().is_some() {}
         };
         // The connection ended: no operator decide on it is eligible any
-        // more, one in flight included when it commits.
+        // more, one in flight included when it commits, and it tells its
+        // host of no further decision.
         decision_connection.close();
+        decision_notices.abort();
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`

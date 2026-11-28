@@ -4,6 +4,28 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+### Changed
+
+- `MetaRuntime.on_decision_notice(handler)`: with a stdio gateway of this
+  release the handler is called for an open durable decision without a
+  `MobHandle.decisions_list` call: once when the gateway's runtime opens the
+  decision, or once when the connection starts for a decision already open.
+  A question set a member asked (`kind` `ask_user.questions`) arrives this
+  way; read it with `MobHandle.gating_questions`. That read returns it on a
+  launch with a roster only: on a launch without one a set already in the
+  store is still noticed and still listed by `decisions_list`, while
+  `gating_questions` returns no set and `gating_answer` is refused, so such
+  a notice is not a readable question. A list still writes its
+  own notice, so a host with a handler that also lists is called with
+  `held` twice for one decision. A `held` notice that arrives before a
+  handler is registered is no longer dropped: the SDK keeps one per
+  decision, for the newest 1024 decisions, and calls the handler with them
+  when it registers; a `presented` notice is not kept. Register the handler
+  from the runtime's running event loop: registered where no loop runs, it
+  receives the kept notices only before the next notice that arrives. A
+  host that registers no handler sees no change. See Changed and Upgrade
+  notes in Meta's changelog.
+
 ### Upgrade notes
 
 - `DispatchInput.connector` now accepts `correlation_id` and `idempotency_key` together, or neither. **Behavior change:** a correlation-only call previously returned an input that was refused at dispatch; it now raises `ValueError` before dispatch. Pass both keywords for keyed input, omit both for unkeyed input, and handle invalid pairs where you construct the input. `idempotency_key` is a new helper keyword; supplying it alone also raises `ValueError`. The gateway rule and wire format do not change.

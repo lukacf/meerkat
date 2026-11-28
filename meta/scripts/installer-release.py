@@ -196,6 +196,50 @@ def toolchain_artifact_name(job, attempt):
     return f"installer-toolchain-{job}-{attempt}"
 
 
+SHARD_PLAN = re.compile(r"installer-shard-plan-([0-9]+)-([0-9]+)")
+SHARD_MATRIX = re.compile(r"(?m)^        shard: \[([0-9, ]*)\]$")
+
+
+def joined_attempts(artifacts, attempt, shards):
+    """Why the backend shards of a Forge run's attempt are not that one
+    attempt's executions, or None.
+
+    The installer workflow's backend job takes each backend shard's newest
+    execution across the run's attempts, so after a retry of some jobs a
+    green attempt can rest on shard executions of earlier attempts. That
+    serves a pull request's gate. A release binds the backend shards, the
+    frontend and the backend job of one attempt: every shard the workflow
+    declares (SHARDS, its matrix) must have planned in this attempt (each
+    uploads installer-shard-plan-<shard>-<the attempt it ran in>), which is
+    then its newest and the one the backend job took. The shards are the
+    workflow's, not the listing's: a listing that omits a shard's plan must
+    not make the run look like one attempt's.
+
+    Not covered, here or before: the agent-team-live job. The backend job
+    needs it, but nothing a release reads says which attempt it ran in."""
+    planned = {}
+    for name in artifacts:
+        match = SHARD_PLAN.fullmatch(name)
+        if match:
+            planned.setdefault(int(match.group(1)), set()).add(int(match.group(2)))
+
+    def named(some):
+        return ", ".join(str(shard) for shard in some)
+
+    reasons = []
+    undeclared = sorted(set(planned) - set(shards))
+    if undeclared:
+        reasons.append(f"lists a plan of backend shard {named(undeclared)}, which the installer workflow does not "
+                       "declare")
+    unlisted = [shard for shard in shards if shard not in planned]
+    if unlisted:
+        reasons.append(f"lists no plan of backend shard {named(unlisted)}")
+    others = [shard for shard in shards if shard in planned and attempt not in planned[shard]]
+    if others:
+        reasons.append(f"took the plan of another attempt for backend shard {named(others)}")
+    return "; ".join(reasons) or None
+
+
 def write_outputs(values):
     if os.environ.get("GITHUB_OUTPUT"):
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
@@ -683,8 +727,8 @@ def require_guide_release_sdk(objects, commit, tested):
             f"Release Forge from a commit whose {GUIDE_SDK_TREE} is the release's")
 
 
-def declared_toolchain(objects, files):
-    text = objects.blob_text(files[INSTALLER_CI])
+def declared_toolchain(text):
+    """The Python and Node versions the installer workflow (its TEXT) declares."""
     pythons = set(re.findall(r"python-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
     nodes = set(re.findall(r"node-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
     require(len(pythons) == 1 and len(nodes) == 1,
@@ -692,15 +736,25 @@ def declared_toolchain(objects, files):
     return {"python": pythons.pop(), "node": nodes.pop()}
 
 
+def declared_shards(text):
+    """The backend shards the installer workflow (its TEXT) declares: its
+    matrix, 0 to the count less one. The same blob as the toolchain, read once."""
+    matrices = SHARD_MATRIX.findall(text)
+    shards = [int(shard) for shard in matrices[0].split(",") if shard.strip()] if len(matrices) == 1 else []
+    require(shards and shards == list(range(len(shards))),
+            "the installer workflow must declare exactly one backend shard matrix, numbered from 0")
+    return shards
+
+
 def version_fits(observed, pattern, declared):
     match = re.fullmatch(pattern, observed) if isinstance(observed, str) else None
     return match is not None and (match.group(1) == declared or match.group(1).startswith(declared + "."))
 
 
-def run_toolchain(run_info, work):
+def run_toolchain(run_info, work, artifacts=None):
     """The versions each job of a Forge run recorded, from its toolchain artifacts."""
     run_id, attempt = run_info["id"], run_info["run_attempt"]
-    artifacts = run_artifacts(run_id)
+    artifacts = run_artifacts(run_id) if artifacts is None else artifacts
     recorded = {}
     for job in EVIDENCE_JOBS:
         name = toolchain_artifact_name(job, attempt)
@@ -740,7 +794,8 @@ def forge_ci_evidence(sha, work, objects=None):
     objects = objects or GitObjects()
     wanted = evidence_tuple(objects, sha)
     require_guide_release_sdk(objects, sha, wanted["trees"][GUIDE_SDK_TREE])
-    declared = declared_toolchain(objects, wanted["files"])
+    workflow = objects.blob_text(wanted["files"][INSTALLER_CI])
+    declared, shards = declared_toolchain(workflow), declared_shards(workflow)
     endpoint = rc.repo_endpoint(
         f"actions/workflows/{PurePosixPath(INSTALLER_CI).name}/runs?event=workflow_dispatch&status=success"
         f"&per_page={MAX_EVIDENCE_RUNS}")
@@ -754,7 +809,7 @@ def forge_ci_evidence(sha, work, objects=None):
         runs = [run for run in rc.api(endpoint)["workflow_runs"] if run.get("event") == "workflow_dispatch"
                 and run.get("path") == INSTALLER_CI and run.get("status") == "completed"
                 and run.get("conclusion") == "success" and run["repository"]["full_name"] == rc.repository()]
-        nearest = None
+        nearest = joined = None
         for run in sorted(runs, key=lambda run: (run["head_sha"] != sha, -run["id"])):
             observed = evidence_tuple(objects, rc.digest(run["head_sha"], "Forge run SHA", 40))
             differences = tuple_differences(wanted, observed)
@@ -763,12 +818,19 @@ def forge_ci_evidence(sha, work, objects=None):
                 continue
             if not run_jobs_green(run["id"], run["run_attempt"]):
                 continue
-            toolchain = run_toolchain(run, folder)
+            artifacts = run_artifacts(run["id"])
+            reason = joined_attempts(artifacts, run["run_attempt"], shards)
+            if reason:
+                joined = joined or f"run {run['id']} attempt {run['run_attempt']} {reason}"
+                continue
+            toolchain = run_toolchain(run, folder, artifacts)
             if toolchain is None or not toolchain_fits(declared, toolchain):
                 continue
             return {"run_id": run["id"], "run_attempt": run["run_attempt"], "head_sha": run["head_sha"],
                     "event": run["event"], "tuple": wanted, "toolchain": {"declared": declared, **toolchain}}
         detail = (f"; the newest green run {nearest[0]} differs in {', '.join(nearest[1])}" if nearest else "")
+        detail += (f"; {joined}; a release binds the backend shards, the frontend and the backend job of one attempt"
+                   if joined else "")
         raise Miss(f"none of {len(runs)} listed green dispatched run(s) tested these Forge inputs",
                    f"no green dispatched Forge run (backend and frontend) tested the Forge inputs at "
                    f"{sha}{detail}. "

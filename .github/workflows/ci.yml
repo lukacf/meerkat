@@ -2138,7 +2138,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-integration-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Named by the row's index: a reader row's name holds a colon, which
+          # an artifact name cannot hold.
+          name: sccache-log-integration-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -2281,7 +2283,10 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-closure-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Named by the job and the row's index: a partitioned row's name
+          # holds a slash, which an artifact name cannot hold, and the index
+          # starts again in closure-tests-rest.
+          name: sccache-log-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -2381,7 +2386,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-closure-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3

@@ -2189,8 +2189,11 @@ and `byte_size`.
 
 <Accordion title="Skill resources and functions">
 `skill_list_resources` takes `source_uuid` and `skill_name` and returns the
-skill's artifact descriptors. `skill_read_resource` adds a required `path` and
-returns that artifact's content.
+skill's artifact descriptors. When the resource listing answers not found for
+a skill the skill listing shows, the call fails with an error that says the
+skill is listed and that no source returned a resource listing for it, not
+with `skill not found` and not with an empty list. `skill_read_resource` adds
+a required `path` and returns that artifact's content.
 
 `skill_invoke_function` takes `source_uuid`, `skill_name`, `function_name`, and
 optional JSON-object `arguments`. Its success response echoes the canonical

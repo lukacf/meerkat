@@ -16,8 +16,10 @@
 //! (`DecisionOpeningsAtStart::read`, which a gateway makes before it reports
 //! that it is ready) and noticed from that reading
 //! (`StdioDecisionConnection::notice_openings_from`): a connection that
-//! serves calls the store of its own accord only for a decision its own
-//! runtime opened. The last two rows count the store's calls to pin that.
+//! serves lists nothing at its start. It reads each decision once more
+//! right before its notice and notices only one that is still open; for a
+//! decision of the reading that read records nothing. The rows after the
+//! launch rows count the calls of a store in memory to pin that.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -722,6 +724,8 @@ struct CountingStore {
     calls: AtomicUsize,
     /// How many of the calls wrote, or tried to write, a row.
     writes: AtomicUsize,
+    /// How many of the calls were lists.
+    lists: AtomicUsize,
     /// How many of the next lists answer that the store is held.
     lists_to_refuse: AtomicUsize,
 }
@@ -735,6 +739,11 @@ impl CountingStore {
     /// How many of them were writes.
     fn writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
+    }
+
+    /// How many of them were lists.
+    fn lists(&self) -> usize {
+        self.lists.load(Ordering::SeqCst)
     }
 
     fn called(&self) {
@@ -774,6 +783,7 @@ impl DecisionStore for CountingStore {
         limit: usize,
     ) -> Result<DecisionPage, ApprovalStoreError> {
         self.called();
+        self.lists.fetch_add(1, Ordering::SeqCst);
         let refuse = self
             .lists_to_refuse
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -840,20 +850,20 @@ async fn let_the_tasks_run() {
     }
 }
 
-/// A connection that serves calls the decision store of its own accord
-/// only for a decision its own runtime opened. The decisions already open
-/// are read at its start (`DecisionOpeningsAtStart::read`: a gateway makes
-/// that reading before it reports that it is ready), and their notices are
-/// written from the reading. Another owner of the same store that writes as
-/// soon as the gateway is ready so meets no read of the gateway's: every
-/// connection to the store file, a read's too, opens it for writing, and a
-/// write that meets one answers at once that the store is held.
+/// A connection that serves lists nothing at its start. The decisions
+/// already open are listed in the reading (`DecisionOpeningsAtStart::read`:
+/// a gateway makes it before it reports that it is ready); once it serves,
+/// the connection reads each of them once more right before its notice, in
+/// a read that records nothing, and makes no other call of the store until
+/// its runtime opens a decision. Another owner of the same store that
+/// writes its first decision as soon as the gateway is ready so meets no
+/// list of the gateway's.
 ///
-/// The store here counts its calls. Between the reading and the runtime's
-/// first opening there is none, though the connection notices the decision
-/// the reading found; the runtime's own opening is read again, as before.
+/// The store here counts its calls. After the reading: exactly one read for
+/// the one decision of the reading, no list and no write; the runtime's own
+/// opening is then read again, as before.
 #[tokio::test]
-async fn a_serving_connection_calls_the_store_only_for_a_decision_its_runtime_opens() {
+async fn a_serving_connection_reads_each_decision_of_the_reading_once_and_lists_nothing() {
     let (store, owner, connection, notices) = counted();
     let before = hold(&owner, "operation-before-the-start");
 
@@ -867,17 +877,29 @@ async fn a_serving_connection_calls_the_store_only_for_a_decision_its_runtime_op
         "the reading at the start calls the store"
     );
     let after_the_reading = store.calls();
+    let lists_of_the_reading = store.lists();
+    let writes_before_the_start = store.writes();
 
-    // The connection serves: the decision of the reading is noticed, and
-    // the store was not called for it.
+    // The connection serves: the decision of the reading is read once
+    // more and noticed. Nothing is listed and nothing is written.
     let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
     let_the_tasks_run().await;
     assert_eq!(notices.events_of(&before), ["held"]);
     assert_eq!(notices.all().len(), 1);
     assert_eq!(
         store.calls(),
-        after_the_reading,
-        "a serving connection called the store before its runtime opened a decision"
+        after_the_reading + 1,
+        "one read for the one decision of the reading, and no other call"
+    );
+    assert_eq!(
+        store.lists(),
+        lists_of_the_reading,
+        "a serving connection listed the store"
+    );
+    assert_eq!(
+        store.writes(),
+        writes_before_the_start,
+        "the read before a notice of the reading wrote a row"
     );
 
     // The runtime opens a decision: the connection reads it again and
@@ -1057,6 +1079,35 @@ async fn a_reading_at_the_start_that_the_store_refuses_notices_nothing_and_the_c
     following.abort();
 }
 
+/// A decision of the reading that the host withdrew before its notice is
+/// not noticed: the connection reads it once more right before the notice
+/// and finds it no longer open. The decision that stayed open is noticed.
+#[tokio::test]
+async fn a_decision_of_the_reading_withdrawn_before_its_notice_is_not_noticed() {
+    let (_store, owner, connection, notices) = counted();
+    let ended = hold(&owner, "operation-withdrawn-before-its-notice");
+    let open = hold(&owner, "operation-still-open");
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+
+    // Between the reading and the notice: the host withdraws one.
+    owner
+        .withdraw(&ended.decision_id, &DecisionWithdrawer::Host)
+        .expect("withdraw");
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&open), ["held"]);
+    assert!(
+        notices.events_of(&ended).is_empty(),
+        "a decision that ended before its notice is not noticed: {:?}",
+        notices.all()
+    );
+
+    following.abort();
+}
+
 /// A clock a row sets.
 struct RowClock(AtomicU64);
 
@@ -1100,6 +1151,53 @@ async fn a_decision_past_its_deadline_at_the_reading_is_not_noticed() {
         notices.events_of(&late).is_empty(),
         "a decision past its deadline is not noticed: {:?}",
         notices.all()
+    );
+
+    following.abort();
+}
+
+/// A decision of the reading whose deadline passed before its notice is not
+/// noticed, and the read that finds it expired records nothing: the store's
+/// write count does not move. Its expiry is left to whoever records it.
+#[tokio::test]
+async fn a_decision_of_the_reading_past_its_deadline_before_its_notice_is_not_noticed_or_recorded()
+{
+    let store = Arc::new(CountingStore::default());
+    let backing: Arc<dyn DecisionStore> = store.clone();
+    let clock = Arc::new(RowClock(AtomicU64::new(1_000_000)));
+    let owner = DurableDecisionService::with_clock(backing, clock.clone());
+    let notices = Arc::new(Notices::new(None));
+    let sink: Arc<dyn DecisionNoticeSink> = notices.clone();
+    let connection = Arc::new(StdioDecisionConnection::new(None, sink));
+
+    let late = hold_until(&owner, "operation-past-its-deadline", 1_060_000);
+    let open = hold(&owner, "operation-still-open");
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+
+    // Between the reading and the notice: the deadline of one passes.
+    clock.0.store(2_000_000, Ordering::SeqCst);
+    let calls_before_the_start = store.calls();
+    let writes_before_the_start = store.writes();
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&open), ["held"]);
+    assert!(
+        notices.events_of(&late).is_empty(),
+        "a decision past its deadline is not noticed: {:?}",
+        notices.all()
+    );
+    assert_eq!(
+        store.calls(),
+        calls_before_the_start + 2,
+        "one read for each of the two decisions of the reading"
+    );
+    assert_eq!(
+        store.writes(),
+        writes_before_the_start,
+        "the read that found the expiry recorded it"
     );
 
     following.abort();

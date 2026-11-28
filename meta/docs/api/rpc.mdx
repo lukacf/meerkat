@@ -3554,10 +3554,16 @@ process makes to the same store: a decision another process opens after the
 gateway's reading at its start (the moments between that reading and the
 answer to `meta/init` included) is not told to the host without being asked;
 the host finds it with `meta/decisions/list`. After that reading a gateway
-reads the store for a notice only for a decision its own runtime opens, and
-lists the open decisions again only when it fell behind those openings. Each
-of those reads is a moment at which another process that writes to the store
-can be answered that the store is held.
+reads the store for a notice once for each decision, right before its
+notice, and lists the open decisions again only when it fell behind its own
+runtime's openings. Each of those reads is a moment at which another process
+that writes to the store can be answered that the store is held.
+
+A decision that is no longer open when its notice is due (decided, withdrawn
+or past its deadline since the gateway read or opened it) is not noticed.
+For a decision of the reading at the start that last read records nothing:
+an expiry it sees is recorded by the decision's executor at its next pass,
+or by the next request that reads the decision, not by the notice.
 
 A notice of `kind` `ask_user.questions` says that a question set is open in
 the store. Whether the host can read and answer it depends on the launch: a

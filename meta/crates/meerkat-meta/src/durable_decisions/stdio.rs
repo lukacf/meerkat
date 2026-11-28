@@ -10,10 +10,12 @@
 //! the row is stored, and of each decision that was open in the store when
 //! the gateway read it at its start ([`DecisionOpeningsAtStart::read`], made
 //! before the gateway reports that it is ready: once the connection serves
-//! it calls the store of its own accord for no decision but one its own
-//! runtime opened, and to list the open decisions again when its
-//! subscription fell behind those openings). A decision another process
-//! opens in the store after that reading is not noticed without a list.
+//! it calls the store of its own accord only to read a decision again
+//! right before its notice, and to list the open decisions again when its
+//! subscription fell behind the runtime's openings). A decision that is no
+//! longer open when its notice is due is not noticed. A decision another
+//! process opens in the store after that reading is not noticed without a
+//! list.
 //! And once when it lists it: before a
 //! `meta/decisions/list` answers, the connection writes one
 //! `meta/decisions/notice` for each open decision of the page that no list
@@ -160,19 +162,22 @@ enum Presented {
 ///
 /// A gateway reads it BEFORE it reports that it is ready, and hands it to
 /// [`StdioDecisionConnection::notice_openings_from`] once the connection
-/// serves. The store is so read while nothing waits on the gateway yet, and
-/// the connection that serves reads it of its own accord no more. That
+/// serves. The store is so listed while nothing waits on the gateway yet,
+/// and the connection that serves lists it at its start no more. That
 /// matters to another owner of the same store (another process on the state
 /// directory) that writes as soon as the gateway is ready: every connection
 /// to the store file, a read's too, opens it for writing and settles its
 /// journal mode and schema, and a write that meets one answers at once that
-/// the store is held, without a wait. A read that found the file while such
-/// a first write was still creating it could make that write fail.
+/// the store is held, without a wait. A list that found the file while such
+/// a first write was still creating it could make that write fail. The
+/// reading itself is that kind of connection too, made before Ready: on a
+/// store file that exists it is not without effect on the file, and it
+/// opens nothing when the file does not exist.
 pub struct DecisionOpeningsAtStart {
     owner: DurableDecisionService,
     openings: DecisionOpenings,
-    /// The decisions open at the reading, as read.
-    open: Vec<StoredDecision>,
+    /// The decisions that were open at the reading.
+    open: Vec<DecisionId>,
 }
 
 impl std::fmt::Debug for DecisionOpeningsAtStart {
@@ -186,10 +191,12 @@ impl std::fmt::Debug for DecisionOpeningsAtStart {
 impl DecisionOpeningsAtStart {
     /// Subscribe to the decisions `owner` opens from now on, then read the
     /// decisions that are open in its store, page by page: a decision is
-    /// open in that reading or announced after it. A page that cannot be
-    /// read (tried again a few times while another call writes the store)
-    /// ends the reading with what was read: the notices of the rest wait
-    /// for the host's list.
+    /// open in that reading or announced after it. The reading lists and
+    /// records nothing: a decision past its deadline reads as expired, is
+    /// left out, and its expiry is left to whoever records it. A page that
+    /// cannot be read (tried again a few times while another call writes
+    /// the store) ends the reading with what was read: the notices of the
+    /// rest wait for the host's list.
     ///
     /// A launch that keeps no durable decisions has none to tell of, and a
     /// candidate launch acts nowhere: for an owner of either this reads
@@ -221,7 +228,12 @@ impl DecisionOpeningsAtStart {
             let next = page
                 .next_after
                 .filter(|next| after.as_deref() != Some(next.as_str()));
-            open.extend(page.decisions);
+            open.extend(
+                page.decisions
+                    .into_iter()
+                    .filter(|row| row.state.phase == DecisionPhase::Open)
+                    .map(|row| row.decision_id),
+            );
             match next {
                 Some(next) => after = Some(next),
                 None => break,
@@ -285,15 +297,20 @@ impl StdioDecisionConnection {
     /// the `held` notice of each decision that was open when `start` was
     /// read (one held before a restart, or by another owner on the store),
     /// and of each decision the runtime's owner opens after that reading,
-    /// once its row is stored. A decision of the reading is noticed as it
-    /// was read, with no further call of the store: from its start until
-    /// its runtime opens a decision, this task calls the store for
-    /// nothing. A decision the owner opens is read again before its notice
-    /// and skipped unless it is still open; reading it again records an
-    /// expiry the read observes, as every read of a decision does, and of
-    /// an open decision it writes nothing. A subscription that fell behind
-    /// reads the open decisions again. Each decision is pushed at most
-    /// once. What was pushed is this task's own and grows with the
+    /// once its row is stored. Each decision is read again right before
+    /// its notice and skipped unless it is still open: one that was
+    /// decided, withdrawn or passed its deadline since it was read or
+    /// opened is not noticed. For a decision of the reading that read is
+    /// the owner's narrowed one, which records nothing: this task wrote no
+    /// row for a decision it did not see opened, and an expiry it sees
+    /// there is recorded by the decision's executor or by the next read
+    /// that records. Those reads, one for each decision of the reading and
+    /// no list, are all this task calls the store for until its runtime
+    /// opens a decision. A decision the owner opens is read as every read
+    /// of a decision is: it records an expiry it observes, and of an open
+    /// decision it writes nothing. A subscription that fell behind lists
+    /// the open decisions again and reads each. Each decision is pushed at
+    /// most once. What was pushed is this task's own and grows with the
     /// connection's life, as what its lists noticed does: it takes no lock
     /// of the connection, so a slow pipe holds up no list and no decide.
     /// The host's list does not count a push and writes its own notice.
@@ -310,8 +327,10 @@ impl StdioDecisionConnection {
             open,
         } = start;
         let mut pushed = HashSet::new();
-        for row in &open {
-            if !self.push_read(row, &mut pushed).await {
+        // The decisions of the reading: seen, never written by this task.
+        let reads_only = owner.for_candidate_launch();
+        for decision_id in &open {
+            if !self.push_held(&reads_only, decision_id, &mut pushed).await {
                 return;
             }
         }
@@ -346,27 +365,6 @@ impl StdioDecisionConnection {
         if let Some(start) = DecisionOpeningsAtStart::read(owner).await {
             self.notice_openings_from(start).await;
         }
-    }
-
-    /// Push the `held` notice of `row`, a decision read open at the
-    /// connection's start, unless it was pushed. Nothing is read: the
-    /// notice is of the row as it was read. Answers `false` once the
-    /// connection can write nothing more.
-    async fn push_read(&self, row: &StoredDecision, pushed: &mut HashSet<DecisionId>) -> bool {
-        if !self.open.load(Ordering::SeqCst) {
-            return false;
-        }
-        if pushed.contains(&row.decision_id) || row.state.phase != DecisionPhase::Open {
-            return true;
-        }
-        let Ok(line) = wire::notice_line(&held_notice(row)) else {
-            return true;
-        };
-        if !self.notices.deliver(line).await {
-            return false;
-        }
-        pushed.insert(row.decision_id.clone());
-        true
     }
 
     /// Push the `held` notice of each open decision of `owner` that was not
@@ -408,9 +406,11 @@ impl StdioDecisionConnection {
     }
 
     /// Push the `held` notice of `decision_id` unless it was pushed: the
-    /// decision is read again from the store, and only one that is still
-    /// open is noticed. Answers `false` once the connection can write
-    /// nothing more.
+    /// decision is read again from the store through `owner`, and only one
+    /// that is still open is noticed. An owner narrowed to reads
+    /// (`for_candidate_launch`) records nothing by that read; the runtime's
+    /// own owner records an expiry the read observes. Answers `false` once
+    /// the connection can write nothing more.
     async fn push_held(
         &self,
         owner: &DurableDecisionService,

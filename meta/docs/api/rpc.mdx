@@ -3535,8 +3535,7 @@ its own runtime opens is held (after the hold is stored), and, once the
 connection serves, for each decision that was open when the gateway read
 its decision store at its start, before it answered `meta/init` (one held
 before a restart, or by another process on the same store before then). A
-gateway that serves reads the store for such a notice no more, so its start
-is the one moment it looks. A question set a
+question set a
 member asked is such a decision (`kind` `ask_user.questions`), so a host
 hears of it with no list call. Before a `meta/decisions/list` answers, the
 gateway also writes one notice for each open decision of the page that no
@@ -3549,6 +3548,16 @@ listed `held` while it waited for its review, and presented to the stdio
 operator at a later list.) A
 host that reads the pipe itself receives these notifications whether or not
 it lists decisions; a notification needs no answer.
+
+What these notices do not cover. The gateway learns of no write another
+process makes to the same store: a decision another process opens after the
+gateway's reading at its start (the moments between that reading and the
+answer to `meta/init` included) is not told to the host without being asked;
+the host finds it with `meta/decisions/list`. After that reading a gateway
+reads the store for a notice only for a decision its own runtime opens, and
+lists the open decisions again only when it fell behind those openings. Each
+of those reads is a moment at which another process that writes to the store
+can be answered that the store is held.
 
 A notice of `kind` `ask_user.questions` says that a question set is open in
 the store. Whether the host can read and answer it depends on the launch: a

@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,9 @@ use meerkat_meta::{
 };
 use meerkat_mob::MobDefinition;
 use meerkat_runtime::ask_user::{ASK_USER_QUESTIONS_KIND, AskUserHold, hold_ask_user};
-use meerkat_runtime::decision::{DecisionWithdrawer, DurableDecisionService};
+use meerkat_runtime::decision::{
+    DecisionClock, DecisionClockError, DecisionWithdrawer, DurableDecisionService,
+};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
@@ -122,6 +124,16 @@ fn agent_requester(name: &str) -> DecisionPrincipalKey {
 
 /// Hold one decision of the test kind for `team:owners`.
 fn hold(owner: &DurableDecisionService, subject: &str) -> StoredDecision {
+    hold_until(owner, subject, u64::MAX / 2)
+}
+
+/// Hold one decision of the test kind for `team:owners` that waits until
+/// `deadline_at_ms`.
+fn hold_until(
+    owner: &DurableDecisionService,
+    subject: &str,
+    deadline_at_ms: u64,
+) -> StoredDecision {
     owner
         .hold(
             DecisionHoldRequest::new(
@@ -132,7 +144,7 @@ fn hold(owner: &DurableDecisionService, subject: &str) -> StoredDecision {
                 DecisionRequestBody::from_value(&json!({})).expect("body"),
                 agent_requester("builder"),
                 ApproverId::new("team:owners").expect("approver"),
-                u64::MAX / 2,
+                deadline_at_ms,
                 DecisionRendering::new(RENDERING).expect("rendering"),
                 DecisionRenderer::new("render.v1").expect("renderer"),
             ),
@@ -702,11 +714,16 @@ model = "gpt-5.5"
 }
 
 /// A decision store that counts the calls made of it, over rows kept in
-/// memory.
+/// memory. A row can script it to refuse its next lists as a store does
+/// that another owner holds.
 #[derive(Default)]
 struct CountingStore {
     rows: InMemoryDecisionStore,
     calls: AtomicUsize,
+    /// How many of the calls wrote, or tried to write, a row.
+    writes: AtomicUsize,
+    /// How many of the next lists answer that the store is held.
+    lists_to_refuse: AtomicUsize,
 }
 
 impl CountingStore {
@@ -715,8 +732,18 @@ impl CountingStore {
         self.calls.load(Ordering::SeqCst)
     }
 
+    /// How many of them were writes.
+    fn writes(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+
     fn called(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wrote(&self) {
+        self.called();
+        self.writes.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -727,7 +754,7 @@ impl DecisionStore for CountingStore {
     }
 
     fn insert_if_absent(&self, row: &StoredDecision) -> Result<(), ApprovalStoreError> {
-        self.called();
+        self.wrote();
         self.rows.insert_if_absent(row)
     }
 
@@ -736,7 +763,7 @@ impl DecisionStore for CountingStore {
         expected_revision: u64,
         row: &StoredDecision,
     ) -> Result<(), ApprovalStoreError> {
-        self.called();
+        self.wrote();
         self.rows.replace_if_revision(expected_revision, row)
     }
 
@@ -747,6 +774,15 @@ impl DecisionStore for CountingStore {
         limit: usize,
     ) -> Result<DecisionPage, ApprovalStoreError> {
         self.called();
+        let refuse = self
+            .lists_to_refuse
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
+        if refuse {
+            return Err(ApprovalStoreError::Contended);
+        }
         self.rows.list(filter, after, limit)
     }
 
@@ -888,6 +924,183 @@ async fn a_serving_connection_over_an_empty_store_calls_it_for_nothing() {
         "a serving connection called a store that holds no decision"
     );
     assert!(!following.is_finished(), "the connection goes on following");
+
+    following.abort();
+}
+
+/// A decision the runtime opens AFTER the reading at the start and BEFORE
+/// the connection serves is noticed, once: the reading holds the
+/// subscription it took before it listed, so the opening waits there until
+/// the task reads it. The decision of the reading is noticed too, once.
+#[tokio::test]
+async fn a_decision_the_runtime_opens_between_the_reading_and_the_connections_start_is_noticed_once()
+ {
+    let (_store, owner, connection, notices) = counted();
+    let before = hold(&owner, "operation-before-the-reading");
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+
+    // The gateway is between its reading and its Ready here.
+    let between = hold(&owner, "operation-between");
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&before), ["held"]);
+    assert_eq!(notices.events_of(&between), ["held"]);
+    assert_eq!(notices.all().len(), 2, "each once: {:?}", notices.all());
+
+    following.abort();
+}
+
+/// A subscription that fell behind between the reading and the
+/// connection's start loses nothing: the task reads that it missed
+/// openings, lists the open decisions again and notices each of them once,
+/// the decision of the reading included. That list is a call of the store
+/// after the connection serves.
+#[tokio::test]
+async fn a_subscription_that_fell_behind_before_the_connections_start_notices_each_decision_once() {
+    let (store, owner, connection, notices) = counted();
+    let mut held = vec![hold(&owner, "operation-before-the-reading")];
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+
+    // More openings than the subscription keeps, all before the task reads
+    // one of them.
+    for index in 0..260 {
+        held.push(hold(&owner, &format!("operation-{index}")));
+    }
+    let before_the_task = store.calls();
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    let seen = notices.all();
+    assert_eq!(
+        seen.len(),
+        held.len(),
+        "every decision is noticed, and none twice"
+    );
+    let times = times_noticed(&seen);
+    for decision in &held {
+        assert_eq!(
+            times.get(&decision.decision_id.to_string()),
+            Some(&1),
+            "{} is noticed once",
+            decision.decision_id
+        );
+    }
+    assert!(
+        store.calls() > before_the_task,
+        "a subscription that fell behind reads the store again"
+    );
+
+    following.abort();
+}
+
+/// A reading at the start that the store refuses is made again a few times
+/// and then succeeds: the decision that was open is noticed. The waits
+/// between the tries are the row's paused clock's, so no time passes.
+#[tokio::test(start_paused = true)]
+async fn a_reading_at_the_start_that_the_store_first_refuses_is_made_again() {
+    let (store, owner, connection, notices) = counted();
+    let before = hold(&owner, "operation-before-the-reading");
+    store.lists_to_refuse.store(2, Ordering::SeqCst);
+
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+    assert_eq!(store.lists_to_refuse.load(Ordering::SeqCst), 0);
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&before), ["held"]);
+
+    following.abort();
+}
+
+/// A reading at the start that the store refuses every time ends with
+/// nothing read, and the connection starts all the same: nothing is
+/// noticed at the opening (the decision that was open then waits for the
+/// host's own list), and a decision the runtime opens later is noticed.
+#[tokio::test(start_paused = true)]
+async fn a_reading_at_the_start_that_the_store_refuses_notices_nothing_and_the_connection_follows()
+{
+    let (store, owner, connection, notices) = counted();
+    let before = hold(&owner, "operation-before-the-reading");
+    store.lists_to_refuse.store(usize::MAX, Ordering::SeqCst);
+
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("a reading the store refuses is still a reading");
+    store.lists_to_refuse.store(0, Ordering::SeqCst);
+    let after_the_reading = store.calls();
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert!(
+        notices.all().is_empty(),
+        "nothing was read at the start, so nothing is noticed at the opening: {:?}",
+        notices.all()
+    );
+    assert_eq!(
+        store.calls(),
+        after_the_reading,
+        "the connection does not read again what its start could not read"
+    );
+
+    let later = hold(&owner, "operation-after-the-start");
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&later), ["held"]);
+    assert!(notices.events_of(&before).is_empty());
+
+    following.abort();
+}
+
+/// A clock a row sets.
+struct RowClock(AtomicU64);
+
+impl DecisionClock for RowClock {
+    fn now_ms(&self) -> Result<u64, DecisionClockError> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// A decision whose deadline passed before the reading at the start is not
+/// noticed at the opening, and the reading records nothing for it: the
+/// list reads it as expired at its clock and writes no row.
+#[tokio::test]
+async fn a_decision_past_its_deadline_at_the_reading_is_not_noticed() {
+    let store = Arc::new(CountingStore::default());
+    let backing: Arc<dyn DecisionStore> = store.clone();
+    let clock = Arc::new(RowClock(AtomicU64::new(1_000_000)));
+    let owner = DurableDecisionService::with_clock(backing, clock.clone());
+    let notices = Arc::new(Notices::new(None));
+    let sink: Arc<dyn DecisionNoticeSink> = notices.clone();
+    let connection = Arc::new(StdioDecisionConnection::new(None, sink));
+
+    let late = hold_until(&owner, "operation-past-its-deadline", 1_060_000);
+    let open = hold(&owner, "operation-still-open");
+    clock.0.store(2_000_000, Ordering::SeqCst);
+    let writes_before_the_reading = store.writes();
+
+    let start = DecisionOpeningsAtStart::read(owner.clone())
+        .await
+        .expect("an owner that keeps decisions is read");
+    assert_eq!(
+        store.writes(),
+        writes_before_the_reading,
+        "the reading writes nothing, the expiry it observes included"
+    );
+
+    let following = tokio::spawn(Arc::clone(&connection).notice_openings_from(start));
+    let_the_tasks_run().await;
+    assert_eq!(notices.events_of(&open), ["held"]);
+    assert!(
+        notices.events_of(&late).is_empty(),
+        "a decision past its deadline is not noticed: {:?}",
+        notices.all()
+    );
 
     following.abort();
 }

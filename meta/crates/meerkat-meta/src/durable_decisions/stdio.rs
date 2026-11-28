@@ -11,7 +11,10 @@
 //! the gateway read it at its start ([`DecisionOpeningsAtStart::read`], made
 //! before the gateway reports that it is ready: once the connection serves
 //! it calls the store of its own accord for no decision but one its own
-//! runtime opened). And once when it lists it: before a
+//! runtime opened, and to list the open decisions again when its
+//! subscription fell behind those openings). A decision another process
+//! opens in the store after that reading is not noticed without a list.
+//! And once when it lists it: before a
 //! `meta/decisions/list` answers, the connection writes one
 //! `meta/decisions/notice` for each open decision of the page that no list
 //! of the connection noticed yet, whether or not it was pushed. At a list, a
